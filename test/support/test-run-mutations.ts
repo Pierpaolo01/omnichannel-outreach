@@ -131,6 +131,16 @@ export const TEST_RUN_MUTATIONS: Readonly<Record<string, TestRunMutation>> = {
     seed: 2,
     rules: { stopTestOnEdit: (s) => s },
   },
+  // Question Q7 answered (council on bebdc06, item 2): the version guard without the SMS conversations, so an evaluation
+  // made while another test owned the conversation is stored after that test released it.
+  "a skip is stored without re-checking the bindings": {
+    invariant: "T11",
+    seed: 25,
+    rules: {
+      versionsMatch: (a, b) =>
+        a.subject.version === b.subject.version && a.campaign.version === b.campaign.version && a.campaign.definitionVersion === b.campaign.definitionVersion && JSON.stringify(a.lead) === JSON.stringify(b.lead),
+    },
+  },
 };
 
 /** State a mutation keeps between its patch and its rules, reset for every run by its patch. */

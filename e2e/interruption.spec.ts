@@ -89,7 +89,7 @@ test("sending not running, a provider not answering and leads with no way left: 
       ...body,
       sendingInterrupted: { since: new Date(f.harness.clock).toISOString(), cause: "not_running", lastFailedRead: null, lastRoundFailedAt: null },
       waitingOnProvider: [{ channel: "sms", since: null, sends: 2 }],
-      noUsableChannel: [{ enrollmentId: "e-1", campaignId: f.campaign, person: { id: "person-1", name: "Rob Lane" }, company, campaign, endedAt: body.overdueCallbacks[0]?.dueAt ?? "2026-11-09T09:00:00.000Z", channels: [{ channel: "email", why: "missing" }] }],
+      noUsableChannel: [{ enrollmentId: "e-1", campaignId: f.campaign, person: { id: "person-1", name: "Rob Lane" }, company, campaign, endedAt: body.overdueCallbacks[0]?.dueAt ?? "2026-11-09T09:00:00.000Z", channels: [{ channel: "email", why: "missing", owners: [] }] }],
     });
   });
   await page.clock.setFixedTime(f.harness.clock);

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
-import { UNDO_SINCE_18 } from "../../../test/support/undo-migrations.ts";
+import { UNDO_SINCE_18, UNDO_21 } from "../../../test/support/undo-migrations.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { FakeAccount } from "../../../test/support/fake-email-port.ts";
 import type { CampaignDefinition } from "../../domain/sequence/definition.ts";
@@ -105,7 +105,7 @@ async function upgrade(undo: string, withTestRun: boolean) {
   await before.store.close();
 
   const old = new DatabaseSync(file);
-  old.exec(undo);
+  old.exec(UNDO_21 + undo);
   expect(schemaOf(old, "sender_accounts")).toContain("CHECK (capacity > 0)");
   const kept = {
     accounts: old.prepare("SELECT * FROM sender_accounts").all(),

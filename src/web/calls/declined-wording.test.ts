@@ -156,12 +156,16 @@ describe("every track state has a preview sentence and a record sentence (counci
       no_more_calls: ["Email track 2 will not call them: no call is made to them again.", "Email track 2 will not call them: no call is made to them again."],
       skipped_unworked: ["Email track 2 was skipped: its call wasn’t made within its skip limit.", "Email track 2 was skipped: its call wasn’t made within its skip limit."],
       skipped_no_channel: ["Email track 2 is skipped: there is nothing to reach them on for it.", "Email track 2 was skipped: there is nothing to reach them on for it."],
+      skipped_conversation_taken: [
+        "Email track 2 was skipped: their mobile was already in a text conversation with campaign Spring clinics on every number this campaign can use.",
+        "Email track 2 was skipped: their mobile was already in a text conversation with campaign Spring clinics on every number this campaign can use.",
+      ],
       skipped: ["Email track 2 was skipped.", "Email track 2 was skipped."],
       stopped: ["Email track 2 will not start.", "Email track 2 did not start: their outreach in this campaign stopped."],
       stopped_after_start: ["Email track 2 stops.", "Email track 2 stopped: their outreach in this campaign stopped."],
     };
     for (const [state, [preview, record]] of Object.entries(table) as [DeclineTrackView["state"], [string, string]][]) {
-      const a = (state === "waiting" ? { track, state, startsAt: "2026-11-14T01:05:00.000Z" } : { track, state, startsAt: null }) as DeclineTrackView;
+      const a = (state === "waiting" ? { track, state, startsAt: "2026-11-14T01:05:00.000Z" } : { track, state, startsAt: null, owners: [{ name: "Spring clinics", test: false }] }) as DeclineTrackView;
       expect(declineTrackLine(a, "preview", "Europe/London"), state).toBe(preview);
       expect(declineTrackLine(a, "record", "Europe/London"), state).toBe(record);
     }

@@ -16,7 +16,7 @@ import {
   retryFailures,
 } from "../../domain/sequence/dispatch.ts";
 import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
-import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, replyMatches, smsReplyOwner, withdrawalDue } from "../../domain/sequence/progress.ts";
+import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, releaseUnsentBindings, replyMatches, sameConversations, smsReplyOwner, stillSettled, withdrawalDue } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
 import { reconcileEdit, stillRunnable } from "../../domain/sequence/reconcile.ts";
 import { launchCheck } from "../../domain/sequence/blockers.ts";
@@ -102,8 +102,15 @@ export interface Rules {
   readonly reconcileEdit: typeof reconcileEdit;
   /** A running edit's three launch blockers, over what its leads as the edit leaves them can still run (review bot on 7afa03d). */
   readonly runningCheck: (definition: Parameters<typeof launchCheck>[0], leadsAfter: readonly SubjectState[], leads: Parameters<typeof launchCheck>[1], accounts: Parameters<typeof launchCheck>[2]) => ReturnType<typeof launchCheck>;
-  /** The version guard (2.5): a change computed from `computedFrom` applies only if nothing it read has changed. */
+  /**
+   * The version guard (2.5): a change computed from `computedFrom` applies only if nothing it read has changed, the SMS
+   * conversations of its mobiles included (another subject's state: question Q7 answered).
+   */
   readonly versionsMatch: (computedFrom: SubjectState, current: SubjectState) => boolean;
+  /** Releases the subject's own bindings with nothing sent, in every write (question Q7 answered, point 10). */
+  readonly releaseUnsent: typeof releaseUnsentBindings;
+  /** Whether the claim stage's "nothing ready" for a subject still holds (`stillSettled`): the seam of its mutation. */
+  readonly readinessHolds: typeof stillSettled;
   /** Ticket 20a: the interruption ending at an instant, from the last heartbeat (more than INTERRUPTION_GAP before it). */
   readonly interruptionOf: typeof interruptionOf;
   /** Ticket 20a: what an interruption does to a lead: nothing (it is not a pause). */
@@ -180,7 +187,10 @@ export const DEFAULT_RULES: Rules = {
     a.subject.version === b.subject.version &&
     a.campaign.version === b.campaign.version &&
     a.campaign.definitionVersion === b.campaign.definitionVersion &&
-    JSON.stringify(a.lead) === JSON.stringify(b.lead),
+    JSON.stringify(a.lead) === JSON.stringify(b.lead) &&
+    sameConversations(a, b),
+  releaseUnsent: releaseUnsentBindings,
+  readinessHolds: stillSettled,
   interruptionOf,
   afterInterruption,
   rescheduled: rescheduledSteps,

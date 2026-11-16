@@ -250,7 +250,7 @@ describe("SMS conversations are campaign-local (ADR 0003 4.5)", () => {
     expect(texts(PAT_MOBILE).map((d) => `${d.sender}/${d.stepId}`)).toEqual([`${N1}/m1`, `${N2}/m1`, `${N1}/m2`]);
   });
 
-  test("with no free number the second campaign's SMS track is held and listed; a late reply on the first conversation reaches the first campaign after it ended", async () => {
+  test("with no free number the second campaign's SMS track is skipped, not held or listed; a late reply on the first conversation reaches the first campaign after it ended", async () => {
     const { h, campaign, texts } = await world();
     h.clock = MONDAY_9;
     const a = await campaign("A", [track("t1", "sms", [text("m1")])], [N1]);
@@ -259,18 +259,19 @@ describe("SMS conversations are campaign-local (ADR 0003 4.5)", () => {
     const b = await campaign("B", [track("t1", "sms", [text("m1")])], [N1]);
     await h.advanceTo(MONDAY_9 + 2 * H);
     expect(texts(PAT_MOBILE).map((d) => d.sender)).toEqual([N1]);
-    const held = await h.progress(b("Pat Oneil"));
-    expect(held.status).toBe("queued");
-    expect(held.tracks[0]?.hold).toBe("sms_conversation_taken");
+    const skipped = await h.progress(b("Pat Oneil"));
+    // Pat's only channel in B was that SMS track (question Q7 answered).
+    expect(skipped.status).toBe("finished_no_usable_channel");
+    expect(skipped.tracks[0]).toMatchObject({ finishReason: "skipped_conversation_taken", hold: null });
     const attention = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body;
-    expect(attention.heldTracks).toContainEqual({ enrollmentId: b("Pat Oneil"), trackId: "t1", reason: "sms_conversation_taken" });
+    expect(attention.heldTracks).toEqual([]);
     h.sms.prospectTexts(PAT_MOBILE, "Late answer");
     await h.advanceTo(MONDAY_9 + 3 * H);
     expect((await h.progress(a("Pat Oneil"))).status).toBe("replied");
-    expect((await h.progress(b("Pat Oneil"))).status).toBe("queued");
+    expect((await h.progress(b("Pat Oneil"))).status).toBe("finished_no_usable_channel");
   });
 
-  test("two campaigns racing for one conversation: only one is ever texted from that number, and the other is held", async () => {
+  test("two campaigns racing for one conversation: only one is ever texted from that number, and the other skips its SMS track", async () => {
     const { h, texts } = await world({ numbers: [number(N1)] });
     h.clock = MONDAY_9;
     const ids: string[] = [];
@@ -294,12 +295,12 @@ describe("SMS conversations are campaign-local (ADR 0003 4.5)", () => {
     await h.advanceTo(MONDAY_9 + 3 * H);
     expect(raced).toBe(true);
     expect(texts(PAT_MOBILE)).toHaveLength(1);
-    const holds = [];
+    const finishes = [];
     for (const id of ids) {
       const row = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${id}`)).body.rows[0]!;
-      holds.push((await h.progress(row.enrollments.find((e) => e.campaign.id === id)!.id)).tracks[0]?.hold ?? null);
+      finishes.push((await h.progress(row.enrollments.find((e) => e.campaign.id === id)!.id)).tracks[0]?.finishReason ?? null);
     }
-    expect(holds.filter((x) => x === "sms_conversation_taken")).toHaveLength(1);
+    expect(finishes.sort()).toEqual(["completed", "skipped_conversation_taken"]);
   });
 });
 

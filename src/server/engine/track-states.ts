@@ -9,6 +9,7 @@ import { runs, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { FinishReason, SubjectState } from "../../domain/sequence/state.ts";
 import type { DeclineTrackView, DependentTrackState } from "../../shared/api.ts";
 import { trackLabel } from "../../shared/track-label.ts";
+import { conversationOwnersView } from "./views.ts";
 
 /** A finished track's state: every finish reason the engine stores, in one exhaustive switch. */
 export function finishedStateOf(reason: FinishReason): Exclude<DependentTrackState["state"], "waiting"> {
@@ -23,6 +24,8 @@ export function finishedStateOf(reason: FinishReason): Exclude<DependentTrackSta
       return "skipped_unworked";
     case "skipped_missing_channel":
       return "skipped_no_channel";
+    case "skipped_conversation_taken":
+      return "skipped_conversation_taken";
     case "skipped":
     case "skipped_by_user":
       return "skipped";
@@ -49,7 +52,12 @@ export function finishedStateOf(reason: FinishReason): Exclude<DependentTrackSta
  */
 export function dependentStateOf(live: SubjectState, track: Pick<TrackDefinition, "id" | "channel">, now: number): DependentTrackState {
   const p = live.tracks.find((t) => t.trackId === track.id);
-  if (p?.finishReason) return { state: finishedStateOf(p.finishReason), startsAt: null };
+  if (p?.finishReason === "skipped_conversation_taken") return { state: "skipped_conversation_taken", startsAt: null, owners: conversationOwnersView(live, track.id) };
+  if (p?.finishReason) {
+    const state = finishedStateOf(p.finishReason);
+    // Only a taken conversation names its owners, above.
+    return state === "skipped_conversation_taken" ? { state, startsAt: null, owners: [] } : { state, startsAt: null };
+  }
   if (live.subject.ended !== null) return { state: p && p.startedAt !== null ? "stopped_after_start" : "stopped", startsAt: null };
   if (track.channel === "call" && live.subject.noMoreCalls) return { state: "no_more_calls", startsAt: null };
   if (p && p.startedAt !== null) return { state: runs(live) ? "started" : "started_held", startsAt: null };

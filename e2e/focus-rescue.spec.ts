@@ -202,7 +202,8 @@ const REMOVE: Readonly<Record<string, (r: Reads, rest: string) => Reads>> = {
   wait: (r, rest) => ({ ...r, attention: { ...r.attention, accountWaits: r.attention.accountWaits.filter((x) => x.accountId !== rest) } }),
   stalled: (r, rest) => ({ ...r, attention: { ...r.attention, stalledInboxes: r.attention.stalledInboxes.filter((x) => x.accountId !== rest) } }),
   held: (r, rest) => ({ ...r, attention: { ...r.attention, heldCapacity: r.attention.heldCapacity.filter((x) => x.accountId !== rest) } }),
-  tracks: (r, rest) => ({ ...r, attention: { ...r.attention, heldTracks: r.attention.heldTracks.filter((x) => x.reason !== rest) } }),
+  // One entry per campaign and hold reason (the reviews of faac357, item 5): `tracks-<campaign>-<reason>`.
+  tracks: (r, rest) => ({ ...r, attention: { ...r.attention, heldTracks: r.attention.heldTracks.filter((x) => `${x.campaign.id}-${x.reason}` !== rest) } }),
   capacity: (r, rest) => ({ ...r, attention: { ...r.attention, waitingForCapacity: r.attention.waitingForCapacity.filter((x) => x.campaign.id !== rest) } }),
   anomaly: (r) => ({ ...r, attention: { ...r.attention, anomalies: [] } }),
   "no-usable-channel": (r) => ({ ...r, attention: { ...r.attention, noUsableChannel: [] } }),
@@ -231,10 +232,10 @@ function everyKind(r: Reads): Reads {
       accountWaits: [{ accountId: "inbox-3", reason: "quota", until: null }],
       stalledInboxes: [{ accountId: "inbox-4", holding: ["x"] }],
       heldCapacity: [{ accountId: "inbox-5", held: 1, capacity: 30, sentToday: 4, work: [] }],
-      heldTracks: [{ enrollmentId: "e9", trackId: "t1", reason: "unresolved" }],
+      heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e9", trackId: "t1", reason: "unresolved", owners: [] }],
       waitingForCapacity: [1, 2].map((i) => ({ ...lead(i), enrollmentId: `e-${i}`, campaignId: `campaign-${i}`, trackId: "t1", stepId: "s1", channel: "email" as const, dueAt: at, accountIds: ["inbox-a"], resetsAt: at })),
       anomalies: [{ what: "Something odd.", at }],
-      noUsableChannel: [{ ...lead(3), enrollmentId: "n-1", campaignId: "campaign-3", endedAt: at, channels: [{ channel: "email", why: "missing" }] }],
+      noUsableChannel: [{ ...lead(3), enrollmentId: "n-1", campaignId: "campaign-3", endedAt: at, channels: [{ channel: "email", why: "missing", owners: [] }] }],
     },
   };
 }
@@ -264,7 +265,7 @@ test("standing scan: removing any Needs attention entry by a refresh moves focus
   const keys = await first.locator("[data-rescue-item]").evaluateAll((els) => els.map((el) => ({ key: el.getAttribute("data-rescue-item") ?? "", linked: el.querySelector("a[href]") !== null })));
   await first.close();
   // Every kind the read can give is on the page.
-  expect(keys.map((k) => k.key.replace(/-(email|sms|sms-1|inbox-\d|unresolved|campaign-\d)$/, ""))).toEqual(
+  expect(keys.map((k) => k.key.replace(/-(email|sms|sms-1|inbox-\d|unresolved|campaign-\d|k\d-[a-z_]+)$/, ""))).toEqual(
     expect.arrayContaining(["overdue-callbacks", "carried-over", "sending-interrupted", "provider", "sender", "wait", "stalled", "held", "tracks", "capacity", "anomaly-0", "no-usable-channel"]),
   );
   for (const [j, k] of keys.entries()) {

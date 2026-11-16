@@ -1,3 +1,4 @@
+import type { DatabaseSync } from "node:sqlite";
 import { createApp } from "../../src/server/app.ts";
 import type { BulkRules } from "../../src/server/bulk.ts";
 import type { MeasureRules } from "../../src/server/measures.ts";
@@ -45,6 +46,8 @@ export interface EngineHarnessOptions {
   readonly databasePath?: string;
   /** The prefix of the engine's new ids: a harness reopening a database another wrote gives a fresh one, so its ids do not collide. */
   readonly idPrefix?: string;
+  /** The prefix of the app's own ids (campaigns, leads), for a harness that reopens a database another one wrote. */
+  readonly appIdPrefix?: string;
   /** A fake SMS provider's numbers (ticket 13). Without them the engine has the unprovisioned SMS port. */
   readonly sms?: { readonly numbers: readonly FakeNumber[]; readonly modes?: readonly FakeSmsMode[] };
 }
@@ -92,7 +95,7 @@ export class EngineHarness {
     this.hooks = options.hooks ?? {};
     this.engineIds = sequentialIds(options.idPrefix ?? "att");
     this.clock = options.start;
-    this.store = openSqliteStore(options.databasePath ?? ":memory:");
+    this.store = openSqliteStore(options.databasePath ?? ":memory:", () => this.clock);
     // Count the engine's subject writes: a deterministic measure of a run's work, the same on every machine.
     const store = this.store.engine;
     const update = store.update.bind(store);
@@ -115,7 +118,7 @@ export class EngineHarness {
     this.app = createApp({
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
-      newId: sequentialIds(),
+      newId: sequentialIds(options.appIdPrefix),
       engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input), controlLead: (id, action, requestId, expected) => this.engine.controlLead(id, action, requestId, expected), setCampaignPause: (id, pause, requestId, expected) => this.engine.setCampaignPause(id, pause, requestId, expected), transportAvailable: (channel, threading) => this.engine.transportAvailable(channel, threading), saveDefinition: (id, definition, editedAt, save, options) => this.engine.saveDefinition(id, definition, editedAt, save, options), runTest: (id, requestId, renderAs, version) => this.engine.runTest(id, requestId, renderAs, version) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
@@ -431,6 +434,29 @@ export class EngineHarness {
   async otherProcessSave(campaignId: string, definition: CampaignDefinition): Promise<string> {
     const other = new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) });
     return (await other.saveDefinition(campaignId, definition, new Date(this.clock).toISOString(), null, { tick: false })).outcome;
+  }
+
+  /**
+   * One tick of a freshly started engine at the same instant, on the same store and providers, with the test's rules and
+   * none of its hooks, and the providers not moved on: the stored rows it changed, row versions aside (a fresh engine
+   * replays the providers' events from its own cursor, which rewrites a subject unchanged). A worker whose caches still
+   * follow the stored facts leaves a fresh engine nothing to change at the instant it last ticked.
+   */
+  async freshEngineTick(): Promise<string[]> {
+    const db = (this.store.engine as unknown as { db: DatabaseSync }).db;
+    const tables = ["subjects", "enrollments", "track_progress", "attempts", "provider_work", "sms_bindings", "hold_intervals", "freezes", "step_results", "test_runs", "call_tasks", "call_attempts"];
+    const dump = () =>
+      new Map(tables.map((t) => [t, new Set(db.prepare(`SELECT * FROM ${t}`).all().map((r) => JSON.stringify({ ...r, version: undefined })))]));
+    const before = dump();
+    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.gated(this.provider), ...(this.smsProvider ? { smsPort: this.gated(this.smsProvider) } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
+    const after = dump();
+    return tables.flatMap((t) => {
+      const a = before.get(t)!;
+      const b = after.get(t)!;
+      const changed = [...b].filter((r) => !a.has(r));
+      const gone = [...a].filter((r) => !b.has(r));
+      return changed.length + gone.length > 0 ? [`${t}: ${gone.length} row(s) changed or gone, first ${gone[0] ?? "none"} -> ${changed[0] ?? "none"}`] : [];
+    });
   }
 
   /** A fresh engine on the same store and provider, settling what the crash left open. */

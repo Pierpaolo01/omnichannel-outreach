@@ -882,6 +882,22 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE sender_accounts_v20 RENAME TO sender_accounts;
     `,
   },
+  {
+    version: 21,
+    name: "a skip for a taken SMS conversation records its cause; a binding whose texts all ended not sent is released as unsent (ADR 0003, question Q7 answered)",
+    // The skip's cause (the number, the mobile and the owner then) is stored with the track, so a later pool edit, a
+    // release or a rename never changes the reason a read gives. A conversation exists once a text is known sent: a
+    // binding none of whose owner's texts on the pair went is released, marked unsent, so it neither blocks another
+    // campaign nor takes a reply.
+    // It releases no binding itself. Which bindings own no conversation is the engine's rule (`bindingUnsent`), applied
+    // by the store to every standing binding as it opens, before anything reads one (`openStoreOn`), so the upgrade and the
+    // running engine decide it by one statement of the rule, never by two (review bot on 50788ac: an SQL restatement here
+    // missed that an answered binding stays its owner's).
+    sql: `
+      ALTER TABLE track_progress ADD COLUMN conversation_owners TEXT;
+      ALTER TABLE sms_bindings ADD COLUMN unsent INTEGER NOT NULL DEFAULT 0 CHECK (unsent IN (0, 1));
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {

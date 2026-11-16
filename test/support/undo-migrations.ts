@@ -17,3 +17,13 @@ export const UNDO_SINCE_18 = `
   ALTER TABLE campaigns DROP COLUMN edit_version;
   DELETE FROM schema_migrations WHERE version >= 18;
 `;
+
+/**
+ * Migration 21 undone (question Q7 answered): a skip's cause and the unsent mark, dropped. Run first by a test that takes
+ * a database back to before an earlier migration, so that migration and every one after it, 21 included, apply again.
+ */
+export const UNDO_21 = `
+  ALTER TABLE track_progress DROP COLUMN conversation_owners;
+  ALTER TABLE sms_bindings DROP COLUMN unsent;
+  DELETE FROM schema_migrations WHERE version >= 21;
+`;

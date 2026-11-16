@@ -91,9 +91,9 @@ describe("leads left with no usable channel", () => {
       person: { id: personId("Rob Lane"), name: "Rob Lane" },
       company: { name: "Harbour Lane Physio" },
       campaign: { id: campaignId, name: "Clinics" },
-      channels: [{ channel: "email", why: "missing" }],
+      channels: [{ channel: "email", why: "missing", owners: [] }],
     });
-    expect(listed.find((x) => x.enrollmentId === lead("Pat Oneil"))).toMatchObject({ campaignId, channels: [{ channel: "email", why: "bad" }] });
+    expect(listed.find((x) => x.enrollmentId === lead("Pat Oneil"))).toMatchObject({ campaignId, channels: [{ channel: "email", why: "bad", owners: [] }] });
   });
 });
 
@@ -103,7 +103,7 @@ describe("a lead whose details a later import restores (review bot on 487de7c)",
     const def = definition([track("e1", "email", [email("s1")])]);
     const { h, campaignId, lead, attention } = await world(50, def, [PAT, ROB]);
     await h.advanceTo(MONDAY_9 + H);
-    expect((await attention()).noUsableChannel.find((x) => x.enrollmentId === lead("Rob Lane"))?.channels).toEqual([{ channel: "email", why: "missing" }]);
+    expect((await attention()).noUsableChannel.find((x) => x.enrollmentId === lead("Rob Lane"))?.channels).toEqual([{ channel: "email", why: "missing", owners: [] }]);
     await h.reimport(campaignId, { businesses: [HARBOUR], people: [PAT, { ...ROB, email: "rob@harbour.example" }] });
     await h.advanceTo(MONDAY_9 + 2 * H);
     expect((await attention()).noUsableChannel.find((x) => x.enrollmentId === lead("Rob Lane"))).toMatchObject({ person: { name: "Rob Lane" }, channels: [] });
