@@ -46,6 +46,8 @@ export interface EngineHarnessOptions {
   readonly databasePath?: string;
   /** The prefix of the engine's new ids: a harness reopening a database another wrote gives a fresh one, so its ids do not collide. */
   readonly idPrefix?: string;
+  /** The prefix of the app's own ids (campaigns, leads), for a harness that reopens a database another one wrote. */
+  readonly appIdPrefix?: string;
   /** A fake SMS provider's numbers (ticket 13). Without them the engine has the unprovisioned SMS port. */
   readonly sms?: { readonly numbers: readonly FakeNumber[]; readonly modes?: readonly FakeSmsMode[] };
 }
@@ -116,7 +118,7 @@ export class EngineHarness {
     this.app = createApp({
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
-      newId: sequentialIds(),
+      newId: sequentialIds(options.appIdPrefix),
       engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input), controlLead: (id, action, requestId, expected) => this.engine.controlLead(id, action, requestId, expected), setCampaignPause: (id, pause, requestId, expected) => this.engine.setCampaignPause(id, pause, requestId, expected), transportAvailable: (channel, threading) => this.engine.transportAvailable(channel, threading), saveDefinition: (id, definition, editedAt, save, options) => this.engine.saveDefinition(id, definition, editedAt, save, options), runTest: (id, requestId, renderAs, version) => this.engine.runTest(id, requestId, renderAs, version) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",

@@ -889,19 +889,14 @@ export const MIGRATIONS: readonly Migration[] = [
     // release or a rename never changes the reason a read gives. A conversation exists once a text is known sent: a
     // binding none of whose owner's texts on the pair went is released, marked unsent, so it neither blocks another
     // campaign nor takes a reply.
+    // It releases no binding itself. Which bindings own no conversation is the engine's rule (`bindingUnsent`), and the
+    // engine applies it to every binding's owner on its first tick after it starts (`Engine.releaseUnsentAtStart`), so
+    // the upgrade and the running engine decide it by one statement of the rule, never by two (review bot on 50788ac: an
+    // SQL restatement here missed that an answered binding stays its owner's).
     sql: `
       ALTER TABLE track_progress ADD COLUMN conversation_owners TEXT;
       ALTER TABLE sms_bindings ADD COLUMN unsent INTEGER NOT NULL DEFAULT 0 CHECK (unsent IN (0, 1));
     `,
-    data: (db) => {
-      // A binding taken by a first text that then ended not sent, finally: released now, as the engine releases one.
-      db.prepare(
-        `UPDATE sms_bindings SET released_at = ?, unsent = 1
-         WHERE released_at IS NULL
-           AND NOT EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = sms_bindings.owner_subject AND w.account_id = sms_bindings.sender_number
-             AND w.destination = sms_bindings.recipient_key AND (w.settled IS NULL OR w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))`,
-      ).run(Date.now());
-    },
   },
 ];
 

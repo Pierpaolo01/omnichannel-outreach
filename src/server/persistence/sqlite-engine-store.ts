@@ -739,6 +739,10 @@ export class SqliteEngineStore implements EngineStore {
     return [...bindings, ...skips];
   }
 
+  async bindingOwners(): Promise<string[]> {
+    return this.sql("SELECT DISTINCT owner_subject FROM sms_bindings WHERE released_at IS NULL ORDER BY owner_subject").all().map((r) => str(r, "owner_subject"));
+  }
+
   async conversationsVersion(): Promise<string> {
     return str(
       this.sql(
