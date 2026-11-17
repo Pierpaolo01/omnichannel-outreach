@@ -84,8 +84,8 @@ function generateOperation(r: () => number, def: CampaignDefinition): ArrangeOpe
   const branch = live.filter((t) => t.branch === "win_back");
   const kinds = live.length === 0 ? ["add"] : ["add", "add_win_back", "remove", "start", "start", "start", ...(after.length > 0 ? ["delay"] : []), ...(calls.length > 0 ? ["declined", "declined"] : []), ...(branch.length > 0 ? ["remove_win_back"] : [])];
   const kind = pick(r, kinds);
-  if (kind === "add_win_back") return { kind: "add", channel: pick(r, ["email", "sms", "email", "sms", "call"] as const), branch: "win_back" };
-  if (kind === "add" || live.length === 0) return { kind: "add", channel: pick(r, ["email", "sms", "call"] as const) };
+  if (kind === "add_win_back") return { kind: "add", channel: pick(r, ["email", "sms", "email", "sms", "call", "linkedin"] as const), branch: "win_back" };
+  if (kind === "add" || live.length === 0) return { kind: "add", channel: pick(r, ["email", "sms", "call", "linkedin"] as const) };
   if (kind === "declined") return { kind: "declined", trackId: pick(r, r() < 0.9 ? calls : live).id, path: pick(r, PATHS) };
   if (kind === "remove_win_back") return { kind: "remove", trackId: pick(r, branch).id };
   if (kind === "remove") return { kind: "remove", trackId: pick(r, live).id };

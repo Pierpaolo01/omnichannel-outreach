@@ -15,7 +15,7 @@ import { newTrack, trackName } from "./model.ts";
 
 export type ArrangeOperation =
   /** A new track, in the main sequence unless `branch` names the win-back branch. */
-  | { readonly kind: "add"; readonly channel: "email" | "sms" | "call"; readonly branch?: Branch }
+  | { readonly kind: "add"; readonly channel: "email" | "sms" | "call" | "linkedin"; readonly branch?: Branch }
   /** A phone track's declined path (ticket 16b): what a declined call on it does. */
   | { readonly kind: "declined"; readonly trackId: string; readonly path: DeclinedPath }
   /** `mark`: on a running campaign the track is marked removed, never deleted, so its id keeps its meaning (ticket 19). */

@@ -289,3 +289,39 @@ describe("a running campaign: changes stay on the page until the user applies th
     expect(h.puts).toHaveLength(0);
   });
 });
+
+describe("the LinkedIn pool follows the connected LinkedIn sessions, in the same one pool sync (ticket 24b)", () => {
+  const account = (id: string, channel: "email" | "sms" | "linkedin") => ({ id, label: id, channel, healthy: true, capacity: 0, gapSeconds: 0, usedToday: 0, waiting: null });
+  const withLinkedin = (): CampaignDefinition => {
+    const d = def("Stored");
+    const first = d.tracks[0]!.steps[0]!;
+    return { ...d, emailPool: ["inbox-a"], linkedinPool: [], tracks: [...d.tracks, { ...d.tracks[0]!, id: "li", channel: "linkedin", acceptWaitDays: 14, steps: [{ ...first, id: "i1", subject: "" }, { ...first, id: "i2", subject: "" }] }] };
+  };
+  const open = (accounts: ReturnType<typeof account>[], definition: CampaignDefinition) => {
+    const puts: CampaignDefinition[] = [];
+    new EditorStore({ ...view("Stored", 1), definition, accounts }, {
+      session: "page",
+      put: (body) => {
+        puts.push(body);
+        return new Promise(() => undefined);
+      },
+      launch: () => new Promise(() => undefined),
+      load: () => new Promise(() => undefined),
+      setTimer: () => null,
+      clearTimer: () => undefined,
+    });
+    return puts;
+  };
+
+  test("with a LinkedIn track, the simulated sessions are saved as its pool, once; neither an inbox nor a number enters it", async () => {
+    const puts = open([account("inbox-a", "email"), account("+447700900001", "sms"), account("linkedin:s1", "linkedin")], withLinkedin());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(puts.map((p) => p.linkedinPool)).toEqual([["linkedin:s1"]]);
+  });
+
+  test("with no LinkedIn session connected (the running app), nothing is saved for the pool", async () => {
+    const puts = open([account("inbox-a", "email")], withLinkedin());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(puts).toEqual([]);
+  });
+});
