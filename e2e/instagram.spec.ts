@@ -153,7 +153,8 @@ test.describe("Instagram's states", () => {
     await page.keyboard.press("Space");
     await expect(session).toBeChecked();
     await expect(page.getByRole("status").filter({ hasText: "Saved" }).first()).toBeVisible();
-    await page.reload();
+    // The page opened again from its address: what it shows comes from the saved definition.
+    await at(page, f, `/campaigns/${f.campaign}`);
     await page.getByRole("button", { name: /^Instagram track:/ }).click();
     await expect(page.getByRole("checkbox", { name: /^Simulated Instagram \(not a session\)/ })).toBeChecked();
     await page.getByRole("checkbox", { name: /^Simulated Instagram \(not a session\)/ }).focus();

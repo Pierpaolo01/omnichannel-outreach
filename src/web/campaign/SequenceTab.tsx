@@ -1487,15 +1487,16 @@ function TimingAndSender({ track, editor, onWindow, onSenders }: { track: TrackD
               <LinkedinProviderReason />
               <div className="text-[12.5px] text-muted">Launch is blocked while this track has no session.</div>
             </>
-          ) : request && (accounts.length > 0 || (track.senders ?? []).length > 0) ? (
-            <SenderChoice track={track} accounts={accounts} locked={locked} onChange={(senders) => onSenders?.(senders)} />
           ) : request && accounts.length === 0 ? (
             // ADR 0004 13.1: the running app has no Instagram session; nothing here suggests one can be connected from the application.
+            // With none connected, the cause is that, whatever the track chose: there is nothing to tick.
             <>
               <span className="font-semibold text-crit">No connected {SOCIAL_CHANNELS[track.channel as MessageRequestChannel].name} session.</span>
               <SocialProviderReason channel={track.channel} />
               <div className="text-[12.5px] text-muted">Launch is blocked while this track has no session.</div>
             </>
+          ) : request ? (
+            <SenderChoice track={track} accounts={accounts} locked={locked} onChange={(senders) => onSenders?.(senders)} />
           ) : accounts.length === 0 ? (
             <>
               <span className="font-semibold text-crit">{sms ? "No connected SMS number." : "No connected sender inbox."}</span>
@@ -1508,13 +1509,12 @@ function TimingAndSender({ track, editor, onWindow, onSenders }: { track: TrackD
                 {accounts.map((a) => (
                   <li key={a.id} className="[overflow-wrap:anywhere]">
                     {a.label}
-                    {request && a.socialKind && <span className="text-muted"> · {a.socialKind === "business" ? "a business account" : "a personal profile"}</span>}
                     {sms && <span className="text-muted"> · at most {a.capacity} texts a day across campaigns</span>}
                     {!a.healthy && <span className="text-crit"> {CANNOT_SEND}</span>}
                   </li>
                 ))}
               </ul>
-              <div className="text-[12.5px] text-muted">{linkedin || request ? "Each lead keeps the session that first reaches them, for the whole campaign." : `Each lead keeps one ${sms ? "number" : "inbox"} for the whole campaign.`}</div>
+              <div className="text-[12.5px] text-muted">{linkedin ? "Each lead keeps the session that first reaches them, for the whole campaign." : `Each lead keeps one ${sms ? "number" : "inbox"} for the whole campaign.`}</div>
             </>
           )}
           {linkedin && (
