@@ -1199,6 +1199,8 @@ export class SqliteEngineStore implements EngineStore {
    */
   private inmailStanding(id: string, account: Row): InmailStanding {
     const plan = strOrNull(account, "inmail_plan") as InmailStanding["plan"];
+    // A session that never reported, or reports no plan, can send no InMail whatever it spent: nothing more to count.
+    if (plan !== "premium" && plan !== "sales_navigator") return { plan, credits: numOrNull(account, "inmail_credits") ?? 0, spent: 0, committed: 0 };
     const reported = numOrNull(account, "inmail_reported_wall") ?? 0;
     const out = "(w.settled IS NULL OR w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL)";
     const counts =
