@@ -42,6 +42,7 @@ test("the InMail fallback in the inspector, Before launch and the Test run tab: 
   await expect(page.getByRole("button", { name: /^First message/ })).toBeVisible();
   await expect(page.getByText(/^When the wait ends, one InMail goes from the session that sent the invite/)).toBeVisible();
   await expect(page.getByText("Invite, then 2 messages, InMail if not accepted").first()).toBeVisible();
+  await fallback.scrollIntoViewIfNeeded();
   await shot(page, "01-inspector-on");
 
   // An empty InMail blocks launch as empty copy.
@@ -58,6 +59,7 @@ test("the InMail fallback in the inspector, Before launch and the Test run tab: 
   await expect(page.getByLabel("InMail", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Off: when the wait ends, the invite is withdrawn and the track ends for them.")).toBeVisible();
   await expect(page.getByText("Invite, then 2 messages").first()).toBeVisible();
+  await fallback.scrollIntoViewIfNeeded();
   await shot(page, "03-inspector-off");
 
   // On again, with text: Copy for a lead shows the InMail and when it goes.
