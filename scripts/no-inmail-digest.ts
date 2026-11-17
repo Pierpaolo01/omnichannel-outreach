@@ -2,7 +2,8 @@
  * Nothing changes for a LinkedIn track with the InMail fallback off (ticket 27, ADR 0004 13): one scripted campaign of a
  * LinkedIn track (no InMail step) and an email track after it, through the real HTTP app and an in-memory SQLite store
  * against the simulated LinkedIn provider and the fake email provider. Its people accept, never accept, accept late, are
- * already connected, or cannot be reached; a withdrawal answers unknown once. It prints the providers' logs and their
+ * already connected, or cannot be reached; a withdrawal answers unknown once; one removes the connection while an invitation
+ * to them is pending, so the session answers "pending" at their follow-up's check. It prints the providers' logs and their
  * SHA-256 digest. Run it on the integration tip and on the ticket's branch: the digests must be equal. Its sessions report
  * nothing about InMail (the tip's simulated provider has no such report). Fictitious data only; nothing leaves the machine.
  *
@@ -53,6 +54,10 @@ const definition: CampaignDefinition = {
 await h.defineSequence(campaign.id, definition);
 h.clock = Date.parse("2026-11-02T08:00:00Z");
 await h.launch(campaign.id);
+// Wednesday noon: Pat, connected since Tuesday, removes the connection while an invitation to them is pending from elsewhere,
+// so the session answers "pending" at their follow-up's check (council on 8b0c846, item 3): the follow-up is not handed over.
+await h.advanceTo(Date.parse("2026-11-04T12:00:00Z"));
+h.linkedin.profiles.set(profile("pat"), { connectionRemoved: true, pendingElsewhere: true });
 await h.advanceTo(Date.parse("2026-11-20T10:00:00Z"));
 
 const strip = <T extends object>(entries: readonly T[]) => entries.map((e) => JSON.parse(JSON.stringify(e)) as unknown);
