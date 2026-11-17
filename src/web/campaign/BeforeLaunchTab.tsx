@@ -57,7 +57,7 @@ export function BeforeLaunchTab({ campaignId, editor }: { campaignId: string; ed
                 {/* Ticket 24b: a member profile from the import, by the engine's own rule, only for a campaign with a LinkedIn track. */}
                 {hasLinkedin && <Coverage n={facts.coverage.linkedin} of={facts.coverage.leads} what="have a LinkedIn profile" />}
                 {requestChannels.map((c) => (
-                  <Coverage key={c} n={facts.coverage.social[c].own + facts.coverage.social[c].company} of={facts.coverage.leads} what={`have an ${SOCIAL_CHANNELS[c].name} account to message (${facts.coverage.social[c].company} through their company’s)`} />
+                  <Coverage key={c} n={facts.coverage.social[c].own + facts.coverage.social[c].company} of={facts.coverage.leads} what={`have ${SOCIAL_CHANNELS[c].aName} account to message (${facts.coverage.social[c].company} through their company’s)`} />
                 ))}
               </div>
             </Card>
@@ -651,7 +651,7 @@ function PreviewMessage({ s, def, named, horizonDays, entry }: { s: CopyPreview[
       </div>
       <div className="px-3.5 py-3 text-[14px] leading-[1.55]">
         {s.skipped ? (
-          <p className="text-muted">{linkedin ? "Skipped: this lead has no LinkedIn member profile." : isMessageRequestChannel(s.channel) ? `Skipped: neither this lead nor their company has an ${SOCIAL_CHANNELS[s.channel].name} account.` : sms ? "Skipped: this lead has no mobile of their own to text." : "Skipped: this lead has no email."}</p>
+          <p className="text-muted">{linkedin ? "Skipped: this lead has no LinkedIn member profile." : isMessageRequestChannel(s.channel) ? `Skipped: neither this lead nor their company has ${SOCIAL_CHANNELS[s.channel].aName} account.` : sms ? "Skipped: this lead has no mobile of their own to text." : "Skipped: this lead has no email."}</p>
         ) : (
           <>
             {!sms && (

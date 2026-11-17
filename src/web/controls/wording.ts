@@ -6,7 +6,7 @@
  * read says it at its instant.
  */
 import { markLabels, markRepliedWords } from "../campaign/reply-mark-wording.ts";
-import { isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
+import { capitalANameOf, isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
 import type { TrackChannelApi, SendChannelApi } from "../../shared/api.ts";
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
 import { clockTime } from "../time.ts";
@@ -262,22 +262,22 @@ export function outgoingSoFar(lead: Pick<RecordLead, "tracks">): OutgoingSoFar {
 }
 
 /** What a handed-over piece of work is on each channel, as the sentence names it. */
-const HANDED_NOUN: Readonly<Record<TrackChannelApi, string>> = {
+const handedNoun = (): Readonly<Record<TrackChannelApi, string>> => ({
   email: "An email",
   sms: "A text",
   call: "A call",
   linkedin: "A LinkedIn invite or message",
-  ...(Object.fromEntries(MESSAGE_REQUEST_CHANNELS.map((c) => [c, `An ${SOCIAL_CHANNELS[c].name} message`])) as Record<MessageRequestChannel, string>),
-};
+  ...(Object.fromEntries(MESSAGE_REQUEST_CHANNELS.map((c) => [c, `${capitalANameOf(c)} message`])) as Record<MessageRequestChannel, string>),
+});
 
 export function soFarSentence(soFar: OutgoingSoFar): string {
   switch (soFar.state) {
     case "nothing":
       return "Nothing has gone out yet.";
     case "unknown":
-      return `${HANDED_NOUN[soFar.channel]} was handed over, and it isn’t known yet whether it went.`;
+      return `${handedNoun()[soFar.channel]} was handed over, and it isn’t known yet whether it went.`;
     case "sent":
-      return `${HANDED_NOUN[soFar.channel]} has gone out.`;
+      return `${handedNoun()[soFar.channel]} has gone out.`;
     default: {
       const unhandled: never = soFar;
       throw new Error(`A state with no sentence: ${JSON.stringify(unhandled)}`);

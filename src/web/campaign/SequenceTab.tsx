@@ -857,7 +857,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
         )}
         {request && (
           <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">
-            {messageRequestNote(SOCIAL_CHANNELS[channel as MessageRequestChannel].name)}
+            {messageRequestNote(channel as MessageRequestChannel)}
           </p>
         )}
         <div role="group" aria-label={linkedin ? "Invite and messages" : sms || request ? (request ? "Messages" : "Texts") : "Emails"} className="flex min-w-0 flex-col">

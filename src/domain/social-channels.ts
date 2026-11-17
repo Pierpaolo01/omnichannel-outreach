@@ -22,6 +22,11 @@ export const isSocialChannel = (channel: string | undefined | null): channel is 
 export interface SocialChannelFacts {
   /** The channel's name in sentences, capitalised as the platform writes it. */
   readonly name: string;
+  /**
+   * The name with its indefinite article, "an Instagram", "a LinkedIn" (the council on 5a30b9f, item 4): a fact of the
+   * channel, never derived from its first letter, which every sentence uses before the name.
+   */
+  readonly aName: string;
   /** The one normaliser of an address on the channel (ADR 0004 5, 13.4): its key, or null when it is not one. */
   readonly accountKey: (raw: string) => string | null;
   /** The prefix that makes a session's own id an account id of the app (ADR 0004 1.1, "Identity"). */
@@ -32,9 +37,15 @@ export interface SocialChannelFacts {
   readonly exampleAddress: string;
 }
 
+/** The name with its article at the start of a sentence: "An Instagram", "A LinkedIn". */
+export const capitalANameOf = (channel: SocialChannel): string => {
+  const phrase = SOCIAL_CHANNELS[channel].aName;
+  return `${phrase.charAt(0).toUpperCase()}${phrase.slice(1)}`;
+};
+
 export const SOCIAL_CHANNELS: { readonly [C in SocialChannel]: SocialChannelFacts } = {
-  linkedin: { name: "LinkedIn", accountKey: linkedinProfileKey, accountPrefix: "linkedin:", addressNoun: "profile", exampleAddress: "https://www.linkedin.com/in/your-name" },
-  instagram: { name: "Instagram", accountKey: instagramAccountKey, accountPrefix: "instagram:", addressNoun: "account", exampleAddress: "https://www.instagram.com/your.name" },
+  linkedin: { name: "LinkedIn", aName: "a LinkedIn", accountKey: linkedinProfileKey, accountPrefix: "linkedin:", addressNoun: "profile", exampleAddress: "https://www.linkedin.com/in/your-name" },
+  instagram: { name: "Instagram", aName: "an Instagram", accountKey: instagramAccountKey, accountPrefix: "instagram:", addressNoun: "account", exampleAddress: "https://www.instagram.com/your.name" },
 };
 
 /**

@@ -102,7 +102,7 @@ const REASON: Readonly<Record<string, string>> = {
 };
 
 /** Why a step was skipped or failed, in its own channel's words where the channel is a message-request one (ADR 0004 13.3). */
-const reasonText = (reason: string, channel: TrackChannelApi): string => (isMessageRequestChannel(channel) ? (messageRequestReason(SOCIAL_CHANNELS[channel].name, reason) ?? REASON[reason] ?? reason) : (REASON[reason] ?? reason));
+const reasonText = (reason: string, channel: TrackChannelApi): string => (isMessageRequestChannel(channel) ? (messageRequestReason(channel, reason) ?? REASON[reason] ?? reason) : (REASON[reason] ?? reason));
 
 const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
 const CRIT = "bg-crit-soft text-crit";

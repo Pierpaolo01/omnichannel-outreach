@@ -191,6 +191,6 @@ export function sendsOnItsOwn(def: CampaignDefinition): string {
     : channels.has("email") ? "Email goes out on its own, inside each lead’s sending window."
     : "";
   const linkedin = channels.has("linkedin") ? "LinkedIn invites and messages go out from a LinkedIn session, inside each lead’s sending window." : "";
-  const requests = MESSAGE_REQUEST_CHANNELS.filter((c) => channels.has(c)).map((c) => `${SOCIAL_CHANNELS[c].name} messages go out from an ${SOCIAL_CHANNELS[c].name} session, inside each lead’s sending window.`);
+  const requests = MESSAGE_REQUEST_CHANNELS.filter((c) => channels.has(c)).map((c) => `${SOCIAL_CHANNELS[c].name} messages go out from ${SOCIAL_CHANNELS[c].aName} session, inside each lead’s sending window.`);
   return [own, linkedin, ...requests, calls].filter(Boolean).join(" ");
 }

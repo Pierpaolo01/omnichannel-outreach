@@ -1,5 +1,5 @@
 import type { MessageRequestTrackView, TrackDefinition, TrackProgressView } from "../../shared/api.ts";
-import { isMessageRequestChannel, SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
+import { capitalANameOf, isMessageRequestChannel, SOCIAL_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
 
 /**
  * A message-request track's facts on the record (ticket 25; ADR 0004 13.3, 13.4), one sentence each, from what the engine
@@ -12,7 +12,7 @@ export function messageRequestTrackLines(track: Pick<TrackProgressView, "channel
   if (view === null || !isMessageRequestChannel(track.channel)) return [];
   const name = SOCIAL_CHANNELS[track.channel].name;
   const lines: string[] = [];
-  if (track.finishReason === "skipped_missing_channel") return [skipLine(view.skipCause, name)];
+  if (track.finishReason === "skipped_missing_channel") return [skipLine(view.skipCause, track.channel)];
   const whose = view.destination === "company" ? `their company’s ${name} account` : `their own ${name} account`;
   const from = view.sender === null ? "" : view.sender.kind === "business" ? " from your business session" : view.sender.kind === "personal" ? " from your personal session" : "";
   if (view.firstMessage === "sent") lines.push(`The first message went to ${whose}${from}, as a message request if they don’t follow you. ${name} doesn’t tell the app whether it was accepted or read.`);
@@ -22,10 +22,11 @@ export function messageRequestTrackLines(track: Pick<TrackProgressView, "channel
 }
 
 /** Why the track was skipped as a missing channel, as recorded when it finished. */
-function skipLine(cause: MessageRequestTrackView["skipCause"], name: string): string {
+function skipLine(cause: MessageRequestTrackView["skipCause"], channel: MessageRequestChannel): string {
+  const name = SOCIAL_CHANNELS[channel].name;
   switch (cause) {
     case "no_profile":
-      return `Skipped: neither they nor their company have an ${name} account in the import.`;
+      return `Skipped: neither they nor their company have ${SOCIAL_CHANNELS[channel].aName} account in the import.`;
     case "not_a_member_profile":
       return `Skipped: the ${name} address in the import isn’t an account’s address.`;
     case "marked_bad":
@@ -46,8 +47,9 @@ function skipLine(cause: MessageRequestTrackView["skipCause"], name: string): st
 }
 
 /** What a message-request track does, for the inspector's note (ADR 0004 13.3), in the channel's name. **Provisional.** */
-export function messageRequestNote(name: string): string {
-  return `An ${name} track sends a text-only message to the decision maker’s own ${name} account from the import, or to their company’s when they have none, then follow-ups after their waits. Someone who doesn’t follow your session gets the first message as a message request; ${name} doesn’t tell the app whether they accept or read it. The messages go on until they answer and you mark them replied.`.replace(/^An (?=[^AEIOU])/, "A ");
+export function messageRequestNote(channel: MessageRequestChannel): string {
+  const name = SOCIAL_CHANNELS[channel].name;
+  return `${capitalANameOf(channel)} track sends a text-only message to the decision maker’s own ${name} account from the import, or to their company’s when they have none, then follow-ups after their waits. Someone who doesn’t follow your session gets the first message as a message request; ${name} doesn’t tell the app whether they accept or read it. The messages go on until they answer and you mark them replied.`;
 }
 
 /**
@@ -86,7 +88,7 @@ export function messageRequestWarnings(
     const chosen = [...new Set(perTrack.map((t) => t.sessions))];
     const each =
       chosen.length <= 1
-        ? `${firsts(chosen[0] ?? 0).replace(/^(one first message|up to \d+ first messages)/, `$1 from ${perTrack.length > 1 ? "each track" : "the track"}`)}`
+        ? firsts(chosen[0] ?? 0).replace(/^(one first message|up to \d+ first messages)/, `$1 from ${perTrack.length > 1 ? "each track" : "the track"}`)
         : `: ${perTrack.map((t) => `from ${t.label}, ${firsts(t.sessions)}`).join("; ")}`;
     out.push({
       title: `${counts.shared.leads} leads share ${counts.shared.accounts} company ${name} ${counts.shared.accounts === 1 ? "account" : "accounts"}`,
@@ -102,13 +104,14 @@ export function messageRequestWarnings(
  */
 export const MESSAGE_REQUEST_REASONS = ["no_account", "account unreachable", "not allowed"] as const;
 export type MessageRequestReason = (typeof MESSAGE_REQUEST_REASONS)[number];
-export function messageRequestReason(name: string, reason: string): string | null {
+export function messageRequestReason(channel: MessageRequestChannel, reason: string): string | null {
+  const name = SOCIAL_CHANNELS[channel].name;
   const known = (MESSAGE_REQUEST_REASONS as readonly string[]).includes(reason) ? (reason as MessageRequestReason) : null;
   switch (known) {
     case null:
       return null;
     case "no_account":
-      return `Neither they nor their company have an ${name} account in the import.`;
+      return `Neither they nor their company have ${SOCIAL_CHANNELS[channel].aName} account in the import.`;
     case "account unreachable":
       return `${name} refused the account as unreachable. It is marked wrong.`;
     case "not allowed":

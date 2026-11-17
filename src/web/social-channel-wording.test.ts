@@ -38,7 +38,7 @@ describe.each(SOCIAL_CHANNEL_LIST)("%s, in its own name", (channel) => {
 
   if (isMessageRequestChannel(channel)) {
     test("each reason a message-request step records, each its own sentence; a test account that belongs to a lead", () => {
-      const said = MESSAGE_REQUEST_REASONS.map((r) => messageRequestReason(SOCIAL_CHANNELS[channel].name, r) ?? "");
+      const said = MESSAGE_REQUEST_REASONS.map((r) => messageRequestReason(channel, r) ?? "");
       expect(new Set(said).size).toBe(said.length);
       for (const s of said) speaksOf(channel, s);
       speaksOf(channel, accountIsALead(channel));

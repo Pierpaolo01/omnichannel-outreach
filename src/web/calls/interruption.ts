@@ -226,7 +226,7 @@ function detailLine(channel: ReachChannel, why: "missing" | "bad"): string {
     default: {
       if (isMessageRequestChannel(channel)) {
         const name = SOCIAL_CHANNELS[channel].name;
-        return why === "missing" ? `neither they nor their company have an ${name} account in the import` : `every ${name} account they could use is marked unreachable`;
+        return why === "missing" ? `neither they nor their company have ${SOCIAL_CHANNELS[channel].aName} account in the import` : `every ${name} account they could use is marked unreachable`;
       }
       const unhandled: never = channel;
       throw new Error(`A channel with no sentence: ${String(unhandled)}`);

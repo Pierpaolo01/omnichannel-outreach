@@ -89,12 +89,12 @@ export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition, sms: 
  * the campaign has nothing it applies to).
  */
 type BlockerCase = LaunchBlocker["kind"] | "no_sender_chosen";
-const BLOCKER_CASES: Readonly<Record<BlockerCase, { readonly cause: string; readonly holds: (def: CampaignDefinition) => string | null }>> = {
-  empty_copy: { cause: "empty copy", holds: () => "every message has copy" },
-  missing_merge_field: { cause: "a merge field with no fallback that a lead lacks", holds: () => "every merge field has a fallback where a lead lacks it" },
-  no_sender: { cause: "no connected sender", holds: (def) => `every ${senderTracksPhrase(def)} has a sender` },
+const BLOCKER_CASES: Readonly<Record<BlockerCase, { readonly cause: () => string; readonly holds: (def: CampaignDefinition) => string | null }>> = {
+  empty_copy: { cause: () => "empty copy", holds: () => "every message has copy" },
+  missing_merge_field: { cause: () => "a merge field with no fallback that a lead lacks", holds: () => "every merge field has a fallback where a lead lacks it" },
+  no_sender: { cause: () => "no connected sender", holds: (def) => `every ${senderTracksPhrase(def)} has a sender` },
   no_sender_chosen: {
-    cause: `${MESSAGE_REQUEST_CHANNELS.map((c) => `an ${SOCIAL_CHANNELS[c].name}`).join(" or ")} track with no sender session chosen`,
+    cause: () => `${MESSAGE_REQUEST_CHANNELS.map((c) => SOCIAL_CHANNELS[c].aName).join(" or ")} track with no sender session chosen`,
     holds: (def) => {
       const names = MESSAGE_REQUEST_CHANNELS.filter((c) => def.tracks.some((t) => !t.removed && t.channel === c)).map((c) => SOCIAL_CHANNELS[c].name);
       return names.length === 0 ? null : `every ${names.join(" and ")} track has a sender session chosen`;
@@ -112,7 +112,7 @@ export function senderTracksPhrase(def: CampaignDefinition): string {
 
 /** With no track yet: everything that can block launch once there is one, from every blocker the domain has. */
 export function blockedOnlyBy(): string {
-  return `With a track, launch is blocked only by ${listed(Object.values(BLOCKER_CASES).map((c) => c.cause), "or")}.`;
+  return `With a track, launch is blocked only by ${listed(Object.values(BLOCKER_CASES).map((c) => c.cause()), "or")}.`;
 }
 
 /** With tracks and no blocker: what holds, for each blocker that applies to this definition. */
