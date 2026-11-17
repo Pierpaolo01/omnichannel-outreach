@@ -178,7 +178,7 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
   const sms = entry.channel === "sms";
   // What a step is called comes from its track's label, so a win-back step reads "Win-back email 1" (council on 4fd9ca4, item 5),
   // and a LinkedIn step by its role, "Connection invite" (ticket 24b).
-  const named = (n: number) => stepTitle(entry.track, entry.channel, n);
+  const named = (n: number) => stepTitle(entry.track, entry.channel, n, entry.role);
   const track = entry.track.several ? entry.track.label : null;
   const icon: IconName = entry.channel === "linkedin" ? "linkedin" : sms ? "sms" : "email";
   switch (entry.kind) {

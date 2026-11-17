@@ -1,5 +1,5 @@
 /** Read models for the HTTP interface, built from the engine's stored facts. */
-import { stepNumber } from "../../domain/sequence/definition.ts";
+import { stepNumber, stepRoleOf } from "../../domain/sequence/definition.ts";
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { carriedInto, isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
@@ -121,7 +121,9 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
             const result = s.results.find((r) => r.stepId === st.id);
             return {
               stepId: st.id,
-              number: i + 1,
+              // A LinkedIn step by its role's numbering, the InMail named by its role (ADR 0004 13.9); other channels as before.
+              number: track.channel === "linkedin" ? stepNumber(track, st.id) : i + 1,
+              ...stepRoleOf(track, st.id),
               removed: st.removed,
               result: result?.result ?? null,
               calls: s.callAttempts

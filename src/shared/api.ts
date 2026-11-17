@@ -209,6 +209,8 @@ export interface ControlStepView {
   readonly channel: "email" | "sms" | "call" | "linkedin";
   readonly branch: "main" | "win_back";
   readonly stepId: string;
+  /** A LinkedIn InMail fallback step, named by its role (ADR 0004 13.9). */
+  readonly role?: "inmail";
   /** Its place among the track's steps, from 1, and how many there are. */
   readonly number: number;
   readonly of: number;
@@ -574,6 +576,8 @@ export interface SendView {
 export interface StepProgressView {
   readonly stepId: string;
   readonly number: number;
+  /** A LinkedIn InMail fallback step, named by its role; its number then counts nothing (ADR 0004 13.9). */
+  readonly role?: "inmail";
   readonly removed: boolean;
   readonly result: "sent" | "skipped" | "failed" | null;
   readonly reason: string | null;
@@ -993,7 +997,7 @@ export interface CopyPreview {
 
 /** One line of a person's or company lead's timeline (GET /api/people/:id/activity). Newest first. */
 export type ActivityEntry = { readonly campaign: { readonly id: string; readonly name: string }; readonly at: string } & (
-  | ({ readonly channel: "email" | "sms" | "linkedin"; readonly track: TrackLabel } & (
+  | ({ readonly channel: "email" | "sms" | "linkedin"; readonly track: TrackLabel; /** A LinkedIn InMail, named by its role (ADR 0004 13.9). */ readonly role?: "inmail" } & (
       | {
           readonly kind: "sent";
           readonly stepNumber: number;

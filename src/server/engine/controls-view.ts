@@ -4,7 +4,7 @@
  * nothing, so a control the read allows is the one the action accepts at that instant, and a refusal carries the
  * same reason (P11).
  */
-import { stepNumber } from "../../domain/sequence/definition.ts";
+import { stepNumber, stepRoleOf } from "../../domain/sequence/definition.ts";
 import { releasedBy, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
 import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
 import { currentStep, judgeCampaignControl, previewDigest, LEAD_CONTROLS, NOTHING_SENT_ON_LINKEDIN, replyMarkWork, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
@@ -26,6 +26,7 @@ function stepView(state: SubjectState, step: NonNullable<ReturnType<typeof curre
     branch: step.track.branch,
     stepId: step.stepId,
     number: stepNumber(step.track, step.stepId),
+    ...stepRoleOf(step.track, step.stepId),
     of: live.length,
     // When the step goes once the action applies: the engine's `stepWhen` on the lead as the action leaves it.
     when: due ? whenOf(state, step.track.id, now, env, read) : null,

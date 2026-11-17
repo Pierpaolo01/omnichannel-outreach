@@ -62,7 +62,7 @@ export function stepTitle(track: Pick<TrackLabel, "branch">, channel: "email" | 
 }
 
 /** A label's first word lower case mid-sentence, but "SMS" and "LinkedIn" keep their capitals. */
-export const lowerLabel = (label: string): string => (label.startsWith("SMS") || label.startsWith("LinkedIn") ? label : label.charAt(0).toLowerCase() + label.slice(1));
+export const lowerLabel = (label: string): string => (label.startsWith("SMS") || label.startsWith("LinkedIn") || label.startsWith("InMail") ? label : label.charAt(0).toLowerCase() + label.slice(1));
 
 /** A track's name inside a sentence: "the email track", "the SMS track", "email track 2", "SMS track 2", "the phone track", "the win-back SMS track". */
 export function trackPhrase(def: CampaignDefinition, track: Pick<TrackDefinition, "id" | "channel">): string {

@@ -67,7 +67,7 @@ const lower = lowerLabel;
 const capital = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
 
 /** A step a control names, inside a sentence: "email 2 of 3", "text 1 of 2 on SMS track 2", "win-back email 1 of 2", "the call". */
-export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "number" | "of">): string {
+export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "number" | "of"> & { readonly role?: "inmail" }): string {
   const on = step.track.several ? ` on ${lower(step.track.label)}` : "";
   switch (step.channel) {
     case "call":
@@ -77,6 +77,8 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
       return `${lower(stepTitle(step.track, step.channel, step.number))} of ${step.of}${on}`;
     // A LinkedIn step by its role (ticket 24b): "the first message", "follow-up 2 on LinkedIn track 2".
     case "linkedin": {
+      // The InMail fallback keeps its capitals: "the InMail" (ADR 0004 13.9).
+      if (step.role === "inmail") return `${step.track.branch === "win_back" ? "the win-back InMail" : "the InMail"}${on}`;
       const title = lower(stepTitle(step.track, step.channel, step.number));
       return `${title.startsWith("follow-up") ? title : `the ${title}`}${on}`;
     }

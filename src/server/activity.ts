@@ -77,15 +77,15 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
         for (const send of step.sends) {
           if (send.state !== "sent" || send.sentAt === null) continue;
           lastTo = send.destination;
-          entries.push({ campaign, at: send.sentAt, kind: "sent", channel, track: label, stepNumber: step.number, from: labels[send.sender] ?? send.sender, to: shown(channel, send.destination), copy: send.copy });
+          entries.push({ campaign, at: send.sentAt, kind: "sent", channel, track: label, ...(step.role ? { role: step.role } : {}), stepNumber: step.number, from: labels[send.sender] ?? send.sender, to: shown(channel, send.destination), copy: send.copy });
         }
         if (step.at === null) continue;
         if (step.result === "failed") {
           const to = step.sends.at(-1)?.destination ?? "";
-          entries.push({ campaign, at: step.at, kind: "failed", channel, track: label, stepNumber: step.number, to: shown(channel, to), reason: step.reason ?? "failed" });
+          entries.push({ campaign, at: step.at, kind: "failed", channel, track: label, ...(step.role ? { role: step.role } : {}), stepNumber: step.number, to: shown(channel, to), reason: step.reason ?? "failed" });
         } else if (step.result === "skipped" && step.reason !== "by_user") {
           // A step the user skipped is said once, by the control's own entry below (ticket 17b).
-          entries.push({ campaign, at: step.at, kind: "skipped", channel, track: label, stepNumber: step.number, reason: SKIP_REASON[step.reason ?? ""] ?? step.reason ?? "skipped" });
+          entries.push({ campaign, at: step.at, kind: "skipped", channel, track: label, ...(step.role ? { role: step.role } : {}), stepNumber: step.number, reason: SKIP_REASON[step.reason ?? ""] ?? step.reason ?? "skipped" });
         }
       }
       if (endedAtLaunch && progress.endedAt !== null && !hasChannel && track.branch === "main") {
