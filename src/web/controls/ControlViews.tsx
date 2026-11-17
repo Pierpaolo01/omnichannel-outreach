@@ -209,7 +209,8 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   // The confirmation open, as a snapshot of the read it opened on (council on 57d874f, item 1): what it shows and sends.
   const [opened, setOpened] = useState<LeadConfirmation | null>(null);
   const [linkedinOpened, setLinkedinOpened] = useState<LinkedinConfirmation | null>(null);
-  // Why a LinkedIn confirmation closed under the user (council on dee365d, item 10): said, never silent.
+  // Why a confirmation, any of this row's, closed under the user (council on dee365d, item 10; re-check of a6c1700, item 11):
+  // said, never silent, and the one owner of focus when a refresh closes it.
   const [linkedinClosed, setLinkedinClosed] = useState<string | null>(null);
   // The LinkedIn presses' buttons by key, so focus returns to the one that opened a confirmation once it is drawn again
   // (council on dee365d, item 12): the button is not on the page while its confirmation is open.
@@ -236,7 +237,6 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   const triggers = useRef(new Map<LeadControlApi, HTMLButtonElement>());
   const firstControl = useRef<HTMLButtonElement | null>(null);
   const focusNext = useRef<"status" | null>(null);
-  const [refocus, setRefocus] = useState(false);
   const offered = offeredControls(lead);
   const bulkPending = controls.bulkPending(target);
   const busy = controls.pending(target) !== null || bulkPending;
@@ -251,11 +251,8 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   // one still allowed keeps its snapshot, and says when the row changed.
   if (opened !== null && !offered.some((c) => c.action === opened.action)) {
     setOpened(null);
-    setRefocus(true);
+    setLinkedinClosed(closedBecause(opened.action));
   }
-  useEffect(() => {
-    if (refocus) firstControl.current?.focus();
-  }, [refocus]);
 
   const confirm = (snapshot: LeadConfirmation) => {
     focusNext.current = "status";
@@ -280,9 +277,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   // A LinkedIn confirmation whose press the read no longer offers closes; focus stays in the row.
   if (linkedinOpened !== null && !linkedinStillOffered(linkedinOpened, lead) && controls.pending(target) === null) {
     setLinkedinOpened(null);
-    setRefocus(false);
     setLinkedinClosed(linkedinOpened.action === "mark_replied" ? "This lead changed since you opened this, so it was closed. Nothing was marked." : "The withdrawal was settled since you opened this, so it was closed. Nothing was marked.");
-    setRefocus(true);
   }
   const confirmLinkedin = (c: LinkedinConfirmation) => {
     focusNext.current = "status";
@@ -345,7 +340,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
               onClick={() => {
                 controls.dismiss(target);
                 setUnstored(false);
-                setRefocus(false);
+                setLinkedinClosed(null);
                 setOpened(openLeadConfirmation(lead, c.action));
               }}
             >
@@ -366,7 +361,6 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
               onClick={() => {
                 controls.dismiss(target);
                 setUnstored(false);
-                setRefocus(false);
                 setLinkedinClosed(null);
                 setLinkedinOpened({ action: "mark_replied", status: lead.status });
               }}
@@ -394,7 +388,6 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
                 onClick={() => {
                   controls.dismiss(target);
                   setUnstored(false);
-                  setRefocus(false);
                   setLinkedinClosed(null);
                   setLinkedinOpened({ action: a.answer === "withdrawn" ? "invite_withdrawn" : "invite_kept", trackId: t.trackId, status: lead.status });
                 }}
@@ -405,7 +398,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
           )}
         </div>
       )}
-      {linkedinClosed !== null && !linkedinOpened && (
+      {linkedinClosed !== null && !linkedinOpened && !opened && (
         <p ref={closedRef} tabIndex={-1} data-rescue="1" role="status" className="rounded-field bg-pause-soft px-4 py-2.5 text-[14px] text-base-content outline-offset-4">
           {linkedinClosed}
         </p>
@@ -441,6 +434,11 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
       )}
     </div>
   );
+}
+
+/** Why a lead control's confirmation closed when a newer read stopped offering it (re-check of a6c1700, item 11). */
+export function closedBecause(action: LeadControlApi): string {
+  return `${CONTROL_LABEL[action]} was closed: this row changed since you opened it, so nothing was sent. What it shows now is above.`;
 }
 
 /** Beside a confirmation whose row a newer read changed: what it shows, and sends, is still what was opened. */
@@ -500,7 +498,9 @@ export function CampaignPauseControl({
   const [opened, setOpened] = useState<CampaignConfirmation | null>(null);
   const confirming = opened?.action ?? null;
   const [unstored, setUnstored] = useState(false);
-  const [refocus, setRefocus] = useState(false);
+  // Why the confirmation closed under the user, said and focused (re-check of a6c1700, item 11): the one owner of focus.
+  const [closed, setClosed] = useState<string | null>(null);
+  const closedRef = useRef<HTMLParagraphElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const focusNext = useRef<"status" | null>(null);
   const allowed = read.controls.find((c) => c.allowed);
@@ -510,12 +510,12 @@ export function CampaignPauseControl({
   // action the read allows now is never left disabled behind it (review bot on 07fab27, P2).
   if (confirming !== null && confirming !== action) {
     setOpened(null);
-    setRefocus(true);
+    setClosed(`${confirming === "pause" ? "Pause campaign" : "Resume campaign"} was closed: the campaign was ${confirming === "pause" ? "paused" : "resumed"} elsewhere since you opened it, so nothing was sent.`);
   }
-  // Focus goes back to the campaign's control once a confirmation another tab's change closed (verifier F2 on 8a1732a).
+  // Focus goes to why the confirmation closed, never the page body (verifier F2 on 8a1732a; re-check of a6c1700, item 11).
   useEffect(() => {
-    if (refocus) triggerRef.current?.focus();
-  }, [refocus]);
+    if (closed !== null) closedRef.current?.focus();
+  }, [closed]);
   const button = action ? (
     <button
       type="button"
@@ -526,7 +526,7 @@ export function CampaignPauseControl({
       onClick={() => {
         controls.dismiss(target);
         setUnstored(false);
-        setRefocus(false);
+        setClosed(null);
         setOpened(openCampaignConfirmation(read, action));
       }}
     >
@@ -539,9 +539,14 @@ export function CampaignPauseControl({
       el.focus();
     }
   };
-  const showing = opened !== null || busy || unstored || controls.result(target) !== null;
+  const showing = opened !== null || busy || unstored || controls.result(target) !== null || closed !== null;
   const strip = !showing ? null : (
       <div className="flex flex-col gap-2">
+      {closed !== null && !opened && (
+        <p ref={closedRef} tabIndex={-1} role="status" className="rounded-field bg-pause-soft px-4 py-2.5 text-[14px] text-base-content outline-offset-4">
+          {closed}
+        </p>
+      )}
       {opened && (
         <ConfirmStrip
           text={campaignConfirmText(opened.action, name, opened.read)}

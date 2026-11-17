@@ -22,6 +22,8 @@ export function BeforeLaunchTab({ campaignId, editor }: { campaignId: string; ed
   // Only checks for the current version are shown: while a newer version loads, the loading
   // state shows, not the older checks (PR 41 council, item 2).
   const facts = result.state === "ready" ? result.data : null;
+  // LinkedIn is said only for a campaign with a LinkedIn track (re-check of a6c1700, item 12).
+  const hasLinkedin = editor.view.definition.tracks.some((t) => !t.removed && t.channel === "linkedin");
   return (
     <div className="flex flex-col gap-4">
       <LaunchBar editor={editor} facts={facts} />
@@ -42,12 +44,12 @@ export function BeforeLaunchTab({ campaignId, editor }: { campaignId: string; ed
             <Blockers campaignId={campaignId} editor={editor} />
             <Warnings facts={facts} editor={editor} />
             <Card title="Channel coverage">
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 min-[1400px]:grid-cols-4">
+              <div className={`grid grid-cols-1 gap-2 ${hasLinkedin ? "sm:grid-cols-2 min-[1400px]:grid-cols-4" : "sm:grid-cols-3"}`}>
                 <Coverage n={facts.coverage.email} of={facts.coverage.leads} what="have an email" />
                 <Coverage n={facts.coverage.mobile} of={facts.coverage.leads} what="have a mobile" />
                 <Coverage n={facts.coverage.phone} of={facts.coverage.leads} what="have a phone number" />
-                {/* Ticket 24b: a member profile from the import, by the engine's own rule (a company page is not one). */}
-                <Coverage n={facts.coverage.linkedin} of={facts.coverage.leads} what="have a LinkedIn profile" />
+                {/* Ticket 24b: a member profile from the import, by the engine's own rule, only for a campaign with a LinkedIn track. */}
+                {hasLinkedin && <Coverage n={facts.coverage.linkedin} of={facts.coverage.leads} what="have a LinkedIn profile" />}
               </div>
             </Card>
             <Card title="Missing merge fields">
@@ -167,7 +169,7 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
           <span>
             <b className="font-semibold">{nothingToLaunch ? "No track yet." : "Nothing blocks launch."}</b>
             <span className="block text-ink-2">
-              {nothingToLaunch ? "With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, or no connected sender." : "Every message has copy, every merge field has a fallback where a lead lacks it, and every email, SMS and LinkedIn track has a sender."}
+              {nothingToLaunch ? "With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, or no connected sender." : `Every message has copy, every merge field has a fallback where a lead lacks it, and ${editor.view.definition.tracks.some((t) => !t.removed && t.channel === "linkedin") ? "every email, SMS and LinkedIn track has a sender." : "every email and SMS track has a sender."}`}
             </span>
           </span>
         </div>

@@ -152,9 +152,7 @@ export function SequenceTab({ campaignId, editor, paused = false }: { campaignId
               <span>
                 <b className="font-semibold text-base-content">{facts.coverage.phone}</b> a phone number
               </span>
-              <span>
-                <b className="font-semibold text-base-content">{facts.coverage.linkedin}</b> a LinkedIn profile
-              </span>
+
             </p>
           )}
           {/* The present state, from the draft and the stored version (council on 93bed86, item 15). */}

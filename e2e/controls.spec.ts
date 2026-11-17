@@ -246,8 +246,8 @@ test("a confirmation the read no longer allows closes, and the control the read 
   await expect(page.getByRole("heading", { name: /^Paused since/ })).toBeVisible();
   await expect(page.getByRole("group")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Resume campaign: Clinics, London" })).toBeEnabled();
-  // Focus returns to the campaign's control, never the page body (verifier F2 on 8a1732a).
-  await expect(page.getByRole("button", { name: "Resume campaign: Clinics, London" })).toBeFocused();
+  // Focus goes to why it closed, never the page body (verifier F2 on 8a1732a; ticket 24b, re-check of a6c1700, item 11).
+  await expect(page.getByText("Pause campaign was closed: the campaign was paused elsewhere since you opened it, so nothing was sent.")).toBeFocused();
   // The reverse: Resume's confirmation open while another client resumes it.
   await page.getByRole("button", { name: "Resume campaign: Clinics, London" }).click();
   await expect(page.getByRole("group")).toContainText("Each lead continues where it was");
@@ -256,7 +256,7 @@ test("a confirmation the read no longer allows closes, and the control the read 
   await expect(page.getByRole("heading", { name: /^Paused since/ })).toHaveCount(0);
   await expect(page.getByRole("group")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Pause campaign: Clinics, London" })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Pause campaign: Clinics, London" })).toBeFocused();
+  await expect(page.getByText("Resume campaign was closed: the campaign was resumed elsewhere since you opened it, so nothing was sent.")).toBeFocused();
 
   await page.goto(`${f.url}/leads/people/${f.person("Amira Hassan")}`);
   await press(page, "Pause").click();
@@ -266,7 +266,7 @@ test("a confirmation the read no longer allows closes, and the control the read 
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(confirmStrip(page)).toHaveCount(0);
   await expect(press(page, "Resume")).toBeEnabled();
-  await expect(press(page, "Resume")).toBeFocused();
+  await expect(page.getByText("Pause was closed: this row changed since you opened it, so nothing was sent. What it shows now is above.")).toBeFocused();
 });
 
 test("a campaign paused from the list and resumed from its page: the Paused banner's counts are its leads', its calls leave Today and Calls, and its leads say so", async ({ page }) => {
@@ -311,4 +311,31 @@ test("a campaign paused from the list and resumed from its page: the Paused bann
     await expect(page.getByRole("heading", { name: /^Paused since/ })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Pause campaign: Clinics, London" })).toBeVisible();
   });
+});
+
+test("every lead confirmation another client closes says why and holds focus, in both themes (ticket 24b, re-check of a6c1700, item 11)", async ({ page }) => {
+  for (const theme of ["light", "dark"] as const) {
+    const f = await app(`closed-${theme}`);
+    await page.emulateMedia({ colorScheme: theme });
+    const lead = (await f.harness.request<LeadSearchResult>("GET", `/api/leads?campaign=${f.campaign}`)).body.rows.find((r) => r.name === "Amira Hassan")?.enrollments[0]?.id ?? "";
+    let n = 0;
+    const elsewhere = async (action: string) => expect((await f.harness.request("POST", `/api/enrollments/${lead}/controls`, { requestId: `elsewhere-${theme}-${++n}`, action })).status).toBe(200);
+    // Open a control's confirmation by keyboard, let another client act, and read again: the reason line holds focus.
+    const closedBy = async (control: string, other: string) => {
+      await open(page, f, `/leads/people/${f.person("Amira Hassan")}`);
+      await press(page, control).focus();
+      await page.keyboard.press("Enter");
+      await expect(confirmStrip(page)).toBeVisible();
+      await elsewhere(other);
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await expect(confirmStrip(page)).toHaveCount(0);
+      await expect(page.getByText(`${control} was closed: this row changed since you opened it, so nothing was sent. What it shows now is above.`)).toBeFocused();
+    };
+    await closedBy("Pause", "pause");
+    await closedBy("Resume", "resume");
+    await closedBy("Stop", "stop");
+    await closedBy("Move to win-back", "resume_from_next_step");
+    await elsewhere("stop");
+    await closedBy("Resume from the next step", "move_to_win_back");
+  }
 });
