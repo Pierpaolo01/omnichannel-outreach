@@ -151,7 +151,8 @@ export function capacityItems(waiting: NeedsAttention["waitingForCapacity"], tod
   return [...groups.values()].map((steps) => {
     const first = steps[0] as NeedsAttention["waitingForCapacity"][number];
     const leads = new Set(steps.map((w) => w.enrollmentId)).size;
-    const byChannel = (["email", "sms"] as const satisfies readonly Channel[]).flatMap((c) => {
+    // LinkedIn too (ticket 24b): a LinkedIn step waiting for its session's allowance read "their due  waits" before.
+    const byChannel = (["email", "sms", "linkedin"] as const satisfies readonly Channel[]).flatMap((c) => {
       const n = steps.filter((w) => w.channel === c).length;
       return n > 0 ? [{ words: CHANNEL_WORDS[c], n }] : [];
     });

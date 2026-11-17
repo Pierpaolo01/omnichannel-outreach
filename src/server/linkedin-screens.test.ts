@@ -4,7 +4,7 @@ import { EngineHarness } from "../../test/support/engine-harness.ts";
 import { business, person } from "../../test/support/export-builder.ts";
 import { NOTHING_SENT_ON_LINKEDIN } from "../domain/sequence/controls.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../domain/sequence/definition.ts";
-import type { BeforeLaunchView, EnrollmentRead, LeadSearchResult, TestRunTab } from "../shared/api.ts";
+import type { ActivityView, BeforeLaunchView, EnrollmentRead, LeadSearchResult, TestRunTab } from "../shared/api.ts";
 
 /**
  * The reads ticket 24's screens need that part a did not serve (ticket 24, part b): LinkedIn coverage on Before launch, whether
@@ -119,5 +119,25 @@ describe("the Test run tab's LinkedIn read (ADR 0004 section 8)", () => {
     const marked = await h.request<TestRunTab>("POST", `/api/test-runs/${run?.id ?? ""}/replies`, { requestId: "mark-1", channel: "linkedin", expect: { status: run?.status } });
     expect(marked.status).toBe(200);
     expect(marked.body.run).toMatchObject({ running: false, ending: "your_reply", linkedinReply: { allowed: false } });
+  });
+});
+
+describe("Activity's LinkedIn entries (ticket 24b; part a left LinkedIn tracks out of Activity)", () => {
+  test("the invite and the first message as sent, on LinkedIn; a person with no profile skips the track as no profile, never as no mobile", async () => {
+    const { h, id } = await world();
+    h.linkedin.profiles.set(PAT, { acceptAfterMs: 2 * H });
+    await h.defineSequence(id, definition([LI]));
+    h.clock = MONDAY_9;
+    expect((await h.launch(id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 5 * H);
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${id}`)).body.rows;
+    const activity = async (name: string) => (await h.request<ActivityView>("GET", `/api/people/${rows.find((r) => r.name === name)?.id ?? ""}/activity`)).body.entries;
+    const pat = await activity("Pat Oneil");
+    expect(pat.filter((e) => e.kind === "sent").map((e) => [e.kind, "channel" in e ? e.channel : null, "stepNumber" in e ? e.stepNumber : null])).toEqual([
+      ["sent", "linkedin", 2],
+      ["sent", "linkedin", 1],
+    ]);
+    const ola = await activity("Ola Berg");
+    expect(ola.find((e) => e.kind === "skipped")).toMatchObject({ channel: "linkedin", reason: "no_profile" });
   });
 });

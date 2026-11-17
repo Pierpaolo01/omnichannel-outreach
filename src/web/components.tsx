@@ -6,6 +6,7 @@ import { declinedRecordLine, recordCallLine } from "./calls/wording.ts";
 import { Icon } from "./icons.tsx";
 import { StatusBadge } from "./status.tsx";
 import { CampaignPausedMarker, LeadControls, LeadSentence } from "./controls/ControlViews.tsx";
+import { linkedinTrackLines } from "./campaign/linkedin-wording.ts";
 import { CALL_LINE_IS_THE_SENTENCE } from "./controls/wording.ts";
 import type { Controls } from "./controls/useControls.ts";
 import { clockIn, useNow, clockTime } from "./time.ts";
@@ -166,6 +167,14 @@ export function CampaignRows({
             </div>
             {/* One sentence per row: a row waiting on a call or a callback says it by its call line, when it has one (council on 57d874f, item 4b). */}
             {lead && !(CALL_LINE_IS_THE_SENTENCE[status] && (calls?.calls.some((c) => c.enrollmentId === enrollment.id) ?? false)) && <LeadSentence lead={lead} userZone={leads.userZone} />}
+            {/* A LinkedIn track's facts (ticket 24b): its note, connection, ending and an invite left open, from the read. */}
+            {lead?.tracks
+              .flatMap((t) => linkedinTrackLines(t, status, leads.userZone).map((line) => ({ key: `${t.trackId}-${line}`, line })))
+              .map(({ key, line }) => (
+                <p key={key} className="text-[14px] text-ink-2 [overflow-wrap:anywhere]">
+                  {line}
+                </p>
+              ))}
             {/* A decline on a call and the path it took (ticket 16c), beside the status the server reads now. */}
             {calls?.declines
               .filter((d) => d.enrollmentId === enrollment.id)

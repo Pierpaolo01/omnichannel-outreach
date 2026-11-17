@@ -90,6 +90,12 @@ const REASON: Readonly<Record<string, string>> = {
   block_list: "The address is on Instantly’s block list.",
   "invalid address": "Instantly refused the address as invalid. It is marked wrong.",
   "invalid number": "The number was refused as invalid. It is marked wrong.",
+  // LinkedIn (ticket 24b; ADR 0004 sections 3 and 5).
+  no_profile: "No LinkedIn member profile in the import.",
+  already_connected: "Your LinkedIn session was already connected to them, so no invite was needed.",
+  "profile unreachable": "LinkedIn refused the profile as unreachable. It is marked wrong.",
+  // Q37: the connection is gone (they removed it); the profile stays theirs and is not marked wrong.
+  "not connected": "LinkedIn refused the message: they are no longer connected. The profile isn’t marked wrong.",
 };
 
 const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";

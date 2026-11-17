@@ -30,11 +30,19 @@ export interface CampaignExpectation {
   readonly pausedSince: string | null;
 }
 
+/**
+ * What a record's control press can be: a lead control, the LinkedIn reply mark, or one of the two answers to a withdrawal
+ * LinkedIn never confirmed (ticket 24b; ADR 0004 sections 3.3 and 7). Each is stored and sent on the same rule.
+ */
+export type RecordControl = LeadControlApi | "mark_replied" | "invite_withdrawn" | "invite_kept";
+
 export interface PressEntry {
   readonly v: 2;
   readonly requestId: string;
   readonly target: ControlTarget;
-  readonly action: LeadControlApi;
+  readonly action: RecordControl;
+  /** For a withdrawal answer: the LinkedIn track it is about. */
+  readonly trackId?: string;
   readonly expect: LeadExpectation | CampaignExpectation;
   /** When it was pressed, on this device's clock: presses on one target are taken oldest first. */
   readonly pressedAt: number;
@@ -85,6 +93,24 @@ function parse(text: string | null): PressEntry | null {
     return typeof value === "object" && value !== null && "v" in value && value.v === 2 && "requestId" in value && typeof value.requestId === "string" ? (value as PressEntry) : null;
   } catch {
     return null;
+  }
+}
+
+/** The route and body a stored press is sent with, every send the same (the server binds a request id to its first body). */
+export function controlRequestOf(entry: PressEntry): { readonly path: string; readonly body: Record<string, unknown> } {
+  const { target } = entry;
+  const id = encodeURIComponent(target.id);
+  if (target.kind === "campaign") return { path: `/api/campaigns/${id}/${entry.action}`, body: { requestId: entry.requestId, expect: entry.expect } };
+  switch (entry.action) {
+    // The mark is confirmed on the status the read showed (ADR 0004 section 7: `expect` holds the status only).
+    case "mark_replied":
+      return { path: `/api/enrollments/${id}/replies`, body: { requestId: entry.requestId, channel: "linkedin", expect: { status: (entry.expect as LeadExpectation).status } } };
+    case "invite_withdrawn":
+    case "invite_kept":
+      return { path: `/api/enrollments/${id}/invite-withdrawal`, body: { requestId: entry.requestId, trackId: entry.trackId ?? "", answer: entry.action === "invite_withdrawn" ? "withdrawn" : "kept" } };
+    default:
+      // Every send carries what the confirmation showed: the server applies the control only while it still holds (ticket 17b).
+      return { path: `/api/enrollments/${id}/controls`, body: { requestId: entry.requestId, action: entry.action, expect: entry.expect } };
   }
 }
 
@@ -140,11 +166,11 @@ export class ControlRequests {
   }
 
   /** Stores a press under a new request id, with what its confirmation showed, then sends it. */
-  press(target: ControlTarget, action: LeadControlApi, expect: LeadExpectation | CampaignExpectation): Promise<PressOutcome> {
+  press(target: ControlTarget, action: RecordControl, expect: LeadExpectation | CampaignExpectation, trackId?: string): Promise<PressOutcome> {
     // This page offers no control while it sees a press on its way for the target; another tab's press made at the same
     // moment is the server's to judge, by its precondition.
     if (this.halted() || this.pendingFor(target)) return Promise.resolve({ ok: false, why: "busy" });
-    const entry: PressEntry = { v: 2, requestId: this.ports.newId(), target, action, expect, pressedAt: this.ports.now() };
+    const entry: PressEntry = { v: 2, requestId: this.ports.newId(), target, action, expect, pressedAt: this.ports.now(), ...(trackId !== undefined ? { trackId } : {}) };
     if (!this.ports.local.set(keyOf(entry.requestId), JSON.stringify(entry))) return Promise.resolve({ ok: false, why: "unstored" });
     this.ports.onChange();
     void this.send(entry.requestId);

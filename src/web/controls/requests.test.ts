@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { KeyValue } from "../calls/callDesk.ts";
-import { ControlRequests, NoControlAnswer, shownResult, type ControlResult, type ControlTarget, type PressEntry, type SendAnswer } from "./requests.ts";
+import { ControlRequests, NoControlAnswer, controlRequestOf, shownResult, type ControlResult, type ControlTarget, type PressEntry, type SendAnswer } from "./requests.ts";
 
 /**
  * The controls' requests (ticket 17b), on the call desk's rule (ADR 0003 4.4.1), with no lock: a press is stored, under
@@ -397,5 +397,23 @@ describe("each tab's answer line belongs to its own press (verifier R2 on 57d874
     // Another tab's refusal does not replace this tab's own accepted line either.
     const ownAccepted: ControlResult = { kind: "accepted", entry: entry("b-pause", "pause"), body: null };
     expect(shownResult(ownAccepted, refusedSkip, new Set(["b-pause"]))).toBe(ownAccepted);
+  });
+});
+
+describe("each record control's request (ticket 24b)", () => {
+  const lead: ControlTarget = { kind: "lead", id: "en-1" };
+  const entry = (fields: Partial<PressEntry>): PressEntry => ({ v: 2, requestId: "r-1", target: lead, action: "pause", expect: { status: "active", preview: "d" }, pressedAt: 0, ...fields });
+  test("a lead control goes to its controls route with what the confirmation showed", () => {
+    expect(controlRequestOf(entry({}))).toEqual({ path: "/api/enrollments/en-1/controls", body: { requestId: "r-1", action: "pause", expect: { status: "active", preview: "d" } } });
+  });
+  test("the LinkedIn reply mark goes to its own route, confirmed on the status the read showed", () => {
+    expect(controlRequestOf(entry({ action: "mark_replied" }))).toEqual({ path: "/api/enrollments/en-1/replies", body: { requestId: "r-1", channel: "linkedin", expect: { status: "active" } } });
+  });
+  test("a stuck withdrawal's two answers go to the withdrawal route with the track", () => {
+    expect(controlRequestOf(entry({ action: "invite_withdrawn", trackId: "li" }))).toEqual({ path: "/api/enrollments/en-1/invite-withdrawal", body: { requestId: "r-1", trackId: "li", answer: "withdrawn" } });
+    expect(controlRequestOf(entry({ action: "invite_kept", trackId: "li" })).body).toMatchObject({ answer: "kept" });
+  });
+  test("a campaign's pause goes to its campaign route", () => {
+    expect(controlRequestOf({ v: 2, requestId: "r-2", target: { kind: "campaign", id: "c-1" }, action: "pause", expect: { pausedSince: null }, pressedAt: 0 })).toEqual({ path: "/api/campaigns/c-1/pause", body: { requestId: "r-2", expect: { pausedSince: null } } });
   });
 });

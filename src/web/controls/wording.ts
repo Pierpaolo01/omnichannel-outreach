@@ -12,6 +12,7 @@ import { lowerLabel, stepTitle } from "../../shared/track-label.ts";
 import { callHoldSentence, dateIn, holdReasonClause, HOURS_CLOSED_PHRASE, listedForPhrase } from "../calls/wording.ts";
 import { dayLabel } from "../calls/callbackTime.ts";
 import { STATUS_GROUP_LABEL } from "../status.tsx";
+import type { RecordControl } from "./requests.ts";
 
 export type AllowedControl = Extract<ControlView, { readonly allowed: true }>;
 
@@ -26,7 +27,11 @@ export const CONTROL_LABEL = {
   stop: "Stop",
   resume_from_next_step: "Resume from the next step",
   move_to_win_back: "Move to win-back",
-} as const satisfies Record<LeadControlApi, string>;
+  // Ticket 24b: the LinkedIn reply mark and a stuck withdrawal's two answers, pressed and stored like the controls.
+  mark_replied: "Mark replied on LinkedIn",
+  invite_withdrawn: "It’s withdrawn",
+  invite_kept: "It’s still there",
+} as const satisfies Record<RecordControl, string>;
 
 /** While a control is on its way: "Pausing…". */
 export const CONTROL_PENDING = {
@@ -36,7 +41,10 @@ export const CONTROL_PENDING = {
   stop: "Stopping",
   resume_from_next_step: "Resuming from the next step",
   move_to_win_back: "Moving to win-back",
-} as const satisfies Record<LeadControlApi, string>;
+  mark_replied: "Marking replied on LinkedIn",
+  invite_withdrawn: "Marking the invite withdrawn",
+  invite_kept: "Marking the invite still there",
+} as const satisfies Record<RecordControl, string>;
 
 /** The controls the read allows now, in the prototype's order. A refused control is not offered. */
 export function offeredControls(lead: Pick<RecordLead, "controls">): AllowedControl[] {
@@ -285,7 +293,7 @@ function callSkipPreview(skips: ControlStepView): string {
 }
 
 /** What a control will do, before the user confirms: the read's preview, the engine's transition on a copy of the lead. */
-export function controlPreviewText(control: AllowedControl, campaign: RecordLead["campaignState"], userZone: string): string {
+export function controlPreviewText(control: AllowedControl, campaign: RecordLead["campaignState"], userZone: string, inviteOpen = false): string {
   const provider = mayStillSendText(control.withProvider);
   const next = control.next;
   switch (control.action) {
@@ -301,7 +309,8 @@ export function controlPreviewText(control: AllowedControl, campaign: RecordLead
       return join(what, next ? `Next: ${stepPhrase(next)}${due(next.when, userZone)}.` : null);
     }
     case "stop":
-      return join("Their outreach in this campaign stops: nothing more goes out and no call is listed. What was sent stays on record.", provider);
+      // Q38's interim (ADR 0004 3.4): a stop never withdraws a LinkedIn invite already sent, so the confirmation says so.
+      return join("Their outreach in this campaign stops: nothing more goes out and no call is listed. What was sent stays on record.", provider, inviteOpen ? "The LinkedIn invite already sent stays open on LinkedIn: stopping doesn’t withdraw it." : null);
     case "resume_from_next_step":
       return join(next ? `They resume at the next unsent step: ${stepPhrase(next)}${due(next.when, userZone)}.` : "They resume at the next unsent step.", campaign.paused ? "It waits while this campaign is paused." : null, "Nothing already sent goes again.");
     case "move_to_win_back":

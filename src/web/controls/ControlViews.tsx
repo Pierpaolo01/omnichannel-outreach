@@ -1,8 +1,11 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { CampaignPauseRead, ControlAnswer, LeadControlApi, OutreachStatus, RecordLead, StatusGroup } from "../../shared/api.ts";
 import { GroupCounts } from "../status.tsx";
+import { Icon } from "../icons.tsx";
+import { statusGroup } from "../../domain/outreach-status.ts";
 import type { Controls } from "./useControls.ts";
-import type { ControlTarget } from "./requests.ts";
+import type { ControlTarget, RecordControl } from "./requests.ts";
+import { MARK_REPLIED, WITHDRAWAL_ANSWERS } from "../campaign/linkedin-wording.ts";
 import { campaignConfirmationChanged, confirmationChanged, openCampaignConfirmation, openLeadConfirmation, type CampaignConfirmation, type LeadConfirmation } from "./confirmation.ts";
 import {
   CAMPAIGN_DONE,
@@ -94,8 +97,8 @@ function ControlStatus({
 }: {
   controls: Controls;
   target: ControlTarget;
-  pendingText: (action: LeadControlApi, own: boolean) => string;
-  effectText: (body: unknown, action: LeadControlApi) => string;
+  pendingText: (action: RecordControl, own: boolean) => string;
+  effectText: (body: unknown, action: RecordControl) => string;
   unstored: boolean;
   onDismiss: () => void;
   focusRef: (el: HTMLElement | null) => void;
@@ -171,10 +174,43 @@ const EXPECTED = {
  * still be sent, the controls the read allows in this status, each confirmed in place with the read's preview, and what it
  * did from the answer's effect. A refused control is not offered; where the user expects it, the read's reason is said.
  */
+/**
+ * A LinkedIn press the record confirms in place (ticket 24b): the reply mark, or an answer to a withdrawal LinkedIn never
+ * confirmed, each a snapshot of the read it opened on (the status it showed, which the mark sends as its expectation).
+ */
+type LinkedinConfirmation = { readonly action: "mark_replied"; readonly status: OutreachStatus } | { readonly action: "invite_withdrawn" | "invite_kept"; readonly trackId: string; readonly status: OutreachStatus };
+
+/** What each LinkedIn press says in its confirmation. */
+function linkedinConfirmText(c: LinkedinConfirmation): string {
+  switch (c.action) {
+    case "mark_replied":
+      return MARK_REPLIED.preview;
+    case "invite_withdrawn":
+      return "Mark the invite withdrawn? Do this only once LinkedIn no longer shows it as pending. The app stops asking LinkedIn about it, and another campaign may then invite this person from the same session.";
+    case "invite_kept":
+      return "Mark the invite still there? The app stops asking LinkedIn to withdraw it and leaves it open; this person stays with this campaign for the session.";
+    default: {
+      const unhandled: never = c;
+      throw new Error(`A LinkedIn press with no confirmation: ${String(unhandled)}`);
+    }
+  }
+}
+
+/** Whether the read still offers what a LinkedIn confirmation opened on, with the same status. */
+function linkedinStillOffered(c: LinkedinConfirmation, lead: RecordLead): boolean {
+  if (lead.status !== c.status) return false;
+  if (c.action === "mark_replied") return lead.linkedinReply?.allowed === true;
+  return lead.tracks.some((t) => t.trackId === c.trackId && t.linkedin?.withdrawalStuck === true);
+}
+
 export function LeadControls({ lead, userZone, controls, who, campaignName }: { lead: RecordLead; userZone: string; controls: Controls; who: string; campaignName: string }) {
   const target: ControlTarget = { kind: "lead", id: lead.id };
   // The confirmation open, as a snapshot of the read it opened on (council on 57d874f, item 1): what it shows and sends.
   const [opened, setOpened] = useState<LeadConfirmation | null>(null);
+  const [linkedinOpened, setLinkedinOpened] = useState<LinkedinConfirmation | null>(null);
+  const linkedinTrigger = useRef<HTMLButtonElement | null>(null);
+  // The withdrawal answers the read asks for (ADR 0004 3.3), one pair per LinkedIn track whose withdrawal is stuck.
+  const stuck = lead.tracks.filter((t) => t.linkedin?.withdrawalStuck === true);
   const [unstored, setUnstored] = useState(false);
   const triggers = useRef(new Map<LeadControlApi, HTMLButtonElement>());
   const firstControl = useRef<HTMLButtonElement | null>(null);
@@ -185,7 +221,10 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   const busy = controls.pending(target) !== null || bulkPending;
   const sentence = nextStepSentence(lead, userZone);
   // Before launch every control is refused for that one reason, which the sentence already says.
-  const reasons = lead.campaignState.launched ? [...new Set(EXPECTED[lead.status].map((a) => refusalOf(lead, a)).filter((r): r is string => r !== null && r !== sentence))] : [];
+  // The reply mark's refusal is said where the user expects the mark: while the lead runs or waits on them (ticket 24b).
+  const markRefused = lead.linkedinReply && !lead.linkedinReply.allowed && (statusGroup(lead.status) === "running" || statusGroup(lead.status) === "waiting_on_you") ? lead.linkedinReply.reason : null;
+  const reasons = lead.campaignState.launched ? [...new Set([...EXPECTED[lead.status].map((a) => refusalOf(lead, a)), markRefused].filter((r): r is string => r !== null && r !== sentence))] : [];
+  const markOffered = lead.linkedinReply?.allowed === true;
 
   // A confirmation whose control the read no longer allows (another tab, the worker) closes, and focus stays in the row;
   // one still allowed keeps its snapshot, and says when the row changed.
@@ -216,7 +255,23 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
       el.focus();
     }
   };
-  const label = (a: LeadControlApi) => `${CONTROL_LABEL[a]}: ${who} in ${campaignName}`;
+  const label = (a: RecordControl) => `${CONTROL_LABEL[a]}: ${who} in ${campaignName}`;
+  // A LinkedIn confirmation whose press the read no longer offers closes; focus stays in the row.
+  if (linkedinOpened !== null && !linkedinStillOffered(linkedinOpened, lead) && controls.pending(target) === null) {
+    setLinkedinOpened(null);
+    setRefocus(true);
+  }
+  const confirmLinkedin = (c: LinkedinConfirmation) => {
+    focusNext.current = "status";
+    void controls.press(target, c.action, { status: c.status, preview: c.action }, c.action === "mark_replied" ? undefined : c.trackId).then((out) => {
+      if (!out.ok && out.why === "busy") {
+        focusNext.current = null;
+        return;
+      }
+      setLinkedinOpened(null);
+      setUnstored(!out.ok && out.why === "unstored");
+    });
+  };
 
   return (
     <>
@@ -235,7 +290,10 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
         controls={controls}
         target={target}
         pendingText={(a) => `${CONTROL_PENDING[a]}…`}
-        effectText={(body) => {
+        effectText={(body, action) => {
+          if (action === "mark_replied") return MARK_REPLIED.done;
+          if (action === "invite_withdrawn") return WITHDRAWAL_ANSWERS[0].done;
+          if (action === "invite_kept") return WITHDRAWAL_ANSWERS[1].done;
           const answer = body as ControlAnswer | null;
           return answer?.effect ? controlEffectText(answer.effect) : "Done.";
         }}
@@ -247,7 +305,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
         }}
         focusRef={placeStatus}
       />
-      {offered.length > 0 && !opened && (
+      {(offered.length > 0 || markOffered) && !opened && !linkedinOpened && (
         <div className="flex flex-wrap gap-1.5">
           {offered.map((c, i) => (
             <button
@@ -270,11 +328,69 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
               {CONTROL_LABEL[c.action]}
             </button>
           ))}
+          {/* The LinkedIn reply mark (ADR 0004 section 7): offered while the read allows it, last, as the user's own mark. */}
+          {markOffered && (
+            <button
+              type="button"
+              ref={(el) => {
+                linkedinTrigger.current = el;
+                if (offered.length === 0) firstControl.current = el;
+              }}
+              aria-label={label("mark_replied")}
+              disabled={busy}
+              className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium"
+              onClick={() => {
+                controls.dismiss(target);
+                setUnstored(false);
+                setRefocus(false);
+                setLinkedinOpened({ action: "mark_replied", status: lead.status });
+              }}
+            >
+              <Icon name="linkedin" className="size-4" />
+              {MARK_REPLIED.label}
+            </button>
+          )}
         </div>
+      )}
+      {stuck.length > 0 && !opened && !linkedinOpened && (
+        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label={`Was the LinkedIn invite to ${who} withdrawn?`}>
+          {stuck.flatMap((t) =>
+            WITHDRAWAL_ANSWERS.map((a) => (
+              <button
+                key={`${t.trackId}-${a.answer}`}
+                type="button"
+                aria-label={`${a.label}: the LinkedIn invite to ${who} in ${campaignName}`}
+                disabled={busy}
+                className="btn btn-sm border-line-strong bg-base-100 font-medium"
+                onClick={(e) => {
+                  linkedinTrigger.current = e.currentTarget;
+                  controls.dismiss(target);
+                  setUnstored(false);
+                  setRefocus(false);
+                  setLinkedinOpened({ action: a.answer === "withdrawn" ? "invite_withdrawn" : "invite_kept", trackId: t.trackId, status: lead.status });
+                }}
+              >
+                {a.label}
+              </button>
+            )),
+          )}
+        </div>
+      )}
+      {linkedinOpened && (
+        <ConfirmStrip
+          text={linkedinConfirmText(linkedinOpened)}
+          action={CONTROL_LABEL[linkedinOpened.action]}
+          busy={busy ? "Another change to this lead is on its way." : null}
+          onConfirm={() => confirmLinkedin(linkedinOpened)}
+          onCancel={() => {
+            setLinkedinOpened(null);
+            requestAnimationFrame(() => (linkedinTrigger.current ?? firstControl.current)?.focus());
+          }}
+        />
       )}
       {opened && (
         <ConfirmStrip
-          text={controlPreviewText(opened.control, opened.campaignState, userZone)}
+          text={controlPreviewText(opened.control, opened.campaignState, userZone, opened.inviteOpen)}
           action={CONTROL_LABEL[opened.action]}
           changed={confirmationChanged(opened, lead) ? ROW_CHANGED : null}
           busy={busy ? "Another change to this lead is on its way." : null}
