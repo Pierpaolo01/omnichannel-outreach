@@ -1,3 +1,4 @@
+import { MIGRATIONS } from "../../src/server/persistence/migrations.ts";
 /**
  * What later migrations added, undone, for a test that takes a database back to before an earlier migration and lets
  * the application upgrade it again (migration-N.test.ts). Its tables rebuilt by 18 keep their shape when 18 runs again.
@@ -22,18 +23,27 @@ export const UNDO_SINCE_18 = `
  * Migration 22 undone (ticket 24, ADR 0004): the columns and tables it added, dropped. The four tables it rebuilt need no
  * undoing: a later run of 22 rebuilds them from the columns it names. Run first by every undo that goes back past 22.
  */
-/** Migration 25 undone (ticket 27): the InMail fallback's columns and triggers, dropped. Run first by every undo past 25. */
+/**
+ * The InMail fallback's migration (ticket 27), by its name, so a renumber at merge time changes nothing here (council on
+ * 8b0c846, item 4): its undo deletes its own row only.
+ */
+const INMAIL_VERSION = MIGRATIONS.find((m) => m.name.startsWith("the LinkedIn InMail fallback"))!.version;
+/** The InMail fallback's migration undone: its columns, index and triggers dropped. Run first by every undo going back past it. */
 export const UNDO_25 = `
   DROP TRIGGER track_progress_inmail_forward;
   DROP TRIGGER track_progress_inmail_forward_replace;
+  DROP INDEX track_progress_inmail_holdings;
   ALTER TABLE track_progress DROP COLUMN inmail;
   ALTER TABLE track_progress DROP COLUMN inmail_session;
+  ALTER TABLE track_progress DROP COLUMN inmail_hold_wall;
+  ALTER TABLE track_progress DROP COLUMN inmail_reported_wall;
+  ALTER TABLE track_progress DROP COLUMN inmail_replaces;
   ALTER TABLE provider_work DROP COLUMN inmail;
   ALTER TABLE attempts DROP COLUMN inmail;
   ALTER TABLE sender_accounts DROP COLUMN inmail_plan;
   ALTER TABLE sender_accounts DROP COLUMN inmail_credits;
   ALTER TABLE sender_accounts DROP COLUMN inmail_reported_wall;
-  DELETE FROM schema_migrations WHERE version >= 25;
+  DELETE FROM schema_migrations WHERE version = ${INMAIL_VERSION};
 `;
 /** Migration 24 undone (ticket 24b): a LinkedIn skip's recorded cause, dropped. Run first by every undo that goes back past 24. */
 export const UNDO_24 = `${UNDO_25}

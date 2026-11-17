@@ -13,6 +13,8 @@ import { migrate, MIGRATIONS } from "./migrations.ts";
  */
 /** This migration's number: the InMail fallback's, wherever the sequence put it at merge time. */
 const INMAIL = MIGRATIONS.find((m) => m.name.startsWith("the LinkedIn InMail fallback"))!.version;
+/** A lead with its invitation sent and still waiting, as the tip `5c43963` wrote it with its own code (migrations 1 to 24). */
+const WAITING = readFileSync(path.join(import.meta.dirname, "../../../test/fixtures/upgrade/tip-5c43963-linkedin-waiting.sql"), "utf8").split("\n").filter((l) => l.trim() !== "");
 const ROWS = readFileSync(path.join(import.meta.dirname, "../../../test/fixtures/upgrade/tip-9ae8c38-linkedin-skip.sql"), "utf8").split("\n").filter((l) => l.trim() !== "");
 const dirs: string[] = [];
 afterEach(() => {
@@ -44,6 +46,35 @@ describe("the InMail fallback's migration on a database just before it", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM attempts WHERE inmail <> 0").get()).toEqual({ n: 0 });
     await h.tick();
     expect(db.prepare("SELECT inmail_plan, inmail_credits FROM sender_accounts WHERE id = 'linkedin:li-session-1'").get()).toEqual({ inmail_plan: "sales_navigator", inmail_credits: 3 });
+    await h.store.close();
+  });
+
+  test("a lead the tip left waiting for acceptance: after the upgrade its expiry takes the withdrawal path, the fallback null (council on 8b0c846, item 4)", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "migration-inmail-waiting-"));
+    dirs.push(dir);
+    const file = path.join(dir, "app.db");
+    const tip = new DatabaseSync(file);
+    migrate(tip, () => "2026-11-02T09:00:00.000Z", MIGRATIONS.filter((m) => m.version < INMAIL));
+    tip.exec("PRAGMA foreign_keys = OFF");
+    for (const row of WAITING) tip.exec(row);
+    tip.exec("PRAGMA foreign_keys = ON");
+    expect(tip.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    tip.close();
+    const h = new EngineHarness({
+      start: Date.parse("2026-11-02T12:00:00Z"),
+      databasePath: file,
+      idPrefix: "after-inmail",
+      accounts: [{ id: "inbox-a", capacity: 50, gapMs: 60_000, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+      // The session reports Premium with credits: the track has no InMail step, so nothing about the fallback applies.
+      linkedin: { sessions: [{ id: "li-session-1", gapMs: 60_000, k: 1, healthy: true, resetZone: "Europe/London", inmail: { plan: "premium", credits: 3 } }] },
+    });
+    const db = (h.store.engine as unknown as { db: DatabaseSync }).db;
+    const before = db.prepare("SELECT accept_by_wall, inmail, inmail_hold_wall FROM track_progress WHERE track_id = 'li'").get() as { accept_by_wall: number; inmail: null; inmail_hold_wall: null };
+    expect(before).toMatchObject({ inmail: null, inmail_hold_wall: null });
+    await h.advanceTo(before.accept_by_wall + 3_600_000);
+    expect(db.prepare("SELECT finish_reason, inmail, invite_withdrawal FROM track_progress WHERE track_id = 'li'").get()).toEqual({ finish_reason: "invite_not_accepted", inmail: null, invite_withdrawal: "wanted" });
+    // The withdrawal is asked; this harness's simulated provider never saw the tip's invite, so it cannot confirm it.
+    expect(h.linkedin.handoverLog.some((x) => x.action === "inmail")).toBe(false);
     await h.store.close();
   });
 
