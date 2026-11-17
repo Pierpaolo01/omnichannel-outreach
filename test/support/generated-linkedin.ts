@@ -141,6 +141,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   // The events the review of 194fc44 added (council item 2) draw from a stream of their own, so the first stream's draws
   // are unchanged: two campaigns sharing people, stops, campaign pauses, skips, a crash, a session signing out, running edits.
   const rnd2 = random(seed * 7 + 13);
+  // The InMail fallback (ticket 27, ADR 0004 13.11) draws from a third stream: the first two streams' draws are unchanged.
+  const rnd3 = random(seed * 11 + 29);
   const features = new Set<string>();
   const problems: string[] = [];
   const problem = (text: string) => {
@@ -164,6 +166,15 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     sessions.push({ id: THIRD_SESSION, gapMs: 5 * MIN, k: 1, healthy: true, resetZone: "Europe/London" });
     allowances.set(THIRD_SESSION, { invites: Math.floor(rnd2() * 3), messages: Math.floor(rnd2() * 3) + 1, notes: Math.floor(rnd2() * 3) });
     features.add("a-third-session");
+  }
+  // Each session's InMail standing as it reports it (13.5): Premium, Sales Navigator, no plan, or no report at all, with
+  // credits from 0 to 3. The record keeps its own copy (`standingOf`); the simulated session spends one per InMail sent.
+  const inmailPlans = new Map<string, { plan: "premium" | "sales_navigator" | "none"; credits: number } | null>();
+  for (const s of sessions) {
+    const roll = rnd3();
+    const report = roll < 0.4 ? { plan: "premium" as const, credits: Math.floor(rnd3() * 4) } : roll < 0.65 ? { plan: "sales_navigator" as const, credits: Math.floor(rnd3() * 4) } : roll < 0.85 ? { plan: "none" as const, credits: 0 } : null;
+    inmailPlans.set(s.id, report);
+    if (report) (s as { inmail?: { plan: "premium" | "sales_navigator" | "none"; credits: number } }).inmail = { ...report };
   }
   const h = new EngineHarness({
     start: START,
@@ -189,6 +200,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       { id: `c${ci}-inv`, waitDays: 0, subject: "", body: noted ? "Hello {{first_name|there}}, I help clinics like {{company}}." : "", threading: "new_subject", removed: false },
       ...Array.from({ length: messages }, (_, i): StepDefinition => ({ id: `c${ci}-m${i + 1}`, waitDays: i === 0 ? Math.floor(rnd() * 2) : Math.floor(rnd() * 3), subject: "", body: `Message ${i + 1}, {{first_name|there}}.`, threading: "new_subject", removed: false })),
     ];
+    // The InMail fallback switched on in a share of campaigns, from the third stream: an InMail step right after the invite.
+    if (rnd3() < 0.45) steps.splice(1, 0, { id: `c${ci}-im`, waitDays: 0, subject: "", body: "An InMail, {{first_name|there}}.", threading: "new_subject", removed: false, role: "inmail" });
     const li: TrackDefinition = { id: `c${ci}-li`, channel: "linkedin", branch: "main", window: windowOf(rnd), steps, start: { kind: "entry" }, removed: false, acceptWaitDays: 1 + Math.floor(rnd() * 4) };
     const withEmail = rnd() < 0.5;
     const email: TrackDefinition | null = withEmail
@@ -249,6 +262,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       // check of the first session alone would never find.
       if (script?.connected && pool.length > 1 && rnd2() < 0.5) Object.assign(script, { connected: false, sessions: { [pool[1 + Math.floor(rnd2() * (pool.length - 1))]!]: { connected: true } } });
       if (script?.sessions) features.add("an-answer-of-one-session");
+      // A recipient LinkedIn refuses an InMail for (their settings), from the third stream.
+      if (script && rnd3() < 0.15) Object.assign(script, { refusesInmail: true });
       leads.push({ campaign: ci, name: `Lead${personNo} Fictional`, profile, email: `lead${personNo}@fictional.example`, zone, script, id: "" });
       if (profile && script) h.linkedin.profiles.set(profile, { ...script });
       (leads.at(-1) as Lead & { cell?: string }).cell = cell;
@@ -300,6 +315,16 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const userWithdrawn = new Map<string, number>();
   const campaignHeld = new Map<string, { from: number; to: number | null }[]>();
   const waitEdits = new Map<number, { at: number; days: number }[]>();
+  /** Each campaign's InMail fallback through the run's edits (13.8): on while its LinkedIn track has a live InMail step. */
+  const fallbackOn = (d: CampaignDefinition, ci: number) => d.tracks.some((t) => t.id === campaigns[ci]!.li.id && t.steps.some((s) => s.role === "inmail" && !s.removed));
+  const switches = new Map<number, { at: number; on: boolean }[]>(campaigns.map((c, i) => [i, [{ at: -Infinity, on: fallbackOn(c.definition, i) }]]));
+  const fallbackAt = (ci: number, at: number) => (switches.get(ci) ?? []).filter((x) => x.at <= at).at(-1)?.on ?? false;
+  const noteSwitch = (ci: number, d: CampaignDefinition) => {
+    const on = fallbackOn(d, ci);
+    if (on !== fallbackAt(ci, h.clock)) switches.get(ci)!.push({ at: h.clock, on });
+  };
+  /** The user spending a session's credits by hand (its credits at 0 from then): when, by session. */
+  const creditDrops: { session: string; at: number }[] = [];
   /** Each sign-out: from when, until when it was drawn to last, and when the run actually restored it. */
   const signedOut: { id: string; from: number; until: number; restored: number | null }[] = [];
   const healthyAt = (session: string, at: number) => !signedOut.some((o) => o.id === session && o.from <= at && at < (o.restored ?? Infinity));
@@ -330,6 +355,23 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     }
     return { span, clampedAt };
   };
+  /** A session's credits by the record (13.5): its first report, less every InMail the session delivered, zero after a spend by hand. */
+  const creditsAt = (session: string, at: number): number => {
+    const start = inmailPlans.get(session)?.credits ?? 0;
+    const events = [
+      ...h.linkedin.deliveryLog.filter((d) => d.action === "inmail" && d.sender === session && d.at <= at).map((d) => ({ at: d.at, drop: false })),
+      ...creditDrops.filter((x) => x.session === session && x.at <= at).map((x) => ({ at: x.at, drop: true })),
+    ].sort((a, b) => a.at - b.at);
+    let credits = start;
+    for (const e of events) credits = e.drop ? 0 : Math.max(0, credits - 1);
+    return credits;
+  };
+  const planned = (session: string) => {
+    const plan = inmailPlans.get(session)?.plan;
+    return plan === "premium" || plan === "sales_navigator";
+  };
+  /** Whether a session has a plan and a credit by the record at `at`. */
+  const standingFree = (session: string, at: number) => planned(session) && creditsAt(session, at) >= 1;
   /** The wall instant the deadline is reached: the lead's clock runs only outside its holds (a clamp held: at the resume). */
   const deadlineWall = (lead: Lead, sentAt: number, until: number): number => {
     const { span, clampedAt } = deadlineOf(lead, sentAt, until);
@@ -400,6 +442,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       features.add("the-laptop-was-off");
     }
     await extraEvent(rnd2());
+    await inmailEvent(rnd3());
     await check(false);
   }
   for (const s of signedOut) {
@@ -463,6 +506,135 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
 
   function li() {
     return h.linkedin;
+  }
+
+  /** L18 to L25 (ADR 0004 13.11), from the record's own model of the switch, the deadline, the acceptances and the credits. */
+  async function checkInmail(drained: boolean): Promise<void> {
+    const li = h.linkedin;
+    const now = h.clock;
+    const leadOf = (id: string) => leads.find((l) => l.id === id);
+    const inviteOf = (id: string) => li.deliveryLog.find((x) => x.subjectId === id && x.action === "invite");
+    // L22 (a): the simulated session never had to refuse an InMail for want of a plan or a credit.
+    for (const r of li.refusals) if (r.reason === "payment_required") problem(`L22: an InMail was handed to ${r.destination} at ${iso(r.at)} from a session with no plan or no credit`);
+    const counted = new Map<string, number>();
+    for (const x of li.handoverLog.filter((y) => y.action === "inmail")) {
+      const lead = leadOf(x.subjectId);
+      if (!lead) continue;
+      const refusal = li.refusals.find((r) => r.key === x.key);
+      // L18: at most one InMail per lead and session (a refusal for a limit is not one: it is asked again).
+      if (refusal?.reason !== "rate_limited") {
+        const k = `${x.subjectId}|${x.sender}`;
+        counted.set(k, (counted.get(k) ?? 0) + 1);
+        if ((counted.get(k) ?? 0) > 1) problem(`L18: ${x.subjectId} was handed a second InMail from ${x.sender} at ${iso(x.at)}`);
+      }
+      // L19: only while the campaign's fallback is on.
+      if (!fallbackAt(lead.campaign, x.at)) problem(`L19: ${x.subjectId}'s InMail was handed over at ${iso(x.at)} with the fallback off`);
+      const invite = inviteOf(x.subjectId);
+      if (!invite) {
+        problem(`L20: ${x.subjectId}'s InMail was handed over with no invite sent`);
+        continue;
+      }
+      // L20: never before the record's own deadline.
+      const deadline = deadlineWall(lead, invite.at, x.at);
+      if (x.at < deadline) problem(`L20: ${x.subjectId}'s InMail was handed over at ${iso(x.at)}, before the deadline ${iso(deadline)}`);
+      // L21: never after the person accepted (the session would have found them connected), nor once connected in time.
+      const acceptance = li.acceptanceLog.find((a) => a.key === invite.key);
+      if (acceptance && acceptance.at <= x.at && !lead.script?.connectionRemoved) problem(`L21: ${x.subjectId}'s InMail was handed over at ${iso(x.at)}, after they accepted at ${iso(acceptance.at)}`);
+      if (refusal?.reason === "inmail_refused") features.add("an-inmail-refused");
+      else if (!refusal) features.add("an-inmail-sent");
+    }
+    for (const lead of leads) {
+      const st = await h.store.engine.subject(lead.id, now);
+      const c = campaigns[lead.campaign]!;
+      const tp = st?.tracks.find((x) => x.trackId === c.li.id);
+      const invite = inviteOf(lead.id);
+      if (!st || !tp || !invite) continue;
+      const deadline = deadlineWall(lead, invite.at, tp.finishedWall ?? now);
+      const sender = invite.sender;
+      const state = tp.inmail ?? null;
+      const judged = state !== null;
+      // L19, at the expiry: judged only with the fallback on then; with it on and no connection, never ignored.
+      if (judged && state !== "accepted" && !fallbackAt(lead.campaign, deadline)) problem(`L19: ${lead.id}'s InMail fallback was judged (${state}) though it was off at the deadline ${iso(deadline)}`);
+      if (!judged && tp.finishReason === "invite_not_accepted" && fallbackAt(lead.campaign, deadline) && !li.deliveryLog.some((x) => x.subjectId === lead.id && x.action !== "invite")) {
+        // Edited out after the deadline is the only way the record allows (none happens while the lead's clock stands still).
+        problem(`L19: ${lead.id}'s invite expired with the fallback on and no InMail judged`);
+      }
+      // L22 (b, c): the choice by the session's own standing at the expiry, by the record's plan and credits.
+      if (state === "no_plan" && planned(sender)) problem(`L22: ${lead.id}'s InMail was refused as no plan, though ${sender} reports ${inmailPlans.get(sender)?.plan}`);
+      if (judged && state !== "no_plan" && !planned(sender)) problem(`L22: ${lead.id}'s InMail was ${state} from ${sender}, which reports no Premium or Sales Navigator`);
+      if (state !== null && state !== "no_plan" && state !== "no_credit" && state !== "accepted" && creditsAt(sender, deadline) < 1) problem(`L22: ${lead.id}'s InMail was chosen at ${iso(deadline)} with ${sender} out of credits by the record`);
+      if (state === "no_credit") {
+        // The credits other tracks had chosen before and not yet spent: a credit is free only beyond them.
+        let committed = 0;
+        for (const o of leads) {
+          if (o.id === lead.id) continue;
+          const ot = (await h.store.engine.subject(o.id, now))?.tracks.find((x) => x.trackId === campaigns[o.campaign]!.li.id);
+          const oi = inviteOf(o.id);
+          if (!ot || !oi || oi.sender !== sender || ot.inmail == null || ot.inmail === "no_plan" || ot.inmail === "no_credit") continue;
+          const od = deadlineWall(o, oi.at, ot.finishedWall ?? now);
+          const spent = li.deliveryLog.some((x) => x.subjectId === o.id && x.action === "inmail" && x.at <= deadline) || li.refusals.some((r) => r.at <= deadline && li.handoverLog.some((y) => y.key === r.key && y.subjectId === o.id && y.action === "inmail"));
+          if (od <= deadline && !spent) committed++;
+        }
+        if (creditsAt(sender, deadline) - committed >= 1) problem(`L22: ${lead.id}'s InMail was refused for want of a credit at ${iso(deadline)}, though ${sender} had ${creditsAt(sender, deadline)} with ${committed} committed`);
+        else features.add("an-inmail-without-a-credit");
+      }
+      if (state === "no_plan") features.add("an-inmail-without-a-plan");
+      // L24: a refused InMail ends the track on the withdrawal path; the profile stays good.
+      const refused = li.refusals.some((r) => r.reason === "inmail_refused" && li.handoverLog.some((y) => y.key === r.key && y.subjectId === lead.id));
+      if (refused && (state !== "refused" || tp.finishReason !== "invite_not_accepted" || (tp.inviteWithdrawal ?? null) === null)) problem(`L24: ${lead.id}'s InMail was refused, and its track is ${tp.finishReason ?? "running"} (InMail ${state}, withdrawal ${tp.inviteWithdrawal ?? "none"})`);
+      if (refused && st.lead.details.some((d) => d.channel === "linkedin" && d.bad)) problem(`L24: ${lead.id}'s profile was marked bad after LinkedIn refused an InMail`);
+      // L25: an InMail that went is never undone by a later switch-off: its track does not take the withdrawal path.
+      const went = li.deliveryLog.some((x) => x.subjectId === lead.id && x.action === "inmail");
+      if (went && tp.finishReason === "invite_not_accepted") problem(`L25: ${lead.id}'s InMail went, and its track took the withdrawal path`);
+      // L25, after the drain: a chosen InMail not yet handed over, with the fallback switched off since, takes the withdrawal path.
+      const handed = li.handoverLog.some((x) => x.subjectId === lead.id && x.action === "inmail");
+      if (drained && state === "chosen" && !handed && !fallbackAt(lead.campaign, now) && tp.finishedAt === null && st.subject.ended === null) problem(`L25: ${lead.id}'s InMail is still chosen though the fallback was switched off before it went`);
+      if (state === "switched_off") features.add("an-inmail-switched-off-before-it-went");
+      if (state === "accepted") features.add("an-acceptance-before-the-inmail-went");
+      // L23, after the drain: the first message never follows an InMail (it took its place).
+      if (drained && went) {
+        const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
+        const track = stored.tracks.find((x) => x.id === c.li.id);
+        const first = track?.steps.filter((s) => s.role !== "inmail" && !s.removed)[1]?.id;
+        const at = li.deliveryLog.find((x) => x.subjectId === lead.id && x.action === "inmail")?.at ?? Infinity;
+        if (first && li.deliveryLog.some((x) => x.subjectId === lead.id && x.stepId === first && x.at > at)) problem(`L23: ${lead.id}'s first message went after its InMail`);
+      }
+    }
+  }
+
+  /**
+   * The InMail fallback's events (13.11), from the third stream: the switch turned off (its step removed) or on again (a new
+   * InMail step after the invite), the InMail's text changed, and a session's credits spent by the user by hand.
+   */
+  async function inmailEvent(roll: number): Promise<void> {
+    if (roll >= 0.08) return;
+    const ci = Math.floor(rnd3() * campaigns.length);
+    const c = campaigns[ci]!;
+    if (roll < 0.05) {
+      const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
+      const on = fallbackOn(stored, ci);
+      const text = roll < 0.015 && on;
+      const tracks = stored.tracks.map((t) => {
+        if (t.id !== c.li.id) return t;
+        if (text) return { ...t, steps: t.steps.map((s) => (s.role === "inmail" && !s.removed ? { ...s, body: `An edited InMail ${requestNo}, {{first_name|there}}.` } : s)) };
+        if (on) return { ...t, steps: t.steps.map((s) => (s.role === "inmail" ? { ...s, removed: true } : s)) };
+        const at = t.steps.findIndex((s) => !s.removed);
+        const added = { id: `${t.id}-im${++requestNo}`, waitDays: 0, subject: "", body: "A new InMail, {{first_name|there}}.", threading: "new_subject" as const, removed: false, role: "inmail" as const };
+        return { ...t, steps: [...t.steps.slice(0, at + 1), added, ...t.steps.slice(at + 1)] };
+      });
+      if ((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, tracks })).status === 200) {
+        noteSwitch(ci, { ...stored, tracks });
+        features.add(text ? "an-inmail-text-edited" : on ? "the-fallback-switched-off" : "the-fallback-switched-on");
+      }
+      return;
+    }
+    const s = pickOf(rnd3, sessions);
+    const standing = h.linkedin.sessions.get(s.id)?.inmail;
+    if (standing && standing.credits > 0) {
+      standing.credits = 0;
+      creditDrops.push({ session: s.id, at: h.clock });
+      features.add("inmail-credits-spent-by-hand");
+    }
   }
 
   /** Whether the campaign is paused, by its read. */
@@ -635,6 +807,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       });
       const r = await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, tracks });
       if (r.status === 200) {
+        noteSwitch(lead.campaign, { ...stored, tracks });
         features.add(`a-running-edit:${kind}`);
         const days = tracks.find((t) => t.id === c.li.id)?.acceptWaitDays;
         if (kind === "wait" && days !== undefined) {
@@ -714,7 +887,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     const releaseOf = (subject: string, sender: string, destination: string): number | null => {
       const handed = li.handoverLog.filter((x) => x.subjectId === subject && x.sender === sender && x.destination === destination);
       const delivered = li.deliveryLog.filter((d) => d.subjectId === subject && d.sender === sender && d.destination === destination);
-      if (delivered.some((d) => d.action === "message")) return null;
+      if (delivered.some((d) => d.action !== "invite")) return null;
       if (delivered.length === 0) {
         const refused = handed.map((x) => li.refusals.find((r) => r.key === x.key && r.reason !== "rate_limited")?.at);
         return refused.length > 0 && refused.every((r) => r !== undefined) ? Math.max(...(refused)) : null;
@@ -732,7 +905,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     const beingWithdrawn = (subject: string, session: string, profile: string, at: number): boolean => {
       const owner = leadOfSubject(subject);
       const invite = li.deliveryLog.find((d) => d.subjectId === subject && d.sender === session && d.destination === profile && d.action === "invite");
-      if (!owner || !invite || li.deliveryLog.some((d) => d.subjectId === subject && d.destination === profile && d.action === "message")) return false;
+      if (!owner || !invite || li.deliveryLog.some((d) => d.subjectId === subject && d.destination === profile && d.action !== "invite")) return false;
       const answered = li.withdrawalLog.some((w) => w.key === invite.key && w.answer !== "unknown" && w.at <= at) || li.handWithdrawalLog.some((w) => w.key === invite.key && w.at <= at);
       // An invite accepted, and the acceptance reported, by then is a known conversation, not one being withdrawn (seeds 24035, 24071).
       const accepted = li.acceptanceLog.some((a) => a.key === invite.key && a.at + (owner.script?.acceptReportDelayMs ?? 0) <= at);
@@ -779,7 +952,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       if (own && own.subject !== x.subjectId && (own.releasedAt === null || own.releasedAt > x.at)) problem(`L11: ${x.subjectId}'s ${x.action} to ${x.destination} from ${x.sender} at ${iso(x.at)}, a pair ${own.subject} owns`);
       if (!own || own.subject !== x.subjectId) {
         const invites = li.deliveryLog.filter((d) => d.subjectId === x.subjectId && d.sender === x.sender && d.destination === x.destination && d.action === "invite");
-        const messaged = li.deliveryLog.some((d) => d.subjectId === x.subjectId && d.sender === x.sender && d.destination === x.destination && d.action === "message");
+        const messaged = li.deliveryLog.some((d) => d.subjectId === x.subjectId && d.sender === x.sender && d.destination === x.destination && d.action !== "invite");
         // Withdrawn by the session, or by the user's hand and released by their mark (seed 24073), as the release rule has it.
         const withdrawn = invites.map((d) => li.withdrawalLog.find((w) => w.key === d.key && w.answer === "withdrawn")?.at ?? (li.handWithdrawalLog.some((w) => w.key === d.key) ? (userWithdrawn.get(x.subjectId) ?? null) : null));
         const released = !messaged && invites.length > 0 && withdrawn.every((w) => w !== null) && !invites.some((d) => li.acceptanceLog.some((a) => a.key === d.key)) ? Math.max(...withdrawn.map(Number)) : null;
@@ -800,7 +973,10 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       const invite = li.deliveryLog.find((x) => x.subjectId === d.subjectId && x.trackId === d.trackId && x.action === "invite");
       const accepted = invite ? li.acceptanceLog.find((a) => a.key === invite.key && a.at <= d.at) : undefined;
       const connected = li.presendLog.some((p) => p.destination === d.destination && p.sender === d.sender && p.answer === "connected" && p.at <= d.at) && !invite;
-      if (!accepted && !connected) problem(`L2: ${d.subjectId}'s ${d.stepId} was handed over at ${iso(d.at)} before any connection`);
+      // L23: a follow-up goes without a connection only after an InMail delivered from that session to that profile (13.4).
+      const afterInmail = li.deliveryLog.some((x) => x.subjectId === d.subjectId && x.action === "inmail" && x.sender === d.sender && x.destination === d.destination && x.at <= d.at && x.visibleAt <= d.at);
+      if (!accepted && !connected && !afterInmail) problem(`${invite && li.deliveryLog.some((x) => x.subjectId === d.subjectId && x.action === "inmail") ? "L23" : "L2"}: ${d.subjectId}'s ${d.stepId} was handed over at ${iso(d.at)} before any connection${afterInmail ? "" : " or InMail known sent"}`);
+      if (afterInmail && !accepted) features.add("a-follow-up-after-an-inmail");
     }
     for (const d of li.deliveryLog.filter((x) => x.action === "message")) {
       const invite = li.deliveryLog.find((x) => x.subjectId === d.subjectId && x.trackId === d.trackId && x.action === "invite");
@@ -854,10 +1030,12 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     const notesPerMonth = new Map<string, number>();
     for (const d of li.deliveryLog) {
       const day = local(d.at, "Europe/London").day;
-      const k = `${d.sender}|${d.action}|${day}`;
+      // An InMail spends one of the session's messages (13.5).
+      const bucket = d.action === "invite" ? "invite" : "message";
+      const k = `${d.sender}|${bucket}|${day}`;
       perDay.set(k, (perDay.get(k) ?? 0) + 1);
-      const cap = d.action === "invite" ? allowanceOf(d.sender).invites : allowanceOf(d.sender).messages;
-      if ((perDay.get(k) ?? 0) > cap) problem(`L5: ${d.sender} sent more than ${cap} ${d.action}s on day ${day}`);
+      const cap = bucket === "invite" ? allowanceOf(d.sender).invites : allowanceOf(d.sender).messages;
+      if ((perDay.get(k) ?? 0) > cap) problem(`L5: ${d.sender} sent more than ${cap} ${bucket}s on day ${day}`);
       if (d.action === "invite" && d.rendered.body !== "") {
         const month = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London", year: "numeric", month: "2-digit" }).format(new Date(d.at));
         const mk = `${d.sender}|${month}`;
@@ -923,6 +1101,14 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           }
           if (hold !== null && !derivable(lead, p.trackId, p.nextStepId, hold) && !(hold === "invite_pending_elsewhere" && soleOwnerOf(lead))) problem(`L13: ${lead.id}'s ${p.nextStepId} is held (${hold}) for no reason the record can find`);
           if (p.dueAt === null && (p.acceptBy ?? null) === null && hold === null) problem(`L13: ${lead.id}'s ${p.nextStepId} is pending with nothing that can make it due`);
+          // A chosen InMail whose session the record finds out of credit, or with no plan, waits, said so (13.3).
+          const inmailBlocked = p.inmail === "chosen" && shown?.nextStep?.when.why === "inmail_unavailable";
+          if (inmailBlocked) {
+            const session = li.deliveryLog.find((x) => x.subjectId === lead.id && x.action === "invite")?.sender ?? "";
+            if (!standingFree(session, now)) features.add("an-inmail-waiting-for-a-credit");
+            else problem(`L22: ${lead.id}'s InMail reads unavailable, though ${session} has a plan and ${creditsAt(session, now)} credits by the record`);
+            continue;
+          }
           if (p.dueWall !== null && p.dueWall < now - 3 * DAY && hold === null && !st.attempts.some((a) => a.stepId === p.nextStepId && a.state !== "withdrawn" && a.state !== "rejected" && a.state !== "sent")) problem(`L13: ${lead.id}'s ${p.nextStepId} has been due since ${iso(p.dueWall)} with nothing holding it`);
         }
       }
@@ -963,19 +1149,23 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       if (lastEdit) features.add("an-edit-of-the-wait-while-waiting");
       const acceptance = li.acceptanceLog.find((a) => a.key === invite.key);
       const reportedBy = acceptance ? acceptance.at + (lead.script?.acceptReportDelayMs ?? 0) : Infinity;
+      // The withdrawal path at the expiry itself, or later: a refused InMail, the switch turned off, or the user's skip (13.3).
+      const atExpiry = tp.inmail == null || tp.inmail === "no_plan" || tp.inmail === "no_credit";
+      const endedAt = atExpiry ? deadline : (tp.finishedWall ?? deadline);
       if (tp.finishReason === "invite_not_accepted") {
-        features.add("an-invite-expired");
+        features.add(atExpiry ? "an-invite-expired" : `the-withdrawal-path-after-an-inmail-${tp.inmail}`);
         if (outages.some((o) => o.from < deadline && deadline < o.to)) features.add("an-expiry-while-the-laptop-was-off");
-        if (tp.finishedWall !== deadline) problem(`L8: ${lead.id}'s invite expired at ${iso(tp.finishedWall ?? 0)}, not at the deadline ${iso(deadline)}`);
+        if (atExpiry && tp.finishedWall !== deadline) problem(`L8: ${lead.id}'s invite expired at ${iso(tp.finishedWall ?? 0)}, not at the deadline ${iso(deadline)}`);
+        if (!atExpiry && (tp.finishedWall ?? 0) < deadline) problem(`L20: ${lead.id}'s track took the InMail's withdrawal path at ${iso(tp.finishedWall ?? 0)}, before the deadline ${iso(deadline)}`);
         if (acceptance && acceptance.at < deadline && reportedBy <= deadline && !outages.some((o) => o.from <= deadline && reportedBy <= o.to)) problem(`L8: ${lead.id}'s invite expired though it was accepted at ${iso(acceptance.at)}, before the deadline`);
         // L4: no message after a withdrawn invite, and the withdrawal asked within a settling period of the expiry.
         if (li.deliveryLog.some((x) => x.subjectId === lead.id && x.trackId === c.li.id && x.action === "message")) problem(`L4: ${lead.id} was sent a message after its invite expired`);
-        if (now > deadline + SETTLING + 2 * H && !outages.some((o) => o.to > deadline && o.from < now) && !li.withdrawalLog.some((w) => w.key === invite.key)) problem(`L4: ${lead.id}'s expired invite was never withdrawn`);
+        if (now > endedAt + SETTLING + 2 * H && !outages.some((o) => o.to > endedAt && o.from < now) && !li.withdrawalLog.some((w) => w.key === invite.key)) problem(`${atExpiry ? "L4" : "L24"}: ${lead.id}'s expired invite was never withdrawn`);
         if (li.withdrawalLog.some((w) => w.key === invite.key && w.answer === "already_accepted")) features.add("a-withdrawal-found-it-accepted");
         if (li.withdrawalLog.some((w) => w.key === invite.key && w.answer === "unknown")) features.add("a-withdrawal-answered-unknown");
         // L10: the lead's other tracks carry on: an email track after the LinkedIn track starts from the expiry.
         if (c.email && c.email.start.kind === "after" && drained && st.subject.ended !== "replied" && !stopped.has(lead.id)) {
-          const due = firstOpen(c.email.window, lead.zone, dueAfter(deadline, c.email.start.delayDays, lead.zone));
+          const due = firstOpen(c.email.window, lead.zone, dueAfter(endedAt, c.email.start.delayDays, lead.zone));
           const sent = h.fake.deliveryLog.find((x) => x.subjectId === lead.id);
           if (!sent) problem(`L10: ${lead.id}'s email track after LinkedIn never went after the expiry`);
           else if (sent.at < due) problem(`L10: ${lead.id}'s email went at ${iso(sent.at)}, before its start after the expiry ${iso(due)}`);
@@ -984,8 +1174,10 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       }
       if (st.subject.ended === "finished_no_usable_channel" && tp.finishReason === "invite_not_accepted" && c.email) problem(`L10: ${lead.id} ended with no usable channel at the expiry, though email reaches it`);
       if (tp.connection === "accepted") features.add("connected-by-acceptance");
-      if (drained && tp.finishedAt === null && (tp.connection ?? null) === null && (tp.acceptByWall ?? Infinity) + 30 * MIN < now && st.subject.ended === null) problem(`L8: ${lead.id}'s invite still waits past its deadline ${iso(tp.acceptByWall ?? 0)}`);
+      if (drained && tp.finishedAt === null && (tp.connection ?? null) === null && tp.inmail !== "chosen" && tp.inmail !== "sent" && (tp.acceptByWall ?? Infinity) + 30 * MIN < now && st.subject.ended === null) problem(`L8: ${lead.id}'s invite still waits past its deadline ${iso(tp.acceptByWall ?? 0)}`);
     }
+    await checkInmail(drained);
+
     // L15 (Q41's release): a LinkedIn track skipped because its pair is taken was skipped only while, on every session its
     // campaign's pool had, another subject held the conversation by the record's rule; a pair released (nothing went, or
     // the invite withdrawn and never accepted) is free again, and a later subject is served on it.

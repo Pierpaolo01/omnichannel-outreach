@@ -3,7 +3,7 @@ import { stepNumber } from "../../domain/sequence/definition.ts";
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { carriedInto, isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
-import { allowanceOf, linkedinStepKind, socialActionOf } from "../../domain/sequence/definition.ts";
+import { allowanceOf, inmailStepOf, linkedinStepKind, socialActionOf } from "../../domain/sequence/definition.ts";
 import { accountAvailable, claimRefusal, eligibleSessions, noAllowanceOnAnySession, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
 import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
@@ -363,5 +363,22 @@ export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTra
     inviteOpen: inviteOpenOn(s, trackId),
     // While the track holds as pending elsewhere (every session it may use pending): the earliest any of them saw it.
     pendingElsewhereSince: iso(invitePendingUntil(s, trackId) === null ? null : earliest(Object.values(p?.connectionChecks ?? {}).flatMap((c) => (c.pendingSince === null ? [] : [c.pendingSince])))),
+    inmail: inmailView(s, trackId),
+  };
+}
+
+/** The InMail fallback's stored facts for a read (ADR 0004 13.7): the switch now, the expiry's judgment, the InMail's work and send. */
+function inmailView(s: SubjectState, trackId: string): LinkedinTrackView["inmail"] {
+  const track = s.campaign.definition.tracks.find((t) => t.id === trackId);
+  const p = s.tracks.find((x) => x.trackId === trackId);
+  const isInmail = (stepId: string) => (track ? linkedinStepKind(track, stepId) === "inmail" : false);
+  const work = s.work.filter((w) => w.trackId === trackId && w.inmail === true && w.firstHandedWall !== null);
+  const sent = work.some((w) => w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null);
+  const result = s.results.find((r) => r.trackId === trackId && isInmail(r.stepId) && r.result === "sent");
+  return {
+    on: track ? inmailStepOf(track) !== null : false,
+    state: p?.inmail ?? null,
+    work: sent ? "sent" : work.some((w) => w.settled === null) ? "handed" : null,
+    sentAt: result ? new Date(result.atWall).toISOString() : null,
   };
 }

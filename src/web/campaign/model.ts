@@ -82,8 +82,11 @@ export function trackSummary(track: TrackDefinition): string {
   if (track.channel === "call") return "One call";
   // A LinkedIn track: the invite, then the messages it opens (ADR 0004 3.1).
   if (track.channel === "linkedin") {
-    const messages = Math.max(0, liveSteps(track).length - 1);
-    return `Invite, then ${messages} ${messages === 1 ? "message" : "messages"}`;
+    // The InMail fallback is said apart (ADR 0004 13.2): it goes only if the invite isn't accepted.
+    const live = liveSteps(track);
+    const messages = Math.max(0, live.filter((s) => s.role !== "inmail").length - 1);
+    const inmail = live.some((s) => s.role === "inmail") ? ", InMail if not accepted" : "";
+    return `Invite, then ${messages} ${messages === 1 ? "message" : "messages"}${inmail}`;
   }
   const steps = liveSteps(track);
   const days = steps.reduce((sum, s) => sum + (Number.isFinite(s.waitDays) ? s.waitDays : 0), 0);

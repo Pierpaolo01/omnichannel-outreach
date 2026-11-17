@@ -2,7 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, ty
 import { useLocation, useSearch } from "wouter";
 import { skipLimitOf } from "../../domain/sequence/calls.ts";
 import { MERGE_FIELDS } from "../../domain/sequence/copy.ts";
-import { NO_WIN_BACK_BRANCH, declinedPathOf, winBackAvailable, type DeclinedPath } from "../../domain/sequence/definition.ts";
+import { NO_WIN_BACK_BRANCH, declinedPathOf, inmailStepOf, winBackAvailable, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, LinkedinProviderStatus, SmsProviderStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
 import { stepTitle } from "../../shared/track-label.ts";
 import { useApi } from "../api.ts";
@@ -815,7 +815,8 @@ interface InspectorProps {
 }
 
 function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, onOpenStep, onFocusStep, onLoadedStored, onClose, onRemoved }: InspectorProps) {
-  const steps = liveSteps(track);
+  // The InMail fallback has its own control under the acceptance wait (ADR 0004 13.2): the step list is the invite and messages.
+  const steps = liveSteps(track).filter((s) => s.role !== "inmail");
   const titleId = useId();
   const sms = track.channel === "sms";
   // A LinkedIn track (ticket 24b): its steps are the connection invite, then messages, named by their role.
@@ -877,6 +878,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
           )}
         </div>
         {linkedin && <AcceptWaitControl track={track} locked={locked} launched={editor.launched} onChange={(days) => changeTrack((t) => ({ ...t, acceptWaitDays: days }))} />}
+        {linkedin && <InmailFallbackControl track={track} locked={locked} launched={editor.launched} onChange={changeTrack} />}
         <TimingAndSender track={track} editor={editor} onWindow={(window) => changeTrack((t) => ({ ...t, window }))} />
         <RemoveTrack track={track} editor={editor} onRemoved={onRemoved} />
     </InspectorFrame>
@@ -1379,9 +1381,65 @@ function AcceptWaitControl({ track, locked, launched, onChange }: { track: Track
         days
       </label>
       <p id={hint} className="text-[12.5px] text-muted">
-        Counted in calendar days from when the invite is sent; time a lead is paused doesn’t count. If they haven’t accepted by then, this track ends for them and the app asks LinkedIn to withdraw the invite; their other tracks carry on.
+        Counted in calendar days from when the invite is sent; time a lead is paused doesn’t count.{" "}
+        {inmailStepOf(track)
+          ? "If they haven’t accepted by then, the InMail below goes instead when your session can send one; otherwise this track ends for them and the app asks LinkedIn to withdraw the invite. Their other tracks carry on."
+          : "If they haven’t accepted by then, this track ends for them and the app asks LinkedIn to withdraw the invite; their other tracks carry on."}
         {launched ? " A change reaches every lead still waiting, counted from when their invite was sent." : ""}
       </p>
+    </div>
+  );
+}
+
+/**
+ * A LinkedIn track's InMail fallback (ticket 27; ADR 0004 13.2): on exactly while the track has a live InMail step, placed
+ * right after the invite. Switching it on adds that step; off removes it (marked removed on a running campaign, so leads'
+ * results keep naming it; switching on again adds a new one). Its text is the InMail's; an empty one blocks launch.
+ * Provisional placement and sentences, for the principal: no reference draws it.
+ */
+function InmailFallbackControl({ track, locked, launched, onChange }: { track: TrackDefinition; locked: boolean; launched: boolean; onChange: (change: (t: TrackDefinition) => TrackDefinition) => void }) {
+  const step = inmailStepOf(track);
+  const hint = useId();
+  const textId = useId();
+  const setOn = (on: boolean) =>
+    onChange((t) => {
+      const current = inmailStepOf(t);
+      if (!on) return current ? removeStep(t, current.id, launched) : t;
+      if (current) return t;
+      const at = t.steps.findIndex((s) => !s.removed);
+      const added: StepDefinition = { ...newStep(false), waitDays: 0, threading: "new_subject", role: "inmail" };
+      return { ...t, steps: [...t.steps.slice(0, at + 1), added, ...t.steps.slice(at + 1)] };
+    });
+  return (
+    <div role="group" aria-label="InMail fallback" className="flex min-w-0 flex-col gap-2">
+      <label className="flex items-start gap-2 text-[14px]">
+        <input type="checkbox" className="checkbox checkbox-sm mt-0.5 border-line-strong checked:border-base-content checked:bg-base-content checked:text-base-100" checked={step !== null} disabled={locked} aria-describedby={hint} onChange={(e) => setOn(e.target.checked)} />
+        <span>Send an InMail if they don’t accept in time</span>
+      </label>
+      <p id={hint} className="text-[12.5px] text-muted">
+        {step
+          ? "When the wait ends, one InMail goes from the session that sent the invite, if that session reports Premium or Sales Navigator with an InMail credit free; otherwise the invite is withdrawn and the track ends, as without it. The invite stays open on LinkedIn. The InMail takes the first message’s place: the follow-ups wait their days from it. It spends one of the session’s InMail credits and one of its messages for the day."
+          : "Off: when the wait ends, the invite is withdrawn and the track ends for them."}
+        {launched ? " Switching it on or off reaches every lead whose InMail hasn’t gone yet." : ""}
+      </p>
+      {step && (
+        <div className="flex min-w-0 flex-col gap-1">
+          <label htmlFor={textId} className="text-[13px] font-medium">
+            InMail
+          </label>
+          <textarea
+            id={textId}
+            className={`textarea min-h-[96px] w-full [field-sizing:content] border-line-strong text-[14px] leading-[1.55] ${step.body.trim() ? "" : "border-crit bg-crit-soft/40"}`}
+            value={step.body}
+            disabled={locked}
+            placeholder={launched ? "Write the InMail. An empty InMail can’t be applied." : "Write the InMail. Launch is blocked while it’s empty."}
+            onChange={(e) => onChange((t) => ({ ...t, steps: t.steps.map((s) => (s.id === step.id ? { ...s, body: e.target.value } : s)) }))}
+          />
+          <span className="text-[12.5px] text-muted">
+            {step.body.length.toLocaleString("en-GB")} {step.body.length === 1 ? "character" : "characters"}, before merge fields are filled in
+          </span>
+        </div>
+      )}
     </div>
   );
 }

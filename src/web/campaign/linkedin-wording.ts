@@ -90,6 +90,9 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
   if (view.invite === "handed") lines.push(INVITE_HANDED);
   const connected = connectionLine(view, userZone);
   if (connected) lines.push(connected);
+  const inmail = inmailLine(view.inmail, userZone);
+  if (inmail) lines.push(inmail);
+  if (view.inmail.on && view.inmail.state === null && view.invite === "sent" && view.connection === null && track.finishReason === null) lines.push(INMAIL_AT_THE_END);
   if (track.finishReason === "invite_not_accepted") lines.push(expiryLine(view.withdrawal, "them", view));
   // An acceptance recorded after the track ended (council on dee365d, item 14): said as recorded late, with the time
   // LinkedIn gave for it, which the port's contract allows to be an upper bound ("by"), never as accepted late.
@@ -100,10 +103,51 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
   // acceptance expiry asks for a withdrawal, so a stop, a reply on any channel, a move to win-back, an ending with no
   // channel left or an edit that removes the track leaves a sent invite open. Said once the track has ended or the lead no
   // longer runs, and only while no withdrawal was asked for: an expiry's withdrawal is said by its own line.
-  if (view.inviteOpen && view.withdrawal === null && (track.finishReason !== null || statusGroup(status) === "handed_to_you" || statusGroup(status) === "ended")) lines.push(INVITE_STILL_OPEN);
+  // With the InMail fallback chosen, the InMail's own line says the invite stays open (ADR 0004 13.7).
+  const fallbackTaken = view.inmail.state === "chosen" || view.inmail.state === "sent";
+  if (view.inviteOpen && view.withdrawal === null && !fallbackTaken && (track.finishReason !== null || statusGroup(status) === "handed_to_you" || statusGroup(status) === "ended")) lines.push(INVITE_STILL_OPEN);
   if (view.pendingElsewhereSince) lines.push(`An invite to them was already pending on LinkedIn, not sent by this application (first seen ${dateIn(userZone, view.pendingElsewhereSince)}). This track waits until it is accepted or gone.`);
   return lines;
 }
+
+/**
+ * The InMail fallback on the record (ticket 27; ADR 0004 13.7), one sentence by its stored facts and nothing more: the InMail
+ * said as gone only once recorded sent, with the session while handed over, to go while chosen; why it did not go, by its
+ * stored cause, before the expiry's own line; while still waiting for acceptance with the fallback on, what the end of the
+ * wait does. Provisional sentences, for the principal.
+ */
+export function inmailLine(inmail: LinkedinTrackView["inmail"], userZone: string): string | null {
+  const state = inmail.state;
+  switch (state) {
+    case null:
+      return null;
+    case "chosen":
+      return inmail.work === "handed"
+        ? "No acceptance was recorded within the track’s wait, so an InMail went to the LinkedIn session instead, which hasn’t confirmed whether it went. The invite stays open on LinkedIn."
+        : "No acceptance was recorded within the track’s wait, so an InMail is to go instead; it hasn’t gone yet. The invite stays open on LinkedIn.";
+    case "sent":
+      return `No acceptance was recorded within the track’s wait, so the InMail went instead${inmail.sentAt ? ` on ${dateIn(userZone, inmail.sentAt)}` : ""}. The first message isn’t sent; the follow-ups wait their days from the InMail. The invite stays open on LinkedIn.`;
+    case "accepted":
+      return "They accepted the invite after the wait ended and before any InMail was handed over, so none was sent; the first message follows their acceptance.";
+    case "no_plan":
+      return "The InMail fallback didn’t go: when the wait ended, the session that sent the invite didn’t report Premium or Sales Navigator.";
+    case "no_credit":
+      return "The InMail fallback didn’t go: when the wait ended, the session that sent the invite had no InMail credit free.";
+    case "refused":
+      return "The InMail fallback didn’t go: LinkedIn refused the InMail for this person. Their profile isn’t marked wrong.";
+    case "switched_off":
+      return "The InMail fallback didn’t go: you switched it off before it was handed over.";
+    case "skipped_by_user":
+      return "The InMail fallback didn’t go: you skipped it.";
+    default: {
+      const unhandled: never = state;
+      throw new Error(`An InMail state with no words: ${String(unhandled)}`);
+    }
+  }
+}
+
+/** While a lead waits for acceptance on a track with the fallback on: what the end of the wait does (ADR 0004 13.7). */
+export const INMAIL_AT_THE_END = "If they haven’t accepted by the end of the wait, an InMail goes instead, if your session can send one then.";
 
 /** Q38's interim, on the record (ADR 0004 3.4), for every ending but the acceptance expiry (council on a6c1700, item 6). */
 export const INVITE_STILL_OPEN = "The connection invite sent from this campaign is still open on LinkedIn. The app asks LinkedIn to withdraw an invite only when the wait for acceptance runs out, so this one stays until they answer it or you withdraw it on LinkedIn.";

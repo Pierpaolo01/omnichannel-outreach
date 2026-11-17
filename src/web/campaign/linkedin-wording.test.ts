@@ -2,11 +2,11 @@ import { describe, expect, test } from "vitest";
 import type { LinkedinTrackView, NeedsAttention, TrackProgressView } from "../../shared/api.ts";
 import { attentionItems, SAID_ON_TODAY } from "../calls/wording.ts";
 import { describeEntry } from "../activity.tsx";
-import { expiryLine, INVITE_HANDED, INVITE_STILL_OPEN, linkedinTrackLines, MARK_REPLIED, noteLine, withdrawalStuckItems } from "./linkedin-wording.ts";
+import { expiryLine, INMAIL_AT_THE_END, inmailLine, INVITE_HANDED, INVITE_STILL_OPEN, linkedinTrackLines, MARK_REPLIED, noteLine, withdrawalStuckItems } from "./linkedin-wording.ts";
 
 /** The record's and Today's LinkedIn sentences, one per state of the read (ticket 24b; ADR 0004 section 9). */
 const ZONE = "Europe/London";
-const VIEW: LinkedinTrackView = { invite: null, note: null, connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalAsked: false, skipCause: null, withdrawalStuck: false, inviteOpen: false, pendingElsewhereSince: null };
+const VIEW: LinkedinTrackView = { invite: null, note: null, connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalAsked: false, skipCause: null, withdrawalStuck: false, inviteOpen: false, pendingElsewhereSince: null, inmail: { on: false, state: null, work: null, sentAt: null } };
 const track = (linkedin: Partial<LinkedinTrackView> | null, fields: Partial<TrackProgressView> = {}): TrackProgressView => ({
   trackId: "li",
   channel: "linkedin",
@@ -140,5 +140,36 @@ describe("Activity's LinkedIn entries in words", () => {
     expect(describeEntry({ campaign, at, kind: "skipped", channel: "linkedin", track: LI, stepNumber: null, reason: "no_profile" }, ZONE).body).toBe("No LinkedIn member profile in the import.");
     expect(describeEntry({ campaign, at, kind: "skipped", channel: "linkedin", track: LI, stepNumber: 1, reason: "already_connected" }, ZONE)).toMatchObject({ title: "Connection invite skipped", body: "Your LinkedIn session was already connected to them, so no invite was needed." });
     expect(describeEntry({ campaign, at, kind: "replied", channel: "linkedin" }, ZONE)).toMatchObject({ title: "You marked them replied on LinkedIn", body: "Automation stopped in this campaign. Carry on the conversation on LinkedIn." });
+  });
+});
+
+describe("the InMail fallback on the record (ticket 27, ADR 0004 13.7)", () => {
+  const track = (inmail: LinkedinTrackView["inmail"], finishReason: TrackProgressView["finishReason"] = null, more: Partial<LinkedinTrackView> = {}) => ({ channel: "linkedin", finishReason, conversationOwners: [], linkedin: { ...VIEW, invite: "sent" as const, note: "none" as const, inviteOpen: true, ...more, inmail } });
+  const ZONE = "Europe/London";
+
+  test("each state has its own sentence, said from its stored fact; the InMail is said as gone only once recorded sent", () => {
+    const states = ["chosen", "sent", "accepted", "no_plan", "no_credit", "refused", "switched_off", "skipped_by_user"] as const;
+    const words = states.map((state) => inmailLine({ on: true, state, work: null, sentAt: state === "sent" ? "2026-11-04T09:00:00.000Z" : null }, ZONE));
+    expect(new Set(words).size).toBe(states.length);
+    expect(words[0]).toContain("hasn’t gone yet");
+    expect(inmailLine({ on: true, state: "chosen", work: "handed", sentAt: null }, ZONE)).toContain("hasn’t confirmed whether it went");
+    expect(words[1]).toContain("went instead on Wed 4 Nov");
+    for (const w of words.filter((x) => !x?.includes("went instead"))) expect(w).not.toMatch(/the InMail went/);
+  });
+
+  test("waiting with the fallback on says what the end of the wait does; with it off, nothing new is said", () => {
+    expect(linkedinTrackLines(track({ on: true, state: null, work: null, sentAt: null }), "active", ZONE)).toContain(INMAIL_AT_THE_END);
+    expect(linkedinTrackLines(track({ on: false, state: null, work: null, sentAt: null }), "active", ZONE)).not.toContain(INMAIL_AT_THE_END);
+  });
+
+  test("the InMail sent and the track completed: the InMail's line, not the open-invite line of an ending", () => {
+    const lines = linkedinTrackLines(track({ on: true, state: "sent", work: "sent", sentAt: "2026-11-04T09:00:00.000Z" }, "completed"), "sequence_finished_no_response", ZONE);
+    expect(lines.some((l) => l.includes("The invite stays open on LinkedIn"))).toBe(true);
+    expect(lines).not.toContain(INVITE_STILL_OPEN);
+  });
+
+  test("not eligible at the expiry: why the InMail didn't go, then the withdrawal's own line", () => {
+    const lines = linkedinTrackLines(track({ on: true, state: "no_credit", work: null, sentAt: null }, "invite_not_accepted", { withdrawal: "withdrawn" }), "active", ZONE);
+    expect(lines).toEqual(["The connection invite went without a note, as written.", "The InMail fallback didn’t go: when the wait ended, the session that sent the invite had no InMail credit free.", expiryLine("withdrawn")]);
   });
 });

@@ -615,6 +615,13 @@ export interface LinkedinTrackView {
   readonly inviteOpen: boolean;
   /** An invite already pending on LinkedIn that this application did not send, first seen then (question Q42). */
   readonly pendingElsewhereSince: string | null;
+  /**
+   * The InMail fallback (ticket 27; ADR 0004 13.3), from stored facts: `on`, the track has a live InMail step now; `state`,
+   * what the acceptance expiry judged and what became of it (null before the expiry, or with the fallback off then); `work`,
+   * the InMail's own work, `sent` once recorded sent, `handed` while with the session and not known to have gone; `sentAt`,
+   * its send's instant once recorded.
+   */
+  readonly inmail: { readonly on: boolean; readonly state: import("../domain/sequence/state.ts").InmailState | null; readonly work: "sent" | "handed" | null; readonly sentAt: string | null };
 }
 
 export interface TrackProgressView {

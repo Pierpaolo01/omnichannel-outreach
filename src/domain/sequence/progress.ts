@@ -265,8 +265,10 @@ export function remainingSteps(state: SubjectState, track: TrackDefinition): str
   track.steps.forEach((s, i) => {
     if (resolved.has(s.id)) lastResolved = i;
   });
-  const chosen = progressOf(state, track.id)?.inmail === "chosen";
-  return track.steps.filter((s, i) => i > lastResolved && !s.removed && !resolved.has(s.id) && (s.role !== "inmail" || chosen)).map((s) => s.id);
+  const p = progressOf(state, track.id);
+  const chosen = p?.inmail === "chosen" || (!rules.inmailWaitsForExpiry && (p?.inmail ?? null) === null);
+  const live = (s: TrackDefinition["steps"][number]) => !s.removed || (!rules.inmailOffWhenRemoved && s.role === "inmail" && chosen);
+  return track.steps.filter((s, i) => i > lastResolved && live(s) && !resolved.has(s.id) && (s.role !== "inmail" || chosen)).map((s) => s.id);
 }
 
 /**
@@ -306,9 +308,9 @@ export const rules = {
       case "invite":
         return false;
       case "inmail":
-        return connected || progress.inmail !== "chosen";
+        return connected || (progress.inmail !== "chosen" && (rules.inmailWaitsForExpiry || progress.inmail != null));
       case "first_message":
-        return !connected;
+        return !connected && (rules.inmailTakesFirstPlace || progress.inmail !== "sent");
       case "follow_up":
         return !connected && progress.inmail !== "sent";
       default: {
@@ -319,6 +321,17 @@ export const rules = {
   },
   /** The expiry judges the session's InMail standing (ADR 0004 13.5); false only for the mutation that takes every session as eligible. */
   inmailJudgesStanding: true,
+  /**
+   * The InMail fallback's seams for the generated runs' mutations (ADR 0004 13.11), each true but in its mutation: the InMail
+   * waits for the expiry's choice; an acceptance before it is handed over skips it; a refusal ends the track; switching the
+   * fallback off reaches a chosen InMail (and a removed InMail step is off); the InMail takes the first message's place.
+   */
+  inmailWaitsForExpiry: true,
+  acceptanceSkipsInmail: true,
+  refusedInmailEndsTrack: true,
+  switchOffReachesChosen: true,
+  inmailOffWhenRemoved: true,
+  inmailTakesFirstPlace: true,
 };
 
 /**
@@ -818,7 +831,7 @@ function recordSent(
   // the InMail took its place (question Q52); the next follow-up resolves from the InMail's send.
   if (kind === "inmail") {
     s = withTrack(s, track.id, (t) => ({ ...t, inmail: "sent" }));
-    const firsts = track.steps.filter((st) => !st.removed && linkedinStepKind(track, st.id) === "first_message" && !s.results.some((r) => r.stepId === st.id));
+    const firsts = !rules.inmailTakesFirstPlace ? [] : track.steps.filter((st) => !st.removed && linkedinStepKind(track, st.id) === "first_message" && !s.results.some((r) => r.stepId === st.id));
     s = { ...s, results: [...s.results, ...firsts.map((st) => ({ stepId: st.id, trackId: track.id, result: "skipped" as const, reason: "inmail_instead", at: point.at, atWall: point.atWall, attemptId: null }))] };
   }
   return advanceTrack(s, track, point.at, point.atWall);
@@ -855,7 +868,7 @@ function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["
   }
   // LinkedIn refused the InMail for this recipient (ADR 0004 13.3, question Q55): a failure with its own cause, the profile
   // kept good, and the track takes the withdrawal path at the refusal.
-  if (reason === "inmail_refused") {
+  if (reason === "inmail_refused" && rules.refusedInmailEndsTrack) {
     if (!progress || progress.finishedAt !== null) return state;
     const failed = state.results.some((r) => r.stepId === attempt.stepId)
       ? state
@@ -935,7 +948,7 @@ export function alignPending(state: SubjectState, now: number): SubjectState {
     if (!track || inFlight(s, p.trackId)) continue;
     // The InMail the expiry chose, switched off before it was handed over (ADR 0004 13.8): it is not sent, and the track takes
     // the withdrawal path at the edit's instant.
-    if (p.inmail === "chosen" && p.nextStepId !== null && linkedinStepKind(track, p.nextStepId) === "inmail" && !track.steps.some((x) => x.id === p.nextStepId && !x.removed)) {
+    if (rules.switchOffReachesChosen && rules.inmailOffWhenRemoved && p.inmail === "chosen" && p.nextStepId !== null && linkedinStepKind(track, p.nextStepId) === "inmail" && !track.steps.some((x) => x.id === p.nextStepId && !x.removed)) {
       s = inmailNotSent(s, track.id, "switched_off", leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now));
       continue;
     }
@@ -1385,7 +1398,7 @@ export function recordAcceptance(state: SubjectState, trackId: string, providerT
   const s = (p.acceptedWall ?? null) === null ? withTrack(state, trackId, (t) => ({ ...t, acceptedWall: Math.min(Math.max(providerTime, handedWall), now) })) : state;
   // The expiry chose the InMail and it has not been handed over (ADR 0004 13.3, question Q56): a person who accepted is a
   // connection, so the InMail is not sent, and the first message follows the connection.
-  if (p.inmail === "chosen" && p.finishedAt === null && (p.connection ?? null) === null) {
+  if (p.inmail === "chosen" && p.finishedAt === null && (p.connection ?? null) === null && rules.acceptanceSkipsInmail) {
     const track = s.campaign.definition.tracks.find((t) => t.id === trackId);
     const im = p.nextStepId;
     const handed = im !== null && s.work.some((w) => w.stepId === im && w.firstHandedWall !== null);
@@ -1417,7 +1430,7 @@ export function inviteExpired(state: SubjectState, trackId: string, now: number)
   const atWall = wallAtLead(state.subject.clock, state.freezes, at, now);
   // The InMail fallback (ADR 0004 13.3): on (a live InMail step with no result), the track's own session judged once, now,
   // by its own report. Eligible: the InMail is the pending step, due at the deadline, and the invite is left open (Q50).
-  const im = inmailStepOf(track);
+  const im = rules.inmailOffWhenRemoved ? inmailStepOf(track) : (track.steps.find((s) => s.role === "inmail") ?? null);
   if (im && !state.results.some((r) => r.stepId === im.id)) {
     const session = linkedinSessionOf(state);
     const standing = rules.inmailJudgesStanding ? inmailStanding(session === null ? undefined : state.accounts[session], false) : "eligible";

@@ -9,7 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { awaitingAcceptance, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, type ConversationVersions, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
+import { rules as inmailSeams, awaitingAcceptance, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, type ConversationVersions, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import type { OutreachStatus } from "../../domain/outreach-status.ts";
@@ -1516,7 +1516,7 @@ export class Engine {
       // Connected at an InMail's slot: they accepted and the session has not reported it yet. No InMail to a connection; the
       // acceptance, once observed, skips it and connects the track (13.3).
       const inmail = subject !== null && this.rules.actionOfStep(subject, a.trackId, a.stepId) === "inmail";
-      if (asked.kind === "connected" && inmail) return false;
+      if (asked.kind === "connected" && inmail && inmailSeams.acceptanceSkipsInmail) return false;
       await this.update(a.subjectId, now, (s) => ({ ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: false } : x)) }));
       this.hooks.crashPoint?.("after_presend", a.id);
       return true;
