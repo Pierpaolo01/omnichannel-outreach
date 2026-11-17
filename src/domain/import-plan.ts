@@ -113,6 +113,8 @@ export interface Directory {
   readonly enrollments: readonly KnownEnrollment[];
   /** LinkedIn profile keys marked unreachable (ADR 0004 section 5): a profile among them is no channel. Absent: none. */
   readonly badProfileKeys?: readonly string[];
+  /** Message-request account keys marked unreachable (ADR 0004 13.4): an account among them is no channel. Absent: none. */
+  readonly badAccountKeys?: readonly string[];
   /**
    * Enrollments in every other campaign. They exclude nobody; they only stop a lead gaining a
    * personal email, mobile or shared inbox that another lead in the same campaign already has.
@@ -323,6 +325,7 @@ export function planImport(input: {
   const { scraped, now, newId } = input;
   const crm = new WorkingDirectory(input.directory, now, newId);
   const badProfiles: ReadonlySet<string> = new Set(input.directory.badProfileKeys ?? []);
+  const badAccounts: ReadonlySet<string> = new Set(input.directory.badAccountKeys ?? []);
   const businessRecords: (string | null)[] = scraped.businesses.map(() => null);
   const personRecords: (string | null)[] = scraped.people.map(() => null);
   const unapplied: SummaryEntry[] = [];
@@ -487,7 +490,7 @@ export function planImport(input: {
     const person = crm.person(personId);
     const company = crm.company(person.companyId);
     return {
-      reach: decisionMakerReach(personal(person.details), company.details, { url: person.fields.linkedinUrl, bad: badProfiles }),
+      reach: decisionMakerReach(personal(person.details), company.details, { url: person.fields.linkedinUrl, bad: badProfiles }, { person: person.source, company: company.source, bad: badAccounts }),
       via: decisionMakerRoutes(personal(person.details), company.details),
     };
   };
@@ -509,7 +512,7 @@ export function planImport(input: {
     const people = crm.peopleAt(companyId);
     const company = crm.company(companyId);
     const lead: LeadRef = { kind: "company", companyId };
-    const reachable = { reach: companyLeadReach(company.details), via: companyLeadRoutes(company.details) };
+    const reachable = { reach: companyLeadReach(company.details, { company: company.source, bad: badAccounts }), via: companyLeadRoutes(company.details) };
     if (!crm.isEnrolled(lead) && !mayBeCompanyLead(people.map((p) => personReach(p.id).reach), reachable.reach)) continue;
     decide(lead, reachable, { name: company.fields.name, title: "", companyId });
   }
@@ -588,7 +591,8 @@ export function planEnrollment(input: {
   const crm = new WorkingDirectory(input.directory, input.now, input.newId);
   const personReach = (personId: string): Reach => {
     const person = crm.person(personId);
-    return decisionMakerReach(personal(person.details), crm.company(person.companyId).details, { url: person.fields.linkedinUrl, bad: new Set(input.directory.badProfileKeys ?? []) });
+    const company = crm.company(person.companyId);
+    return decisionMakerReach(personal(person.details), company.details, { url: person.fields.linkedinUrl, bad: new Set(input.directory.badProfileKeys ?? []) }, { person: person.source, company: company.source, bad: new Set(input.directory.badAccountKeys ?? []) });
   };
   const seen = new Set<string>();
   const decisions: EnrollmentDecision[] = [];
@@ -601,7 +605,8 @@ export function planEnrollment(input: {
       continue;
     }
     if (lead.kind === "company") {
-      const reach = companyLeadReach(crm.company(lead.companyId).details);
+      const company = crm.company(lead.companyId);
+      const reach = companyLeadReach(company.details, { company: company.source, bad: new Set(input.directory.badAccountKeys ?? []) });
       if (!mayBeCompanyLead(crm.peopleAt(lead.companyId).map((p) => personReach(p.id)), reach)) {
         decisions.push({ lead, outcome: "not_enrolled", reason: "decision_makers_on_record" });
         continue;

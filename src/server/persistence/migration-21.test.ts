@@ -85,7 +85,7 @@ describe("migration 21 on a database as the integration tip left it (ADR 0003, q
     // The upgrade: the application as built opens the same database at 11:00.
     const h = new EngineHarness({ start: MONDAY_9 + 2 * H, databasePath: file, idPrefix: "after-21", accounts, sms });
     const db = (h.store.engine as unknown as { db: DatabaseSync }).db;
-    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: 24 }); // 21 and every later migration (22, ticket 24; 23, a pair's stored channel; 24, a LinkedIn skip's cause) applied
+    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: 26 }); // 21 and every later migration (22, ticket 24; 23, a pair's stored channel; 24, a LinkedIn skip's cause; 25 reserved; 26, ticket 25) applied
     // The migration releases nothing itself; the store applies the one release rule to every binding's owner when it opens,
     // before anything reads a binding. Nia's binding: nothing went, so it is released as unsent, though Nia's lead has
     // ended. Pat's: Spring clinics' text went, so it stays.

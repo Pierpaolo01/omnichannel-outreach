@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { OUTREACH_STATUSES } from "../../domain/outreach-status.ts";
+import { addChannel } from "./add-channel.ts";
 
 /**
  * Versioned schema migrations. Append a new entry for every change; never edit an applied one.
@@ -1171,6 +1172,104 @@ export const MIGRATIONS: readonly Migration[] = [
       -- Recorded once, at the skip; a skip stored before this has none, and its read says only what is known.
       ALTER TABLE track_progress ADD COLUMN skip_cause TEXT CHECK (skip_cause IS NULL OR skip_cause IN ('no_profile', 'not_a_member_profile', 'company_lead', 'replaced', 'removed_by_import', 'marked_bad'));
     `,
+  },
+  {
+    version: 25,
+    name: "reserved for ticket 27 (the LinkedIn InMail fallback), whose migration takes this number when its branch merges",
+    // Ticket 25 takes 26 by the coordinator's assignment. Versions are 1 to N with no gap, so this branch holds the number
+    // with no change; at the merge of ticket 27 its migration replaces this entry (delivery workflow, "Standing checks").
+    sql: "",
+  },
+  {
+    version: 26,
+    name: "message-request channels (ticket 25, ADR 0004 section 13): Instagram, its accounts, test accounts, sessions' kinds and fixed senders",
+    // The CHECKs that list the social channels gain 'instagram' through `addChannel`, the one rebuild Facebook's migration
+    // repeats; test_runs' contact CHECK gains its social contacts in the same rebuild. A message-request channel is a row of
+    // `message_request_channels`, which the destination triggers read, so a later channel adds a row, not a trigger.
+    rebuildsTables: true,
+    sql: `
+      CREATE TABLE message_request_channels (name TEXT PRIMARY KEY);
+      INSERT INTO message_request_channels (name) VALUES ('instagram');
+      -- A message-request account the session found unreachable, by channel and key (ADR 0004 13.4; ADR 0001: never cleared).
+      CREATE TABLE social_destination_marks (
+        channel TEXT NOT NULL REFERENCES message_request_channels(name),
+        key TEXT NOT NULL,
+        marked_wall INTEGER NOT NULL,
+        PRIMARY KEY (channel, key)
+      );
+      -- The user's own test accounts on the message-request channels, by channel: {"instagram": {"value", "key"}} (ADR 0004 13.8).
+      ALTER TABLE campaigns ADD COLUMN test_social TEXT CHECK (test_social IS NULL OR json_valid(test_social));
+      -- What a session reports of itself (ADR 0004 13.5).
+      ALTER TABLE sender_accounts ADD COLUMN social_kind TEXT CHECK (social_kind IS NULL OR social_kind IN ('personal', 'business'));
+      -- A subject's fixed sender on each message-request channel (ADR 0004 13.5): {"instagram": "<account id>"}.
+      ALTER TABLE enrollments ADD COLUMN social_senders TEXT CHECK (social_senders IS NULL OR json_valid(social_senders));
+      ALTER TABLE test_runs ADD COLUMN social_senders TEXT CHECK (social_senders IS NULL OR json_valid(social_senders));
+      -- A test run's own test accounts, by channel: {"instagram": {"value", "key", "bad"}}.
+      ALTER TABLE test_runs ADD COLUMN social_contacts TEXT CHECK (social_contacts IS NULL OR json_valid(social_contacts));
+
+      DROP TRIGGER track_progress_destination_detail_id_known_insert;
+      DROP TRIGGER track_progress_destination_detail_id_known_update;
+      DROP TRIGGER attempts_destination_detail_id_known_insert;
+      DROP TRIGGER attempts_destination_detail_id_known_update;
+      CREATE TRIGGER track_progress_destination_detail_id_known_insert BEFORE INSERT ON track_progress
+      WHEN NOT (NEW.destination_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':linkedin' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND linkedin_key IS NOT NULL))
+            OR EXISTS (SELECT 1 FROM message_request_channels m, test_runs r WHERE r.id = NEW.subject_id AND NEW.destination_detail_id = 'test:' || NEW.subject_id || ':' || m.name
+              AND json_extract(r.social_contacts, '$.' || m.name || '.key') IS NOT NULL)
+          WHEN NEW.destination_detail_id LIKE 'linkedin:%' THEN EXISTS (SELECT 1 FROM enrollments e WHERE e.id = NEW.subject_id AND e.person_id IS NOT NULL AND substr(NEW.destination_detail_id, 1, length(e.person_id) + 10) = 'linkedin:' || e.person_id || ':')
+          WHEN EXISTS (SELECT 1 FROM message_request_channels m WHERE substr(NEW.destination_detail_id, 1, length(m.name) + 1) = m.name || ':')
+            THEN EXISTS (SELECT 1 FROM enrollments e, message_request_channels m WHERE e.id = NEW.subject_id
+              AND ((e.person_id IS NOT NULL AND substr(NEW.destination_detail_id, 1, length(m.name) + length(e.person_id) + 4) = m.name || ':p:' || e.person_id || ':')
+                OR substr(NEW.destination_detail_id, 1, length(m.name) + length(e.company_id) + 4) = m.name || ':c:' || e.company_id || ':'))
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'track_progress.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER track_progress_destination_detail_id_known_update BEFORE UPDATE OF destination_detail_id, subject_id ON track_progress
+      WHEN NOT (NEW.destination_detail_id IS NULL OR (CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':linkedin' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND linkedin_key IS NOT NULL))
+            OR EXISTS (SELECT 1 FROM message_request_channels m, test_runs r WHERE r.id = NEW.subject_id AND NEW.destination_detail_id = 'test:' || NEW.subject_id || ':' || m.name
+              AND json_extract(r.social_contacts, '$.' || m.name || '.key') IS NOT NULL)
+          WHEN NEW.destination_detail_id LIKE 'linkedin:%' THEN EXISTS (SELECT 1 FROM enrollments e WHERE e.id = NEW.subject_id AND e.person_id IS NOT NULL AND substr(NEW.destination_detail_id, 1, length(e.person_id) + 10) = 'linkedin:' || e.person_id || ':')
+          WHEN EXISTS (SELECT 1 FROM message_request_channels m WHERE substr(NEW.destination_detail_id, 1, length(m.name) + 1) = m.name || ':')
+            THEN EXISTS (SELECT 1 FROM enrollments e, message_request_channels m WHERE e.id = NEW.subject_id
+              AND ((e.person_id IS NOT NULL AND substr(NEW.destination_detail_id, 1, length(m.name) + length(e.person_id) + 4) = m.name || ':p:' || e.person_id || ':')
+                OR substr(NEW.destination_detail_id, 1, length(m.name) + length(e.company_id) + 4) = m.name || ':c:' || e.company_id || ':'))
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'track_progress.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER attempts_destination_detail_id_known_insert BEFORE INSERT ON attempts
+      WHEN NOT ((CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':linkedin' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND linkedin_key IS NOT NULL))
+            OR EXISTS (SELECT 1 FROM message_request_channels m, test_runs r WHERE r.id = NEW.subject_id AND NEW.destination_detail_id = 'test:' || NEW.subject_id || ':' || m.name
+              AND json_extract(r.social_contacts, '$.' || m.name || '.key') IS NOT NULL)
+          WHEN NEW.destination_detail_id LIKE 'linkedin:%' THEN EXISTS (SELECT 1 FROM enrollments e WHERE e.id = NEW.subject_id AND e.person_id IS NOT NULL AND substr(NEW.destination_detail_id, 1, length(e.person_id) + 10) = 'linkedin:' || e.person_id || ':')
+          WHEN EXISTS (SELECT 1 FROM message_request_channels m WHERE substr(NEW.destination_detail_id, 1, length(m.name) + 1) = m.name || ':')
+            THEN EXISTS (SELECT 1 FROM enrollments e, message_request_channels m WHERE e.id = NEW.subject_id
+              AND ((e.person_id IS NOT NULL AND substr(NEW.destination_detail_id, 1, length(m.name) + length(e.person_id) + 4) = m.name || ':p:' || e.person_id || ':')
+                OR substr(NEW.destination_detail_id, 1, length(m.name) + length(e.company_id) + 4) = m.name || ':c:' || e.company_id || ':'))
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'attempts.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+      CREATE TRIGGER attempts_destination_detail_id_known_update BEFORE UPDATE OF destination_detail_id, subject_id ON attempts
+      WHEN NOT ((CASE WHEN (SELECT kind FROM subjects WHERE id = NEW.subject_id) = 'test_run'
+          THEN (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':email' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND email_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':mobile' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND mobile_key IS NOT NULL))
+            OR (NEW.destination_detail_id = 'test:' || NEW.subject_id || ':linkedin' AND EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.subject_id AND linkedin_key IS NOT NULL))
+            OR EXISTS (SELECT 1 FROM message_request_channels m, test_runs r WHERE r.id = NEW.subject_id AND NEW.destination_detail_id = 'test:' || NEW.subject_id || ':' || m.name
+              AND json_extract(r.social_contacts, '$.' || m.name || '.key') IS NOT NULL)
+          WHEN NEW.destination_detail_id LIKE 'linkedin:%' THEN EXISTS (SELECT 1 FROM enrollments e WHERE e.id = NEW.subject_id AND e.person_id IS NOT NULL AND substr(NEW.destination_detail_id, 1, length(e.person_id) + 10) = 'linkedin:' || e.person_id || ':')
+          WHEN EXISTS (SELECT 1 FROM message_request_channels m WHERE substr(NEW.destination_detail_id, 1, length(m.name) + 1) = m.name || ':')
+            THEN EXISTS (SELECT 1 FROM enrollments e, message_request_channels m WHERE e.id = NEW.subject_id
+              AND ((e.person_id IS NOT NULL AND substr(NEW.destination_detail_id, 1, length(m.name) + length(e.person_id) + 4) = m.name || ':p:' || e.person_id || ':')
+                OR substr(NEW.destination_detail_id, 1, length(m.name) + length(e.company_id) + 4) = m.name || ':c:' || e.company_id || ':'))
+          ELSE NEW.destination_detail_id NOT LIKE 'test:%' AND EXISTS (SELECT 1 FROM contact_details WHERE id = NEW.destination_detail_id) END))
+      BEGIN SELECT RAISE(ABORT, 'attempts.destination_detail_id names neither a contact detail of a lead nor a test contact of this test run'); END;
+    `,
+    data: (db) =>
+      addChannel(db, "instagram", [{ from: "OR linkedin_key IS NOT NULL)", to: "OR linkedin_key IS NOT NULL OR social_contacts IS NOT NULL)" }]),
   },
 ];
 
