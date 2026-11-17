@@ -6,7 +6,9 @@ import { useFocusRescue } from "../focusRescue.ts";
 import { statusGroup } from "../../domain/outreach-status.ts";
 import type { Controls } from "./useControls.ts";
 import type { ControlTarget, RecordControl } from "./requests.ts";
-import { MARK_REPLIED, WITHDRAWAL_ANSWERS } from "../campaign/linkedin-wording.ts";
+import { WITHDRAWAL_ANSWERS } from "../campaign/linkedin-wording.ts";
+import { channelOfMark, MARK_REPLIED_WORDS, markRepliedControl, type MarkRepliedControl } from "../campaign/reply-mark-wording.ts";
+import { SOCIAL_CHANNEL_LIST, type SocialChannel } from "../../domain/social-channels.ts";
 import { campaignConfirmationChanged, confirmationChanged, openCampaignConfirmation, openLeadConfirmation, type CampaignConfirmation, type LeadConfirmation } from "./confirmation.ts";
 import {
   CAMPAIGN_DONE,
@@ -179,13 +181,12 @@ const EXPECTED = {
  * A LinkedIn press the record confirms in place (ticket 24b): the reply mark, or an answer to a withdrawal LinkedIn never
  * confirmed, each a snapshot of the read it opened on (the status it showed, which the mark sends as its expectation).
  */
-type LinkedinConfirmation = { readonly action: "mark_replied"; readonly status: OutreachStatus } | { readonly action: "invite_withdrawn" | "invite_kept"; readonly trackId: string; readonly status: OutreachStatus };
+type LinkedinConfirmation = { readonly action: MarkRepliedControl; readonly channel: SocialChannel; readonly status: OutreachStatus } | { readonly action: "invite_withdrawn" | "invite_kept"; readonly trackId: string; readonly status: OutreachStatus };
 
 /** What each LinkedIn press says in its confirmation. */
 function linkedinConfirmText(c: LinkedinConfirmation): string {
+  if ("channel" in c) return MARK_REPLIED_WORDS[c.channel].preview;
   switch (c.action) {
-    case "mark_replied":
-      return MARK_REPLIED.preview;
     case "invite_withdrawn":
       return "Mark the invite withdrawn? Do this only once LinkedIn no longer shows it as pending. The app stops asking LinkedIn about it, and another campaign may then invite this person from the same session.";
     case "invite_kept":
@@ -200,7 +201,7 @@ function linkedinConfirmText(c: LinkedinConfirmation): string {
 /** Whether the read still offers what a LinkedIn confirmation opened on, with the same status. */
 function linkedinStillOffered(c: LinkedinConfirmation, lead: RecordLead): boolean {
   if (lead.status !== c.status) return false;
-  if (c.action === "mark_replied") return lead.linkedinReply?.allowed === true;
+  if ("channel" in c) return lead.replyMarks[c.channel]?.allowed === true;
   return lead.tracks.some((t) => t.trackId === c.trackId && t.linkedin?.withdrawalStuck === true);
 }
 
@@ -243,9 +244,15 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   const sentence = nextStepSentence(lead, userZone);
   // Before launch every control is refused for that one reason, which the sentence already says.
   // The reply mark's refusal is said where the user expects the mark: while the lead runs or waits on them (ticket 24b).
-  const markRefused = lead.linkedinReply && !lead.linkedinReply.allowed && (statusGroup(lead.status) === "running" || statusGroup(lead.status) === "waiting_on_you") ? lead.linkedinReply.reason : null;
-  const reasons = lead.campaignState.launched ? [...new Set([...EXPECTED[lead.status].map((a) => refusalOf(lead, a)), markRefused].filter((r): r is string => r !== null && r !== sentence))] : [];
-  const markOffered = lead.linkedinReply?.allowed === true;
+  // One mark per social channel the campaign has a track on (ADR 0004 13.8), each refused or offered by its own read.
+  const marks = SOCIAL_CHANNEL_LIST.flatMap((channel) => {
+    const mark = lead.replyMarks[channel];
+    return mark ? [{ channel, mark }] : [];
+  });
+  const markRefused = statusGroup(lead.status) === "running" || statusGroup(lead.status) === "waiting_on_you" ? marks.flatMap(({ mark }) => (mark.allowed ? [] : [mark.reason])) : [];
+  const reasons = lead.campaignState.launched ? [...new Set([...EXPECTED[lead.status].map((a) => refusalOf(lead, a)), ...markRefused].filter((r): r is string => r !== null && r !== sentence))] : [];
+  const marksOffered = marks.filter(({ mark }) => mark.allowed).map(({ channel }) => channel);
+  const markOffered = marksOffered.length > 0;
 
   // A confirmation whose control the read no longer allows (another tab, the worker) closes, and focus stays in the row;
   // one still allowed keeps its snapshot, and says when the row changed.
@@ -277,11 +284,11 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   // A LinkedIn confirmation whose press the read no longer offers closes; focus stays in the row.
   if (linkedinOpened !== null && !linkedinStillOffered(linkedinOpened, lead) && controls.pending(target) === null) {
     setLinkedinOpened(null);
-    setLinkedinClosed(linkedinOpened.action === "mark_replied" ? "This lead changed since you opened this, so it was closed. Nothing was marked." : "The withdrawal was settled since you opened this, so it was closed. Nothing was marked.");
+    setLinkedinClosed("channel" in linkedinOpened ? "This lead changed since you opened this, so it was closed. Nothing was marked." : "The withdrawal was settled since you opened this, so it was closed. Nothing was marked.");
   }
   const confirmLinkedin = (c: LinkedinConfirmation) => {
     focusNext.current = "status";
-    void controls.press(target, c.action, { status: c.status, preview: c.action }, c.action === "mark_replied" ? undefined : c.trackId).then((out) => {
+    void controls.press(target, c.action, { status: c.status, preview: c.action }, "channel" in c ? undefined : c.trackId).then((out) => {
       if (!out.ok && out.why === "busy") {
         focusNext.current = null;
         return;
@@ -310,7 +317,8 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
         target={target}
         pendingText={(a) => `${CONTROL_PENDING[a]}…`}
         effectText={(body, action) => {
-          if (action === "mark_replied") return MARK_REPLIED.done;
+          const marked = channelOfMark(action);
+          if (marked !== null) return MARK_REPLIED_WORDS[marked].done;
           if (action === "invite_withdrawn") return WITHDRAWAL_ANSWERS[0].done;
           if (action === "invite_kept") return WITHDRAWAL_ANSWERS[1].done;
           const answer = body as ControlAnswer | null;
@@ -347,28 +355,29 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
               {CONTROL_LABEL[c.action]}
             </button>
           ))}
-          {/* The LinkedIn reply mark (ADR 0004 section 7): offered while the read allows it, last, as the user's own mark. */}
-          {markOffered && (
+          {/* The social reply marks (ADR 0004 7, 13.8): each offered while the read allows it, last, as the user's own mark. */}
+          {marksOffered.map((channel) => (
             <button
+              key={channel}
               type="button"
               ref={(el) => {
-                if (el) linkedinButtons.current.set("mark_replied", el);
+                if (el) linkedinButtons.current.set(markRepliedControl(channel), el);
               }}
               data-rescue="2"
-              aria-label={label("mark_replied")}
+              aria-label={label(markRepliedControl(channel))}
               disabled={busy}
               className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium"
               onClick={() => {
                 controls.dismiss(target);
                 setUnstored(false);
                 setLinkedinClosed(null);
-                setLinkedinOpened({ action: "mark_replied", status: lead.status });
+                setLinkedinOpened({ action: markRepliedControl(channel), channel, status: lead.status });
               }}
             >
-              <Icon name="linkedin" className="size-4" />
-              {MARK_REPLIED.label}
+              <Icon name={channel} className="size-4" />
+              {MARK_REPLIED_WORDS[channel].label}
             </button>
-          )}
+          ))}
         </div>
       )}
       {stuck.length > 0 && !opened && !linkedinOpened && (
@@ -410,7 +419,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
           busy={busy ? "Another change to this lead is on its way." : null}
           onConfirm={() => confirmLinkedin(linkedinOpened)}
           onCancel={() => {
-            const back = linkedinOpened.action === "mark_replied" ? "mark_replied" : `${linkedinOpened.action === "invite_withdrawn" ? "withdrawn" : "kept"}:${linkedinOpened.trackId}`;
+            const back = "channel" in linkedinOpened ? linkedinOpened.action : `${linkedinOpened.action === "invite_withdrawn" ? "withdrawn" : "kept"}:${linkedinOpened.trackId}`;
             focusBack.current = back;
             setLinkedinOpened(null);
           }}

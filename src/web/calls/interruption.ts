@@ -44,6 +44,7 @@ const CHANNEL_WORDS: Record<Channel, { provider: string; accounts: string; accou
   email: { provider: "Instantly", accounts: "inboxes", account: "inbox", send: (n) => `${n} email ${n === 1 ? "send" : "sends"}`, due: (n) => (n === 1 ? "email" : "emails") },
   sms: { provider: "the SMS provider", accounts: "numbers", account: "SMS number", send: (n) => `${n} ${n === 1 ? "text" : "texts"}`, due: (n) => (n === 1 ? "text" : "texts") },
   linkedin: { provider: "the LinkedIn session", accounts: "LinkedIn sessions", account: "LinkedIn session", send: (n) => `${n} LinkedIn ${n === 1 ? "step" : "steps"}`, due: (n) => (n === 1 ? "LinkedIn step" : "LinkedIn steps") },
+  instagram: { provider: "the Instagram session", accounts: "Instagram sessions", account: "Instagram session", send: (n) => `${n} Instagram ${n === 1 ? "message" : "messages"}`, due: (n) => (n === 1 ? "Instagram message" : "Instagram messages") },
 };
 
 const capital = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
@@ -150,24 +151,30 @@ export function capacityItems(waiting: NeedsAttention["waitingForCapacity"], tod
   // A LinkedIn step whose kind no session has any allowance for (council on dee365d, item 15): never "full for the day",
   // no reset promised, and nothing that sends the user looking for a setting; said in an entry of its own per campaign.
   const none = new Map<string, NeedsAttention["waitingForCapacity"][number][]>();
-  for (const w of waiting.filter((x) => x.noAllowance)) none.set(w.campaign.id, [...(none.get(w.campaign.id) ?? []), w]);
+  // One entry per campaign and channel (ticket 25): a LinkedIn and an Instagram step are two entries, each in its own words.
+  for (const w of waiting.filter((x) => x.noAllowance)) none.set(`${w.campaign.id}|${w.channel}`, [...(none.get(`${w.campaign.id}|${w.channel}`) ?? []), w]);
   const groups = new Map<string, NeedsAttention["waitingForCapacity"][number][]>();
   for (const w of waiting.filter((x) => !x.noAllowance)) groups.set(w.campaign.id, [...(groups.get(w.campaign.id) ?? []), w]);
   return [...[...groups.values()].map((steps) => fullItem(steps, today, userZone)), ...[...none.values()].map(noAllowanceItem)];
 }
 
-/** LinkedIn steps that no session they may use has any allowance for, of their kind: they wait, with no time promised. */
+/** Social steps that no session they may use has any allowance for, of their kind: they wait, with no time promised. */
 function noAllowanceItem(steps: readonly NeedsAttention["waitingForCapacity"][number][]): AttentionItem {
   const first = steps[0] as NeedsAttention["waitingForCapacity"][number];
   const leads = new Set(steps.map((w) => w.enrollmentId)).size;
   const kinds = [...new Set(steps.map((w) => w.action))];
-  const what = kinds.length === 1 && kinds[0] === "invite" ? "invites" : kinds.length === 1 && kinds[0] === "message" ? "LinkedIn messages" : "invites or messages";
-  const body = `No LinkedIn session ${leads === 1 ? "it" : "they"} may use has an allowance for ${what}, so ${leads === 1 ? "it waits" : "they wait"}. With no allowance there is no room on any day, so no time is given; nothing is dropped.`;
-  if (leads === 1) return { key: `no-allowance-${first.campaign.id}`, tone: "pause", title: `${leadName(first)}’s LinkedIn step can’t go yet`, body: `In ${first.campaign.name}: ${body}`, action: recordAction(first) };
+  const instagram = first.channel === "instagram";
+  const platform = instagram ? "Instagram" : "LinkedIn";
+  const what = instagram ? "messages" : kinds.length === 1 && kinds[0] === "invite" ? "invites" : kinds.length === 1 && kinds[0] === "message" ? "LinkedIn messages" : "invites or messages";
+  const body = `No ${platform} session ${leads === 1 ? "it" : "they"} may use has an allowance for ${what}, so ${leads === 1 ? "it waits" : "they wait"}. With no allowance there is no room on any day, so no time is given; nothing is dropped.`;
+  // LinkedIn's key is as it was (ticket 24b); another channel's carries the channel.
+  const key = instagram ? `no-allowance-${first.campaign.id}-${first.channel}` : `no-allowance-${first.campaign.id}`;
+  const step = instagram ? "Instagram message" : "LinkedIn step";
+  if (leads === 1) return { key, tone: "pause", title: `${leadName(first)}’s ${step} can’t go yet`, body: `In ${first.campaign.name}: ${body}`, action: recordAction(first) };
   return {
-    key: `no-allowance-${first.campaign.id}`,
+    key,
     tone: "pause",
-    title: `${leads} leads in ${first.campaign.name} have LinkedIn steps that can’t go yet`,
+    title: `${leads} leads in ${first.campaign.name} have ${step}s that can’t go yet`,
     body,
     action: { label: "Open campaign", href: `/campaigns/${encodeURIComponent(first.campaign.id)}/leads`, ariaLabel: `Open ${first.campaign.name}` },
   };
@@ -209,6 +216,8 @@ function detailLine(channel: ReachChannel, why: "missing" | "bad"): string {
       return why === "missing" ? "they have no number to call" : "every number to call is marked wrong";
     case "linkedin":
       return why === "missing" ? "they have no LinkedIn profile in the import" : "their LinkedIn profile is marked unreachable";
+    case "instagram":
+      return why === "missing" ? "neither they nor their company have an Instagram account in the import" : "every Instagram account they could use is marked unreachable";
     default: {
       const unhandled: never = channel;
       throw new Error(`A channel with no sentence: ${String(unhandled)}`);

@@ -15,6 +15,7 @@
  * - **A definite answer removes the press** (accepted, or refused with the server's reason). Nothing else is kept: what the
  *   page shows comes from the server's read, refreshed after each answer and on every storage event.
  */
+import { channelOfMark, type MarkRepliedControl } from "../campaign/reply-mark-wording.ts";
 import type { LeadControlApi, OutreachStatus } from "../../shared/api.ts";
 import type { KeyValue } from "../calls/callDesk.ts";
 
@@ -34,7 +35,7 @@ export interface CampaignExpectation {
  * What a record's control press can be: a lead control, the LinkedIn reply mark, or one of the two answers to a withdrawal
  * LinkedIn never confirmed (ticket 24b; ADR 0004 sections 3.3 and 7). Each is stored and sent on the same rule.
  */
-export type RecordControl = LeadControlApi | "mark_replied" | "invite_withdrawn" | "invite_kept";
+export type RecordControl = LeadControlApi | MarkRepliedControl | "invite_withdrawn" | "invite_kept";
 
 export interface PressEntry {
   readonly v: 2;
@@ -90,7 +91,10 @@ function parse(text: string | null): PressEntry | null {
   if (text === null) return null;
   try {
     const value: unknown = JSON.parse(text);
-    return typeof value === "object" && value !== null && "v" in value && value.v === 2 && "requestId" in value && typeof value.requestId === "string" ? (value as PressEntry) : null;
+    if (!(typeof value === "object" && value !== null && "v" in value && value.v === 2 && "requestId" in value && typeof value.requestId === "string")) return null;
+    // A mark stored before ticket 25 named no channel: it could only be LinkedIn's (ADR 0004 13.8).
+    const entry = value as PressEntry | (Omit<PressEntry, "action"> & { action: "mark_replied" });
+    return entry.action === "mark_replied" ? { ...entry, action: "mark_replied:linkedin" } : (entry as PressEntry);
   } catch {
     return null;
   }
@@ -101,10 +105,10 @@ export function controlRequestOf(entry: PressEntry): { readonly path: string; re
   const { target } = entry;
   const id = encodeURIComponent(target.id);
   if (target.kind === "campaign") return { path: `/api/campaigns/${id}/${entry.action}`, body: { requestId: entry.requestId, expect: entry.expect } };
+  // The mark is confirmed on the status the read showed (ADR 0004 section 7: `expect` holds the status only), on its own channel.
+  const markChannel = channelOfMark(entry.action);
+  if (markChannel !== null) return { path: `/api/enrollments/${id}/replies`, body: { requestId: entry.requestId, channel: markChannel, expect: { status: (entry.expect as LeadExpectation).status } } };
   switch (entry.action) {
-    // The mark is confirmed on the status the read showed (ADR 0004 section 7: `expect` holds the status only).
-    case "mark_replied":
-      return { path: `/api/enrollments/${id}/replies`, body: { requestId: entry.requestId, channel: "linkedin", expect: { status: (entry.expect as LeadExpectation).status } } };
     case "invite_withdrawn":
     case "invite_kept":
       return { path: `/api/enrollments/${id}/invite-withdrawal`, body: { requestId: entry.requestId, trackId: entry.trackId ?? "", answer: entry.action === "invite_withdrawn" ? "withdrawn" : "kept" } };

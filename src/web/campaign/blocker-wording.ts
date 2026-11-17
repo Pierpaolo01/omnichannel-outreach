@@ -48,18 +48,25 @@ export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition, sms: 
   }
 
   const track = trackOf(b.trackId);
-  const channel = track ? channelOf(track) : b.kind === "no_sender" && (b.channel === "sms" || b.channel === "linkedin") ? b.channel : "email";
+  const channel = track ? channelOf(track) : b.kind === "no_sender" && (b.channel === "sms" || b.channel === "linkedin" || b.channel === "instagram") ? b.channel : "email";
   const name = capitalise(named(track));
   if (b.kind === "empty_copy") {
     const noun = stepName(track, b.stepNumber);
     const what = b.part === "subject" ? `${noun} has no subject` : `${noun} has no ${channel === "email" ? "copy" : "message"}`;
     return {
       title: `${name}: ${what}`,
-      detail: b.part === "subject" ? "Give it a subject, or let it continue the thread." : `Write it, or remove the ${channel === "sms" ? "text" : channel === "linkedin" ? "message" : "email"}.`,
+      detail: b.part === "subject" ? "Give it a subject, or let it continue the thread." : `Write it, or remove the ${channel === "sms" ? "text" : channel === "linkedin" || channel === "instagram" ? "message" : "email"}.`,
       actions: [{ label: "Write it", trackId: b.trackId, stepId: b.stepId }],
     };
   }
   // LinkedIn (ADR 0004 1.1): the domain's own words, and the provider read's; nothing says a session can be connected here.
+  // Instagram (ADR 0004 13.1): as LinkedIn's, in the server's own sentence; nothing says a session can be connected here.
+  if (channel === "instagram")
+    return {
+      title: `${name} has no connected Instagram session`,
+      detail: "No Instagram session is connected, so Instagram tracks cannot launch. Remove the track to launch without it.",
+      actions: [{ label: "Open track", trackId: b.trackId }],
+    };
   if (channel === "linkedin")
     return {
       title: `${name} has no connected LinkedIn session`,

@@ -5,6 +5,7 @@
  * step is next, when it is due or what a control did. History is said in the past tense; a present state only as the
  * read says it at its instant.
  */
+import { MARK_REPLIED_WORDS } from "../campaign/reply-mark-wording.ts";
 import type { TrackChannelApi, SendChannelApi } from "../../shared/api.ts";
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
 import { clockTime } from "../time.ts";
@@ -29,8 +30,9 @@ export const CONTROL_LABEL = {
   stop: "Stop",
   resume_from_next_step: "Resume from the next step",
   move_to_win_back: "Move to win-back",
-  // Ticket 24b: the LinkedIn reply mark and a stuck withdrawal's two answers, pressed and stored like the controls.
-  mark_replied: "Mark replied on LinkedIn",
+  // Ticket 24b: the reply mark and a stuck withdrawal's two answers, pressed and stored like the controls; the mark per channel (ticket 25).
+  "mark_replied:linkedin": MARK_REPLIED_WORDS.linkedin.label,
+  "mark_replied:instagram": MARK_REPLIED_WORDS.instagram.label,
   invite_withdrawn: "It’s withdrawn",
   invite_kept: "It’s still there",
 } as const satisfies Record<RecordControl, string>;
@@ -43,7 +45,8 @@ export const CONTROL_PENDING = {
   stop: "Stopping",
   resume_from_next_step: "Resuming from the next step",
   move_to_win_back: "Moving to win-back",
-  mark_replied: "Marking replied on LinkedIn",
+  "mark_replied:linkedin": MARK_REPLIED_WORDS.linkedin.pending,
+  "mark_replied:instagram": MARK_REPLIED_WORDS.instagram.pending,
   invite_withdrawn: "Marking the invite withdrawn",
   invite_kept: "Marking the invite still there",
 } as const satisfies Record<RecordControl, string>;
@@ -76,8 +79,9 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
     case "email":
     case "sms":
       return `${lower(stepTitle(step.track, step.channel, step.number))} of ${step.of}${on}`;
-    // A LinkedIn step by its role (ticket 24b): "the first message", "follow-up 2 on LinkedIn track 2".
-    case "linkedin": {
+    // A social step by its role (ticket 24b, ticket 25): "the first message", "the message request", "follow-up 2 on LinkedIn track 2".
+    case "linkedin":
+    case "instagram": {
       const title = lower(stepTitle(step.track, step.channel, step.number));
       return `${title.startsWith("follow-up") ? title : `the ${title}`}${on}`;
     }
@@ -397,4 +401,5 @@ export const REPLY_WORDS: Readonly<Record<SendChannelApi, { readonly how: string
   email: { how: "Replied by email", title: "Replied by email", answer: "Answer in Instantly.", activity: "Read and answer the reply in Instantly." },
   sms: { how: "Replied by text", title: "Replied by text", answer: "Answer on your phone.", activity: "Answer the reply on your phone." },
   linkedin: { how: "Marked replied on LinkedIn by you", title: "You marked them replied on LinkedIn", answer: "Carry on the conversation on LinkedIn.", activity: "Carry on the conversation on LinkedIn." },
+  instagram: { how: "Marked replied on Instagram by you", title: "You marked them replied on Instagram", answer: "Carry on the conversation on Instagram.", activity: "Carry on the conversation on Instagram." },
 };

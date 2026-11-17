@@ -12,7 +12,7 @@ import { withheldExplanation } from "./withheld.ts";
 /** The council's first review of `dee365d` (ticket 24b): each screen sentence or snapshot that could say something untrue. */
 
 const VIEW: LinkedinTrackView = { invite: "sent", note: "with", connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalAsked: false, skipCause: null, withdrawalStuck: false, inviteOpen: true, pendingElsewhereSince: null };
-const liTrack = (view: Partial<LinkedinTrackView>): TrackProgressView => ({ trackId: "li", channel: "linkedin", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: { ...VIEW, ...view }, hold: null, holdOwners: [], nextStep: null, callTask: null, steps: [] });
+const liTrack = (view: Partial<LinkedinTrackView>): TrackProgressView => ({ trackId: "li", channel: "linkedin", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], messageRequest: null, linkedin: { ...VIEW, ...view }, hold: null, holdOwners: [], nextStep: null, callTask: null, steps: [] });
 const control = (action: "stop" | "move_to_win_back"): AllowedControl => ({ action, allowed: true, statusAfter: "stopped_manually", skips: null, next: null, withProvider: 0, digest: `${action}|x|invite_open` });
 const lead = (controls: ControlView[], tracks: TrackProgressView[]): RecordLead => ({
   id: "en-1", campaignId: "c-1", status: "active", endedAt: null, reply: null, sender: null, smsSender: null, zone: "Europe/London", tracks, branch: "main", winBackEnteredAt: null, declined: null, controls, mayStillSend: 0, replyMarks: {},
@@ -79,7 +79,7 @@ describe("item 10: a test run's confirmation belongs to the run it was opened on
     id, running: false, ending: "finished", startedAt: "2026-11-02T09:00:00Z", endedAt: null, renderAs: { id: "l", name: "Pat" }, email: null, mobile: null, linkedin: null, status: "sequence_finished_no_response", mayStillSend: 0, steps: [], linkedinTracks: [], replyMarks: { linkedin: { allowed: true, work: { kind: "invite", state: "sent" } } }, social: { instagram: null }, ...fields,
   });
   test("a newer run shown closes it, with the reason; the same run still allowing it keeps it", () => {
-    const c = { kind: "reply" as const, runId: "t1", status: "sequence_finished_no_response" as const, wasRunning: false };
+    const c = { kind: "reply" as const, channel: "linkedin" as const, runId: "t1", status: "sequence_finished_no_response" as const, wasRunning: false };
     expect(testConfirmationGone(c, run("t1"))).toBeNull();
     expect(testConfirmationGone(c, run("t2", { running: true, status: "active" }))).toBe("The test shown here changed since you opened this, so it was closed. Nothing was marked.");
     expect(testConfirmationGone(c, run("t1", { replyMarks: { linkedin: { allowed: false, reason: "They are already marked replied in this campaign." } } }))).not.toBeNull();

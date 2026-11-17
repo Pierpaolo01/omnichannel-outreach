@@ -11,7 +11,7 @@ import { whenImported } from "../importText.tsx";
 import { useNow } from "../time.ts";
 import { LaunchBadge, campaignPath } from "./CampaignPage.tsx";
 
-const TRACK_NAME = { email: "Email track", sms: "SMS track", call: "Phone track", linkedin: "LinkedIn track" } as const;
+const TRACK_NAME = { email: "Email track", sms: "SMS track", call: "Phone track", linkedin: "LinkedIn track", instagram: "Instagram track" } as const;
 
 /** Campaigns: the list, with New campaign and Import again (guided import, chosen 12 November 2026). */
 export function CampaignsPage() {

@@ -484,10 +484,12 @@ function Touches({ touches, notes, userZone }: { touches: readonly TouchView[]; 
 
 const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
 
-function touchRow(t: TouchView): { icon: "email" | "sms" | "reply" | "call" | "linkedin"; tone: string; title: string; body: string | null } {
+function touchRow(t: TouchView): { icon: "email" | "sms" | "reply" | "call" | "linkedin" | "instagram"; tone: string; title: string; body: string | null } {
   switch (t.kind) {
     case "linkedin":
       return { icon: "linkedin", tone: PLAIN, title: "LinkedIn step sent", body: null };
+    case "instagram":
+      return { icon: "instagram", tone: PLAIN, title: "Instagram message sent", body: null };
     case "email":
       return { icon: "email", tone: PLAIN, title: "Email sent", body: t.copy?.subject || null };
     case "sms":

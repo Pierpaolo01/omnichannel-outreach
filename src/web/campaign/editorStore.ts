@@ -88,6 +88,8 @@ export const smsNumberIds = (view: SequenceView): string[] => view.accounts.filt
 
 /** The connected LinkedIn sessions: the LinkedIn pool follows them (ticket 24b). None in the running app, which has no session. */
 export const linkedinSessionIds = (view: SequenceView): string[] => view.accounts.filter((a) => a.channel === "linkedin").map((a) => a.id);
+/** The connected Instagram sessions (ADR 0004 13.5): the pool follows them as LinkedIn's does. */
+export const instagramSessionIds = (view: SequenceView): string[] => view.accounts.filter((a) => a.channel === "instagram").map((a) => a.id);
 
 /** How long after an edit its save is sent. */
 export const SAVE_DELAY_MS = 600;
@@ -110,7 +112,7 @@ export class EditorStore {
     this.deps = deps;
     this.state = { view: initial, draft: initial.definition, save: { kind: "idle" }, unsaved: false, pending: null, locked: false, problems: problemsOf(initial.definition, initial) };
     this.queue = new SaveQueue({
-      read: () => ({ draft: this.state.draft, accountIds: emailInboxIds(this.state.view), smsNumberIds: smsNumberIds(this.state.view), linkedinSessionIds: linkedinSessionIds(this.state.view), version: this.state.view.definitionVersion }),
+      read: () => ({ draft: this.state.draft, accountIds: emailInboxIds(this.state.view), smsNumberIds: smsNumberIds(this.state.view), linkedinSessionIds: linkedinSessionIds(this.state.view), instagramSessionIds: instagramSessionIds(this.state.view), version: this.state.view.definitionVersion }),
       put: (definition, options, save) => {
         const sent = withFaults(definition, deps.faults, this.lastSent);
         this.lastSent = definition;
@@ -311,7 +313,8 @@ export class EditorStore {
     const emailDiffers = live("email") && !same(view.definition.emailPool, emailInboxIds(view));
     const smsDiffers = live("sms") && !same(view.definition.smsPool ?? [], smsNumberIds(view));
     const linkedinDiffers = live("linkedin") && !same(view.definition.linkedinPool ?? [], linkedinSessionIds(view));
-    if ((!emailDiffers && !smsDiffers && !linkedinDiffers) || this.queue.inConflict) return;
+    const instagramDiffers = live("instagram") && !same(view.definition.instagramPool ?? [], instagramSessionIds(view));
+    if ((!emailDiffers && !smsDiffers && !linkedinDiffers && !instagramDiffers) || this.queue.inConflict) return;
     this.queue.edited();
     void this.queue.save();
   }

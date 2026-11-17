@@ -489,7 +489,7 @@ export function attentionItems(n: NeedsAttention, today: Pick<TodayView, "overdu
   }
   for (const c of n.heldCapacity) {
     // A LinkedIn session's capacity is two allowances (council on dee365d, item 4): its held work is said without a sum.
-    items.push({ key: `held-${c.accountId}`, tone: "pause", title: c.channel === "linkedin" ? `${c.held} of ${c.accountId}’s LinkedIn steps today ${c.held === 1 ? "is" : "are"} held` : `${c.held} of ${c.accountId}’s ${c.capacity} sends today are held`, body: "The provider hasn’t confirmed whether those messages went, so their room stays taken while it hasn’t." });
+    items.push({ key: `held-${c.accountId}`, tone: "pause", title: c.channel === "linkedin" ? `${c.held} of ${c.accountId}’s LinkedIn steps today ${c.held === 1 ? "is" : "are"} held` : c.channel === "instagram" ? `${c.held} of ${c.accountId}’s Instagram messages today ${c.held === 1 ? "is" : "are"} held` : `${c.held} of ${c.accountId}’s ${c.capacity} sends today are held`, body: "The provider hasn’t confirmed whether those messages went, so their room stays taken while it hasn’t." });
   }
   items.push(...heldTrackItems(n.heldTracks));
   items.push(...withdrawalStuckItems(n.inviteWithdrawalsUnknown ?? []));

@@ -16,6 +16,7 @@ const track = (linkedin: Partial<LinkedinTrackView> | null, fields: Partial<Trac
   finishedAt: null,
   conversationOwners: [],
   linkedin: linkedin === null ? null : { ...VIEW, ...linkedin },
+  messageRequest: null,
   hold: null,
   holdOwners: [],
   nextStep: null,

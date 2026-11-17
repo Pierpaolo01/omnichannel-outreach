@@ -1,4 +1,5 @@
 /** The campaign editor's draft helpers (ticket 12c). Pure: no React, no requests. */
+import { isMessageRequestChannel } from "../../domain/social-channels.ts";
 import type { TrackChannelApi } from "../../shared/api.ts";
 import { mergeUses, rewriteMergeUses, type MergeUse } from "../../domain/sequence/copy.ts";
 import { ownSubject } from "../../domain/sequence/definition.ts";
@@ -65,7 +66,7 @@ export const emailTrackOf = (def: CampaignDefinition): TrackDefinition | undefin
   def.tracks.find((t) => !t.removed && t.channel === "email" && t.branch === "main");
 
 /** What one step of a track on this channel is called: Email 1, Text 1, Call 1 (a LinkedIn step by its role: `stepTitle`). */
-export const STEP_NOUN = { email: "Email", sms: "Text", call: "Call", linkedin: "LinkedIn step" } as const;
+export const STEP_NOUN = { email: "Email", sms: "Text", call: "Call", linkedin: "LinkedIn step", instagram: "Message" } as const;
 
 /**
  * A track's name in messages, from its own channel and never its position among all tracks: "the
@@ -85,6 +86,11 @@ export function trackSummary(track: TrackDefinition): string {
   if (track.channel === "linkedin") {
     const messages = Math.max(0, liveSteps(track).length - 1);
     return `Invite, then ${messages} ${messages === 1 ? "message" : "messages"}`;
+  }
+  // A message-request track: the message request, then its follow-ups (ADR 0004 13.3).
+  if (isMessageRequestChannel(track.channel)) {
+    const follow = Math.max(0, liveSteps(track).length - 1);
+    return follow === 0 ? "Message request" : `Message request, then ${follow} ${follow === 1 ? "follow-up" : "follow-ups"}`;
   }
   const steps = liveSteps(track);
   const days = steps.reduce((sum, s) => sum + (Number.isFinite(s.waitDays) ? s.waitDays : 0), 0);
@@ -181,5 +187,6 @@ export function sendsOnItsOwn(def: CampaignDefinition): string {
     : channels.has("email") ? "Email goes out on its own, inside each lead’s sending window."
     : "";
   const linkedin = channels.has("linkedin") ? "LinkedIn invites and messages go out from a LinkedIn session, inside each lead’s sending window." : "";
-  return [own, linkedin, calls].filter(Boolean).join(" ");
+  const instagram = channels.has("instagram") ? "Instagram messages go out from an Instagram session, inside each lead’s sending window." : "";
+  return [own, linkedin, instagram, calls].filter(Boolean).join(" ");
 }

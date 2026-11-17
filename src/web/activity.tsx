@@ -96,6 +96,11 @@ const REASON: Readonly<Record<string, string>> = {
   "profile unreachable": "LinkedIn refused the profile as unreachable. It is marked wrong.",
   // Q37: the connection is gone (they removed it); the profile stays theirs and is not marked wrong.
   "not connected": "LinkedIn refused the message: they are no longer connected. The profile isn’t marked wrong.",
+  // Instagram (ticket 25; ADR 0004 13.3, 13.4).
+  no_account: "Neither they nor their company have an Instagram account in the import.",
+  "account unreachable": "Instagram refused the account as unreachable. It is marked wrong.",
+  // Q44: the platform does not let this session message the account; the account stays theirs and is not marked wrong.
+  "not allowed": "Instagram didn’t allow the message: they may have message requests turned off. The account isn’t marked wrong.",
 };
 
 const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
@@ -176,7 +181,7 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
   // and a LinkedIn step by its role, "Connection invite" (ticket 24b).
   const named = (n: number) => stepTitle(entry.track, entry.channel, n);
   const track = entry.track.several ? entry.track.label : null;
-  const icon: IconName = entry.channel === "linkedin" ? "linkedin" : sms ? "sms" : "email";
+  const icon: IconName = entry.channel;
   switch (entry.kind) {
     case "sent":
       return { icon, tone: PLAIN, title: `${named(entry.stepNumber)} sent`, body: null, track };

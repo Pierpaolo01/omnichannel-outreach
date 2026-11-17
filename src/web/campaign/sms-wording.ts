@@ -42,6 +42,8 @@ export function ownersPhrase(owners: readonly ConversationOwnerView[]): string {
 const CONVERSATION_WORDS: Readonly<Record<TrackChannel, { readonly destination: string; readonly conversation: string; readonly first: string; readonly senders: string }>> = {
   sms: { destination: "mobile", conversation: "a text conversation", first: "the first text", senders: "on every number this campaign can use" },
   linkedin: { destination: "LinkedIn profile", conversation: "a LinkedIn conversation (an invite or a message)", first: "the first invite or message", senders: "on every LinkedIn session this campaign can use" },
+  // The account a message request goes to may be their company's (ADR 0004 13.4): "their Instagram account" names whichever it is.
+  instagram: { destination: "Instagram account", conversation: "an Instagram conversation (a message request or a follow-up)", first: "the first message", senders: "on every Instagram session this campaign can use" },
   email: { destination: "contact details", conversation: "a conversation", first: "the first contact", senders: "on every sender this campaign can use" },
   call: { destination: "contact details", conversation: "a conversation", first: "the first contact", senders: "on every sender this campaign can use" },
 };

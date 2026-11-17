@@ -68,7 +68,7 @@ export interface SaveIdentity {
 export interface SaveQueueDeps {
   /** The draft as it stands, the inboxes the provider reports, and the revision the page last had from the server. */
   /** The draft, the connected email inboxes and SMS numbers its pools follow, and the revision the page last saw. */
-  read(): { readonly draft: CampaignDefinition; readonly accountIds: readonly string[]; readonly smsNumberIds?: readonly string[]; readonly linkedinSessionIds?: readonly string[]; readonly version: number };
+  read(): { readonly draft: CampaignDefinition; readonly accountIds: readonly string[]; readonly smsNumberIds?: readonly string[]; readonly linkedinSessionIds?: readonly string[]; readonly instagramSessionIds?: readonly string[]; readonly version: number };
   /**
    * Sends one save. Rejects with `NoAnswer` when no answer came, or with an error carrying the
    * server's `code` (`superseded`, `edit_conflict`, `too_large`) when the server refused it.
@@ -240,12 +240,14 @@ export class SaveQueue {
    * Apply sends it, so the two can never describe different definitions.
    */
   bodyOf(from?: CampaignDefinition): CampaignDefinition {
-    const { draft, accountIds, smsNumberIds, linkedinSessionIds } = this.deps.read();
+    const { draft, accountIds, smsNumberIds, linkedinSessionIds, instagramSessionIds } = this.deps.read();
     const base = from ?? draft;
     // The LinkedIn pool (ticket 24b) is written only once a session is connected or the definition holds one already, so a
     // campaign the running app saves (it has no session) keeps the body it always had.
     const linkedin = linkedinSessionIds && (linkedinSessionIds.length > 0 || base.linkedinPool !== undefined) ? { linkedinPool: [...linkedinSessionIds] } : {};
-    return { ...base, emailPool: [...accountIds], ...(smsNumberIds ? { smsPool: [...smsNumberIds] } : {}), ...linkedin };
+    // The Instagram pool (ticket 25) on the same rule.
+    const instagram = instagramSessionIds && (instagramSessionIds.length > 0 || base.instagramPool !== undefined) ? { instagramPool: [...instagramSessionIds] } : {};
+    return { ...base, emailPool: [...accountIds], ...(smsNumberIds ? { smsPool: [...smsNumberIds] } : {}), ...linkedin, ...instagram };
   }
 
   /** The user loaded the stored version: what was typed before is set aside, and saving starts again from it. */

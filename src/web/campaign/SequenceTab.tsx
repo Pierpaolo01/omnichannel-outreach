@@ -4,7 +4,8 @@ import { useLocation, useSearch } from "wouter";
 import { skipLimitOf } from "../../domain/sequence/calls.ts";
 import { MERGE_FIELDS } from "../../domain/sequence/copy.ts";
 import { NO_WIN_BACK_BRANCH, declinedPathOf, winBackAvailable, type DeclinedPath } from "../../domain/sequence/definition.ts";
-import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, LinkedinProviderStatus, SmsProviderStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
+import { isMessageRequestChannel } from "../../domain/social-channels.ts";
+import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, LinkedinProviderStatus, SmsProviderStatus, SocialProvidersStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
 import { stepTitle } from "../../shared/track-label.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
@@ -176,6 +177,10 @@ export function SequenceTab({ campaignId, editor, paused = false }: { campaignId
                 <button type="button" className="btn gap-1.5 border-line-strong bg-base-100 font-medium" disabled={editor.locked} onClick={() => add("linkedin")}>
                   <Icon name="linkedin" className="size-4" />
                   LinkedIn track
+                </button>
+                <button type="button" className="btn gap-1.5 border-line-strong bg-base-100 font-medium" disabled={editor.locked} onClick={() => add("instagram")}>
+                  <Icon name="instagram" className="size-4" />
+                  Instagram track
                 </button>
               </div>
             </>
@@ -523,7 +528,7 @@ function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, ch
         <h3 id={headingId} className="text-[13px] font-semibold text-hand">
           Win-back branch <span className="font-normal text-ink-2">· for leads who decline on a call</span>
         </h3>
-        {!launched && !empty && <AddTrackMenu id={ADD_WIN_BACK_ID} label="Add win-back track" channels={["email", "sms", "linkedin"]} disabled={locked} onAdd={(channel) => channel !== "call" && onAdd(channel)} />}
+        {!launched && !empty && <AddTrackMenu id={ADD_WIN_BACK_ID} label="Add win-back track" channels={["email", "sms", "linkedin", "instagram"]} disabled={locked} onAdd={(channel) => channel !== "call" && onAdd(channel)} />}
       </div>
       {empty ? (
         <div className="flex max-w-[460px] flex-col items-start gap-2 pt-1">
@@ -541,6 +546,10 @@ function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, ch
               <button type="button" className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium" disabled={locked} aria-label="Add a win-back LinkedIn track" onClick={() => onAdd("linkedin")}>
                 <Icon name="linkedin" className="size-4" />
                 LinkedIn track
+              </button>
+              <button type="button" className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium" disabled={locked} aria-label="Add a win-back Instagram track" onClick={() => onAdd("instagram")}>
+                <Icon name="instagram" className="size-4" />
+                Instagram track
               </button>
             </div>
           )}
@@ -629,7 +638,7 @@ function DeclinedEdges({ edges }: { edges: readonly DeclinedEdge[] }) {
 }
 
 /** The channel's word on a track's node. */
-const CHANNEL_ON_NODE: Record<TrackDefinition["channel"], string> = { email: "Email", sms: "SMS", call: "Phone", linkedin: "LinkedIn" };
+const CHANNEL_ON_NODE: Record<TrackDefinition["channel"], string> = { email: "Email", sms: "SMS", call: "Phone", linkedin: "LinkedIn", instagram: "Instagram" };
 
 function TrackNode({ track, def, selected, blockers, launched, onSelect }: { track: TrackDefinition; def: CampaignDefinition; selected: boolean; blockers: readonly LaunchBlocker[]; launched: boolean; onSelect: () => void }) {
   const steps = liveSteps(track);
@@ -678,7 +687,7 @@ function AddTrackMenu({
   onAdd,
   id = ADD_TRACK_ID,
   label = "Add track",
-  channels = ["email", "sms", "call", "linkedin"],
+  channels = ["email", "sms", "call", "linkedin", "instagram"],
 }: {
   disabled: boolean;
   onAdd: (channel: TrackChannelApi) => void;
@@ -700,6 +709,7 @@ function AddTrackMenu({
       { key: "sms", label: "SMS track", icon: "sms" },
       { key: "call", label: "Phone track", icon: "call" },
       { key: "linkedin", label: "LinkedIn track", icon: "linkedin" },
+      { key: "instagram", label: "Instagram track", icon: "instagram" },
     ] as const
   ).filter((e) => channels.includes(e.key));
   useEffect(() => {
@@ -821,7 +831,9 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
   const sms = track.channel === "sms";
   // A LinkedIn track (ticket 24b): its steps are the connection invite, then messages, named by their role.
   const linkedin = track.channel === "linkedin";
-  const channel = linkedin ? "linkedin" : sms ? "sms" : "email";
+  // A message-request track (ticket 25; ADR 0004 13.3): messages only, the first a message request.
+  const request = isMessageRequestChannel(track.channel);
+  const channel: SendChannelApi = track.channel === "call" ? "email" : track.channel;
   const noun = STEP_NOUN[channel];
   // One lock from the editor state, read by every authoring control (PR 41 council, items 9 and 12).
   const locked = editor.locked;
@@ -838,7 +850,12 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
             A LinkedIn track sends a connection invite to the decision maker’s member profile from the import, then messages once they accept. Accepting is not a reply: the messages go on until they answer and you mark them replied. Someone your session is already connected to gets no invite; the first message goes to them instead.
           </p>
         )}
-        <div role="group" aria-label={linkedin ? "Invite and messages" : sms ? "Texts" : "Emails"} className="flex min-w-0 flex-col">
+        {request && (
+          <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">
+            An Instagram track sends a text-only message to the decision maker’s own Instagram account from the import, or to their company’s when they have none, then follow-ups after their waits. Someone who doesn’t follow your session gets the first message as a message request; Instagram doesn’t tell the app whether they accept or read it. The messages go on until they answer and you mark them replied.
+          </p>
+        )}
+        <div role="group" aria-label={linkedin ? "Invite and messages" : sms || request ? (request ? "Messages" : "Texts") : "Emails"} className="flex min-w-0 flex-col">
           {steps.map((step, i) => (
             <StepBlock
               key={step.id}
@@ -867,7 +884,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
                 className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium"
                 onClick={() => {
                   const added = newStep(steps.length === 0);
-                  changeTrack((t) => ({ ...t, steps: [...t.steps, sms || linkedin ? { ...added, threading: "new_subject" } : added] }));
+                  changeTrack((t) => ({ ...t, steps: [...t.steps, sms || linkedin || request ? { ...added, threading: "new_subject" } : added] }));
                   onOpenStep(added.id);
                 }}
               >
@@ -1155,7 +1172,7 @@ const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1
 /** What a branch chip counts, said (council on aaf82b7): "1 email", "2 texts". */
 const messageCount = (t: TrackDefinition): string => {
   const n = liveSteps(t).length;
-  if (t.channel === "linkedin") return trackSummary(t).toLowerCase();
+  if (t.channel === "linkedin" || isMessageRequestChannel(t.channel)) return trackSummary(t).toLowerCase();
   return `${n} ${t.channel === "sms" ? (n === 1 ? "text" : "texts") : n === 1 ? "email" : "emails"}`;
 };
 
@@ -1185,7 +1202,9 @@ interface StepProps {
 function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle, onChange, onRemove, locked }: StepProps) {
   // A LinkedIn step is a message like a text (no subject, no thread), named by its role (ticket 24b).
   const linkedin = channel === "linkedin";
-  const sms = channel === "sms" || linkedin;
+  // An Instagram message is a message like a text too (ticket 25): no subject, no thread, named by its role.
+  const request = isMessageRequestChannel(channel);
+  const sms = channel === "sms" || linkedin || request;
   const name = stepTitle({ branch: "main" }, channel, index + 1);
   const noun = linkedin ? (index === 0 ? "note" : "message") : STEP_NOUN[channel].toLowerCase();
   const first = index === 0;
@@ -1234,7 +1253,7 @@ function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle,
               aria-label={`Days to wait before ${name}`}
             />
           </label>
-          {linkedin ? (index === 1 ? "days after they accept the invite" : `days after ${lowerFirst(stepTitle({ branch: "main" }, "linkedin", index))}`) : `days after ${STEP_NOUN[channel]} ${index}`}
+          {linkedin ? (index === 1 ? "days after they accept the invite" : `days after ${lowerFirst(stepTitle({ branch: "main" }, "linkedin", index))}`) : request ? `days after the ${lowerFirst(stepTitle({ branch: "main" }, channel, index))}` : `days after ${STEP_NOUN[channel]} ${index}`}
         </div>
       )}
       <div className={`rounded-field border bg-base-100 ${open ? "border-line-strong" : "border-line"} ${first ? "" : ""}`}>
@@ -1301,6 +1320,7 @@ function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle,
             </div>
             {invite && <p className="text-[12.5px] text-muted">The note goes with the invite while this session’s note allowance for the month lasts; after that, invites go without it.</p>}
             {linkedin && index === 1 && <p className="text-[12.5px] text-muted">It waits for them to accept the invite, or goes once its wait has passed if your session is already connected to them.</p>}
+            {request && first && <p className="text-[12.5px] text-muted">Text only. To someone who doesn’t follow your session it arrives as a message request.</p>}
             {/* Once launched the counts would leave out leads that ended, so none is shown (PR 41 council, item 4). */}
             <Fallbacks step={step} noun={noun} facts={locked || editor.launched ? null : facts} onChange={onChange} />
             {invite && steps.length > 1 && !locked && <p className="text-[12.5px] text-muted">The connection invite stays first and can’t be removed while this track has messages.</p>}
@@ -1435,7 +1455,8 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
   const sms = track.channel === "sms";
   const call = track.channel === "call";
   const linkedin = track.channel === "linkedin";
-  const accounts = editor.view.accounts.filter((a) => a.channel === (linkedin ? "linkedin" : sms ? "sms" : "email"));
+  const request = isMessageRequestChannel(track.channel);
+  const accounts = editor.view.accounts.filter((a) => a.channel === (call ? "email" : track.channel));
   // A phone track's window is its calling hours, in the prospect's local time (ADR 0003 1.1).
   const windowName = call ? "Calling hours" : "Sending window";
   const hoursWord = call ? "Calling" : "Sending";
@@ -1461,6 +1482,13 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
               <LinkedinProviderReason />
               <div className="text-[12.5px] text-muted">Launch is blocked while this track has no session.</div>
             </>
+          ) : request && accounts.length === 0 ? (
+            // ADR 0004 13.1: the running app has no Instagram session; nothing here suggests one can be connected from the application.
+            <>
+              <span className="font-semibold text-crit">No connected Instagram session.</span>
+              <SocialProviderReason />
+              <div className="text-[12.5px] text-muted">Launch is blocked while this track has no session.</div>
+            </>
           ) : accounts.length === 0 ? (
             <>
               <span className="font-semibold text-crit">{sms ? "No connected SMS number." : "No connected sender inbox."}</span>
@@ -1473,12 +1501,13 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
                 {accounts.map((a) => (
                   <li key={a.id} className="[overflow-wrap:anywhere]">
                     {a.label}
+                    {request && a.socialKind && <span className="text-muted"> · {a.socialKind === "business" ? "a business account" : "a personal profile"}</span>}
                     {sms && <span className="text-muted"> · at most {a.capacity} texts a day across campaigns</span>}
                     {!a.healthy && <span className="text-crit"> {CANNOT_SEND}</span>}
                   </li>
                 ))}
               </ul>
-              <div className="text-[12.5px] text-muted">{linkedin ? "Each lead keeps the session that first reaches them, for the whole campaign." : `Each lead keeps one ${sms ? "number" : "inbox"} for the whole campaign.`}</div>
+              <div className="text-[12.5px] text-muted">{linkedin || request ? "Each lead keeps the session that first reaches them, for the whole campaign." : `Each lead keeps one ${sms ? "number" : "inbox"} for the whole campaign.`}</div>
             </>
           )}
           {linkedin && (
@@ -1486,6 +1515,14 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
               <li>Invites go only to a decision maker’s own member profile from the import. A lead without one, and every company lead, skips this track, and the tracks after it start.</li>
               <li>Each session sends only within the invites and messages a day and the notes a month you allow it; with none set, it sends nothing. Messages go before new invites.</li>
               <li>A person another campaign already reached from the same session is skipped here, and that campaign is named on their record.</li>
+            </ul>
+          )}
+          {request && (
+            <ul className="mt-1.5 flex list-disc flex-col gap-0.5 pl-4 text-[12.5px] text-muted" aria-label="What limits Instagram messages">
+              <li>Messages go to the decision maker’s own Instagram account from the import, else to their company’s. A lead with neither skips this track, and the tracks after it start.</li>
+              <li>Each session sends only within the messages a day you allow it; with none set, it sends nothing. Follow-ups go before first messages.</li>
+              <li>An account another lead or campaign already reached from the same session is skipped here, and who reached it is named on the record. Two people at one company with no account of their own share their company’s.</li>
+              <li>A personal profile and a business account are used alike; if Instagram refuses a message, the track ends for that lead and says so.</li>
             </ul>
           )}
           {sms && (
@@ -1664,6 +1701,12 @@ function SmsProviderReason() {
 function LinkedinProviderReason() {
   const { result } = useApi<LinkedinProviderStatus>("/api/linkedin-provider");
   return result.state === "ready" ? <div className="text-[12.5px] text-ink-2">{result.data.message}</div> : null;
+}
+
+/** Why no Instagram session is connected, in the provider read's own words (GET /api/social-providers); nothing while unknown. */
+function SocialProviderReason() {
+  const { result } = useApi<SocialProvidersStatus>("/api/social-providers");
+  return result.state === "ready" ? <div className="text-[12.5px] text-ink-2">{result.data.instagram.message}</div> : null;
 }
 
 /** One line on why no inbox is connected, from GET /api/email-provider; nothing if it is unknown. */

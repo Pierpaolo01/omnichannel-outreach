@@ -80,7 +80,7 @@ const isFailureReason = (r: string | null): r is FailureReason => (FAILURE_REASO
 
 /** Why a step failed, from its own reason through one exhaustive switch; with none known, by its channel as before. */
 export function failureWords(row: Pick<TestStepRow, "channel" | "reason">): string {
-  if (!isFailureReason(row.reason)) return row.channel === "sms" ? "number not reachable" : row.channel === "linkedin" ? "profile not reachable" : "bounced";
+  if (!isFailureReason(row.reason)) return row.channel === "sms" ? "number not reachable" : row.channel === "linkedin" ? "profile not reachable" : row.channel === "instagram" ? "account not reachable" : "bounced";
   switch (row.reason) {
     case "invalid address":
       return "bounced";
@@ -109,7 +109,7 @@ export function stepStateText(row: TestStepRow, zone: string, readAt: string): s
     case "skipped":
       return "Skipped";
     case "with_provider":
-      return row.channel === "sms" ? "With the SMS provider" : row.channel === "linkedin" ? "With the LinkedIn session" : "With Instantly";
+      return row.channel === "sms" ? "With the SMS provider" : row.channel === "linkedin" ? "With the LinkedIn session" : row.channel === "instagram" ? "With the Instagram session" : "With Instantly";
     case "held":
       return "On hold";
     case "due": {
@@ -150,7 +150,7 @@ const OUTCOMES: Readonly<Record<string, string>> = {
 const outcomeWord = (outcome: string | null): string => (outcome === null ? "" : (OUTCOMES[outcome] ?? outcome));
 
 /** The line under a step's name: where it goes, or why it waits. */
-export function stepDetail(row: TestStepRow, run: Pick<TestRunRead, "email" | "mobile" | "running"> & Partial<Pick<TestRunRead, "linkedin" | "linkedinTracks">>): string {
+export function stepDetail(row: TestStepRow, run: Pick<TestRunRead, "email" | "mobile" | "running"> & Partial<Pick<TestRunRead, "linkedin" | "linkedinTracks" | "social">>): string {
   if (row.state === "not_reached") {
     if (!run.running) return "Not reached";
     if (row.branch === "win_back") return "Runs if you log Not interested and the path is Win back";
@@ -163,12 +163,12 @@ export function stepDetail(row: TestStepRow, run: Pick<TestRunRead, "email" | "m
     const said = expiryLine(view?.withdrawal ?? null, "this test", view ?? { withdrawalAsked: false, withdrawalStuck: false });
     return `Skipped: ${said.charAt(0).toLowerCase()}${said.slice(1)}`;
   }
-  if (row.state === "skipped") return row.reason === "missing_channel" ? `Skipped: no test ${row.channel === "email" ? "email" : row.channel === "linkedin" ? "LinkedIn profile" : "mobile"} saved` : SKIPPED_BECAUSE[row.reason ?? ""] ?? "Skipped";
+  if (row.state === "skipped") return row.reason === "missing_channel" ? `Skipped: no test ${row.channel === "email" ? "email" : row.channel === "linkedin" ? "LinkedIn profile" : row.channel === "instagram" ? "Instagram account" : "mobile"} saved` : SKIPPED_BECAUSE[row.reason ?? ""] ?? "Skipped";
   if (row.channel === "call") return row.state === "on_your_list" ? "Log any outcome to continue. The canvas paths apply." : `To ${run.mobile ?? "your mobile"}`;
   if (row.state === "held") return `On hold because ${row.hold ? holdReasonClause(row.hold, row.holdOwners ?? [], row.channel) : "something waits on you"}. Nothing is dropped.`;
   if (row.state === "due" && row.waits === "awaiting_acceptance") return "Accept it by hand on your test profile. A test doesn’t shorten the wait for acceptance; the messages after it wait about a minute each.";
   if (row.state === "due") return "The wait is cut to about a minute";
-  return `To ${(row.channel === "sms" ? run.mobile : row.channel === "linkedin" ? (run.linkedin ?? null) : run.email) ?? ""}`;
+  return `To ${(row.channel === "sms" ? run.mobile : row.channel === "linkedin" ? (run.linkedin ?? null) : row.channel === "instagram" ? (run.social?.instagram ?? null) : run.email) ?? ""}`;
 }
 
 /** "4 of 8 steps done": steps with a result (sent, failed, skipped or logged) of the steps the run can reach in the main sequence and any branch it entered. */
@@ -184,8 +184,8 @@ function finishedDetail(run: RunFacts): string {
   const steps = reachable(run);
   const sent = steps.filter(went).length;
   if (sent === steps.length) return "Every step of the sequence went to your test contacts.";
-  const missing = (contact: "email" | "mobile" | "linkedin") =>
-    steps.filter((s) => s.state === "skipped" && s.reason === "missing_channel" && (contact === "email" ? s.channel === "email" : contact === "linkedin" ? s.channel === "linkedin" : s.channel === "sms" || s.channel === "call"));
+  const missing = (contact: "email" | "mobile" | "linkedin" | "instagram") =>
+    steps.filter((s) => s.state === "skipped" && s.reason === "missing_channel" && (contact === "email" ? s.channel === "email" : contact === "linkedin" || contact === "instagram" ? s.channel === contact : s.channel === "sms" || s.channel === "call"));
   const parts: string[] = [`${sent} of ${steps.length} ${steps.length === 1 ? "step" : "steps"} went to your test contacts.`];
   const noMobile = missing("mobile");
   if (noMobile.length > 0) {
@@ -195,6 +195,7 @@ function finishedDetail(run: RunFacts): string {
     parts.push(`${what.charAt(0).toUpperCase()}${what.slice(1)} ${noMobile.length === 1 ? "was" : "were"} skipped: no test mobile was saved.`);
   }
   if (missing("linkedin").length > 0) parts.push(`The LinkedIn ${missing("linkedin").length === 1 ? "step was" : "steps were"} skipped: no test LinkedIn profile was saved.`);
+  if (missing("instagram").length > 0) parts.push(`The Instagram ${missing("instagram").length === 1 ? "message was" : "messages were"} skipped: no test Instagram account was saved.`);
   if (missing("email").length > 0) parts.push(`The ${missing("email").length === 1 ? "email was" : "emails were"} skipped: no test email was saved.`);
   const other = steps.filter((s) => !went(s) && !(s.state === "skipped" && s.reason === "missing_channel")).length;
   if (other > 0) parts.push(`${other} ${other === 1 ? "other step did" : "other steps did"} not go: each says why below.`);

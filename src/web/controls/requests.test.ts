@@ -407,7 +407,10 @@ describe("each record control's request (ticket 24b)", () => {
     expect(controlRequestOf(entry({}))).toEqual({ path: "/api/enrollments/en-1/controls", body: { requestId: "r-1", action: "pause", expect: { status: "active", preview: "d" } } });
   });
   test("the LinkedIn reply mark goes to its own route, confirmed on the status the read showed", () => {
-    expect(controlRequestOf(entry({ action: "mark_replied" }))).toEqual({ path: "/api/enrollments/en-1/replies", body: { requestId: "r-1", channel: "linkedin", expect: { status: "active" } } });
+    expect(controlRequestOf(entry({ action: "mark_replied:linkedin" }))).toEqual({ path: "/api/enrollments/en-1/replies", body: { requestId: "r-1", channel: "linkedin", expect: { status: "active" } } });
+  });
+  test("the Instagram reply mark carries its own channel (ticket 25: never LinkedIn's by default)", () => {
+    expect(controlRequestOf(entry({ action: "mark_replied:instagram" }))).toEqual({ path: "/api/enrollments/en-1/replies", body: { requestId: "r-1", channel: "instagram", expect: { status: "active" } } });
   });
   test("a stuck withdrawal's two answers go to the withdrawal route with the track", () => {
     expect(controlRequestOf(entry({ action: "invite_withdrawn", trackId: "li" }))).toEqual({ path: "/api/enrollments/en-1/invite-withdrawal", body: { requestId: "r-1", trackId: "li", answer: "withdrawn" } });

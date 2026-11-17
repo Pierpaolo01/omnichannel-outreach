@@ -32,7 +32,7 @@ export function withheldExplanation(withheld: WithheldBy): string {
     const said = others.map((o) => `${o.test ? `the test run of campaign ${o.name}` : `campaign ${o.name}`}, which ${COMPETES[o.why]}`);
     return `No load is projected for this campaign: ${and(said)}, still ${others.length > 1 ? "have LinkedIn tracks" : "has a LinkedIn track"} to finish, which the estimate doesn’t model yet, so a figure here would leave out what ${others.length > 1 ? "they send" : "it sends"} after ${others.length > 1 ? "them" : "it"}.`;
   }
-  const what = withheld.tracks.map((t) => `${t.label} has a connected ${t.channel === "sms" ? "SMS number" : t.channel === "linkedin" ? "LinkedIn session" : "sender inbox"}`);
+  const what = withheld.tracks.map((t) => `${t.label} has a connected ${t.channel === "sms" ? "SMS number" : t.channel === "linkedin" ? "LinkedIn session" : t.channel === "instagram" ? "Instagram session" : "sender inbox"}`);
   const many = withheld.tracks.length > 1;
   return `Can’t project the load until ${and(what)}: ${many ? "their" : "its"} leads, and every track after ${many ? "them" : "it"}, would wait.`;
 }
