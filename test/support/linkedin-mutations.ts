@@ -45,7 +45,7 @@ function connectedAtTheSend(s: SubjectState): SubjectState {
 }
 
 /** A swap of one of progress.ts's rule flags for a replay, undone after it. */
-type Flag = "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession" | "conversationKeysOwnOnly" | "inmailJudgesStanding" | "inmailWaitsForExpiry" | "acceptanceSkipsInmail" | "refusedInmailEndsTrack" | "switchOffReachesChosen" | "inmailOffWhenRemoved" | "inmailTakesFirstPlace" | "restartAcquires" | "handoverRechecksBacking" | "replacedNamedAtChoice";
+type Flag = "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession" | "conversationKeysOwnOnly" | "inmailJudgesStanding" | "inmailWaitsForExpiry" | "acceptanceSkipsInmail" | "refusedInmailEndsTrack" | "switchOffReachesChosen" | "inmailOffWhenRemoved" | "inmailTakesFirstPlace" | "restartAcquires" | "handoverRechecksBacking" | "replacedNamedAtChoice" | "replacedSkipMovesCursor" | "settledUnsentReleases";
 /** Several flags swapped at once for one replay, undone after it. */
 function flags(values: Partial<Record<Flag, boolean>>): () => () => void {
   return () => {
@@ -72,7 +72,7 @@ function flag<K extends Flag>(name: K, value: (typeof progressRules)[K]): () => 
 }
 
 /** The InMail mutations' killing seed offsets (ticket 27), searched again over offsets 0 to 50 after the council's draws; ADR 0004 14.16 records them. */
-const INMAIL_SEEDS = { L18: 0, L19: 16, L20: 0, L21: 18, L22: 7, L23: 0, L24: 42, L25: 16, replaced: 0, restart: 0, handover: 18 } as const;
+const INMAIL_SEEDS = { L18: 0, L19: 16, L20: 0, L21: 18, L22: 7, L23: 0, L24: 42, L25: 16, replaced: 0, restart: 0, handover: 18, movedBefore: 0, settledUnsent: 7 } as const;
 
 /** The seed offset that reaches a step no session has any allowance for (the search's 24015 on a6c1700). */
 const NO_ALLOWANCE_SEED = 15;
@@ -389,6 +389,21 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     seed: INMAIL_SEEDS.replaced,
     rules: {},
     patch: flags({ replacedNamedAtChoice: false }),
+  },
+  // L23 (review bot on 56030c4, item B): the replaced step's synthetic skip moves the step walk's cursor, so a kept step an
+  // edit moved before it is never sent.
+  "a step moved before the replaced step is not sent": {
+    invariant: "L23",
+    seed: INMAIL_SEEDS.movedBefore,
+    rules: {},
+    patch: flags({ replacedSkipMovesCursor: true }),
+  },
+  // L26 (review bot on 56030c4, item C): work settled not sent on a stopped lead leaves its credit held for good.
+  "a holding settled unsent on a stopped lead is kept": {
+    invariant: "L26",
+    seed: INMAIL_SEEDS.settledUnsent,
+    rules: {},
+    patch: flags({ settledUnsentReleases: false }),
   },
   // L27: a restart re-takes its InMail's credit without acquiring, at the head of the line, ahead of a lead that holds it now.
   "a restart restores a commitment without acquiring": {

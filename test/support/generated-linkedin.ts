@@ -50,7 +50,7 @@ export interface LinkedinRunOptions {
 
 export interface LinkedinRun {
   readonly problems: string[];
-  readonly stats: { readonly features: Set<string>; readonly writes: number; readonly ticks: number };
+  readonly stats: { readonly features: Set<LinkedinFeature>; readonly writes: number; readonly ticks: number };
 }
 
 /**
@@ -104,6 +104,104 @@ interface Allowance {
   readonly notes: number;
 }
 
+/**
+ * Every behaviour name a run can report (`stats.features`). `features` takes only these, so a name added to a run but not
+ * here fails the typecheck, and `linkedin-chunks.test.ts` requires this list to equal the two registries in
+ * `linkedin-chunks.ts`, so an unregistered name fails the unit suite rather than the search (review bot on 56030c4).
+ */
+export const LINKEDIN_EMITTED = [
+  "a-campaign-paused",
+  "a-campaign-resumed",
+  "a-crash-between-the-handover-and-its-answer",
+  "a-credit-contested-by-a-stop",
+  "a-deadline-checked-at-an-edit",
+  "a-follow-up-after-an-inmail",
+  "a-lead-paused",
+  "a-lead-stopped-with-its-inmail-unsettled",
+  "a-lead-resumed",
+  "a-lead-stopped",
+  "a-lead-with-a-chosen-inmail-restarted",
+  "a-lead-with-a-chosen-inmail-stopped",
+  "a-lost-answer-found-by-lookup",
+  "a-message-after-acceptance",
+  "a-message-to-an-existing-connection",
+  "a-pair-released-then-invited-by-another",
+  "a-person-enrolled-after-a-release",
+  "a-person-enrolled-later",
+  "a-person-in-two-campaigns",
+  "a-profile-changed-by-a-reimport",
+  "a-rate-limit",
+  "a-removed-connection",
+  "a-reply-mark-refused",
+  "a-reply-marked",
+  "a-report-between-an-inmail-claim-and-its-handover:no_credit",
+  "a-report-between-an-inmail-claim-and-its-handover:no_plan",
+  "a-restart-after-another-took-a-credit",
+  "a-running-edit-while-an-inmail-is-chosen:insert",
+  "a-running-edit-while-an-inmail-is-chosen:remove",
+  "a-running-edit-while-an-inmail-is-chosen:reorder",
+  "a-running-edit:insert",
+  "a-running-edit:remove",
+  "a-running-edit:reorder",
+  "a-running-edit:wait",
+  "a-second-invite-after-a-withdrawal",
+  "a-session-added-to-a-pool",
+  "a-session-id-that-is-a-number",
+  "a-session-removed-from-a-pool",
+  "a-session-signed-out",
+  "a-skip",
+  "a-skip-of-a-taken-pair",
+  "a-skip-of-the-invite",
+  "a-skip-while-waiting-for-acceptance",
+  "a-started-linkedin-track-removed-before-its-first-claim",
+  "a-step-waiting-on-a-zero-allowance",
+  "a-stopped-lead-restarted",
+  "a-stuck-withdrawal-marked-by-the-user",
+  "a-third-session",
+  "a-withdrawal-answered-unknown",
+  "a-withdrawal-found-it-accepted",
+  "already-connected",
+  "an-acceptance-before-the-inmail-went",
+  "an-answer-of-one-session",
+  "an-edit-of-the-wait-while-waiting",
+  "an-expiry-while-the-laptop-was-off",
+  "an-inmail-on-a-stale-report",
+  "an-inmail-refused",
+  "an-inmail-sent",
+  "an-inmail-settled-unsent-on-a-stopped-lead",
+  "an-inmail-switched-off-before-it-went",
+  "an-inmail-text-edited",
+  "an-inmail-waiting-behind-earlier-holdings",
+  "an-inmail-waiting-for-a-credit",
+  "an-inmail-without-a-credit",
+  "an-inmail-without-a-plan",
+  "an-invite-decided-over-several-sessions",
+  "an-invite-expired",
+  "an-invite-pending-elsewhere",
+  "an-invite-without-its-note",
+  "chosen-inmails-beyond-the-credits",
+  "connected-by-acceptance",
+  "email-after-linkedin",
+  "email-beside-linkedin",
+  "inmail-credits-returned",
+  "inmail-credits-spent-by-hand",
+  "released-after-an-expiry",
+  "sms-after-linkedin",
+  "sms-beside-linkedin",
+  "the-fallback-switched-off",
+  "the-fallback-switched-off-early",
+  "the-fallback-switched-off-while-an-inmail-waits",
+  "the-fallback-switched-on",
+  "the-laptop-was-off",
+  "the-withdrawal-path-after-an-inmail-refused",
+  "the-withdrawal-path-after-an-inmail-skipped_by_user",
+  "the-withdrawal-path-after-an-inmail-stale_report",
+  "the-withdrawal-path-after-an-inmail-switched_off",
+  "unresolved-marked-not-sent",
+  "unresolved-marked-sent",
+] as const;
+export type LinkedinFeature = (typeof LINKEDIN_EMITTED)[number];
+
 interface Lead {
   readonly campaign: number;
   readonly name: string;
@@ -152,7 +250,10 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   // In half of those, the first message is removed once an InMail there is chosen: those InMails go at the window's
   // opening, so the first live message at the send is then a follow-up the user kept (item 1's case).
   const removeWhenChosen = contested && fifth() < 0.5;
-  const features = new Set<string>();
+  // In half of them, one lead's InMail is answered unknown with nothing sent, the lead is stopped right after its handover,
+  // and the run's own mark then settles the work not sent (review bot on 56030c4, item C).
+  const unsettleOnStop = contested && fifth() < 0.5;
+  const features = new Set<LinkedinFeature>();
   const problems: string[] = [];
   const problem = (text: string) => {
     if (!problems.includes(text)) problems.push(text);
@@ -379,6 +480,11 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   // Set after `noStop`: the contest's stop and restart stay on campaign 0.
   if (removeWhenChosen) editWhenChosen.set(0, "remove");
   const restarts: { id: string; at: number }[] = [];
+  /** The record's own marks of unresolved work, by work key: when the run settled it, by the user's hand. */
+  const markedWork = new Map<string, number>();
+  /** Sessions seen with fewer InMails backed than the record's free credits allow, since when (L26 during the run). */
+  const creditWaitSince = new Map<string, number>();
+  let unsettle: { readonly phase: "arm" } | { readonly phase: "handed"; readonly lead: Lead } | { readonly phase: "stopped"; readonly lead: Lead; readonly key: string } | null = unsettleOnStop ? { phase: "arm" } : null;
   const drawnAtClaim: "no_credit" | "no_plan" | null = rnd4() < 0.35 ? (rnd4() < 0.7 ? "no_credit" : "no_plan") : null;
   let reportAtClaim = contested ? null : drawnAtClaim;
   const reportsBack: { session: string; at: number; plan: "premium" | "sales_navigator" | "none"; credits: number }[] = [];
@@ -629,7 +735,10 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
         const a = st?.attempts.filter((x) => x.idempotencyKey === w.key).at(-1);
         if (!a) continue;
         const went = h.linkedin.deliveryLog.some((d) => d.key === w.key) || (h.smsProvider?.deliveryLog ?? []).some((d) => d.key === w.key) || h.fake.deliveryLog.some((d) => d.key === w.key);
-        if (await h.engine.markAttempt(a.id, went ? "sent" : "not_sent")) features.add(went ? "unresolved-marked-sent" : "unresolved-marked-not-sent");
+        if (await h.engine.markAttempt(a.id, went ? "sent" : "not_sent")) {
+          markedWork.set(w.key, h.clock);
+          features.add(went ? "unresolved-marked-sent" : "unresolved-marked-not-sent");
+        }
       }
     }
   }
@@ -651,8 +760,11 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       const lead = leadOf(x.subjectId);
       if (!lead) continue;
       const refusal = li.refusals.find((r) => r.key === x.key);
-      // L18: at most one InMail per lead and session (a refusal for a limit is not one: it is asked again).
-      if (refusal?.reason !== "rate_limited") {
+      // L18: at most one InMail per lead and session (a refusal for a limit is not one: it is asked again). Nor is one that
+      // never went and is settled so by the record's own logs: a lookup answering not sent, or the run's mark of work the
+      // session never delivered (review bot on 56030c4, item C's draw): the step then takes new work, as any step does.
+      const settledUnsent = !li.deliveryLog.some((d) => d.key === x.key) && (li.lookupLog.some((k) => k.key === x.key && k.answer === "not-sent") || markedWork.has(x.key));
+      if (refusal?.reason !== "rate_limited" && !settledUnsent) {
         const k = `${x.subjectId}|${x.sender}`;
         counted.set(k, (counted.get(k) ?? 0) + 1);
         if ((counted.get(k) ?? 0) > 1) problem(`L18: ${x.subjectId} was handed a second InMail from ${x.sender} at ${iso(x.at)}`);
@@ -720,7 +832,11 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           if (!ot || !oi || oi.sender !== sender || ot.inmail == null || ot.inmail === "no_plan" || ot.inmail === "no_credit") continue;
           const od = judgedDeadline(o, oi.at);
           const spent = li.deliveryLog.some((x) => x.subjectId === o.id && x.action === "inmail" && x.at <= deadline) || li.refusals.some((r) => r.at <= deadline && li.handoverLog.some((y) => y.key === r.key && y.subjectId === o.id && y.action === "inmail"));
-          if (od <= deadline && !spent) committed++;
+          // A lead stopped by then holds no credit, unless its InMail was handed and still uncertain then (14.5; review bot on
+          // 56030c4, item C): settled not sent, by a lookup or the run's mark, its holding is gone.
+          const stoppedThen = (stops.get(o.id) ?? []).some((x) => x.from <= deadline && (x.to === null || deadline < x.to));
+          const uncertainThen = li.handoverLog.some((y) => y.subjectId === o.id && y.action === "inmail" && y.at <= deadline && !li.deliveryLog.some((d) => d.key === y.key) && !li.refusals.some((r) => r.key === y.key && r.at <= deadline) && !li.lookupLog.some((k) => k.key === y.key && k.answer === "not-sent" && k.at <= deadline) && !((markedWork.get(y.key) ?? Infinity) <= deadline));
+          if (od <= deadline && !spent && !(stoppedThen && !uncertainThen)) committed++;
         }
         if (creditsAt(sender, deadline) - committed >= 1) problem(`L22: ${lead.id}'s InMail was refused for want of a credit at ${iso(deadline)}, though ${sender} had ${creditsAt(sender, deadline)} with ${committed} committed`);
         else features.add("an-inmail-without-a-credit");
@@ -767,7 +883,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
         }
       }
     }
-    if (drained) await checkCredits();
+    await checkCredits(drained);
   }
 
   /**
@@ -776,7 +892,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
    * session reports a credit free. L27: a lead stopped with its InMail chosen and restarted after another lead's expiry chose
    * on the same session never takes that credit back: it does not go while the other's waits for ever.
    */
-  async function checkCredits(): Promise<void> {
+  async function checkCredits(drained: boolean): Promise<void> {
     const li = h.linkedin;
     const now = h.clock;
     const states = new Map<string, NonNullable<Awaited<ReturnType<typeof h.store.engine.subject>>>>();
@@ -791,13 +907,42 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       const st = states.get(l.id);
       return st !== undefined && st.subject.ended === null && !st.subject.leadPaused && !campaignHeld.get(campaigns[l.campaign]!.id)?.some((x) => x.to === null);
     };
+    // A credit an InMail handed over may have spent, by the record's own logs (review bot on 56030c4, item C): handed, with
+    // no delivery, refusal or lookup answering not sent, and not yet marked by the run. Its holding is kept, whatever the
+    // lead's state, until one of those settles it; then a finished track or an ended lead holds nothing.
+    const uncertainOn = (session: string) =>
+      li.handoverLog.filter((x) => x.action === "inmail" && x.sender === session && x.at <= now && !li.deliveryLog.some((d) => d.key === x.key) && !li.refusals.some((r) => r.key === x.key) && !li.lookupLog.some((k) => k.key === x.key && k.answer === "not-sent") && !(markedWork.has(x.key) && markedWork.get(x.key)! <= now)).length;
     for (const s of sessions) {
       const waiting = leads.filter((l) => senderOf(l) === s.id && trackOf(l)?.inmail === "chosen" && trackOf(l)?.finishedAt === null && !inmailed(l) && running(l));
+      // During the run (review bot on 56030c4, item C): with n InMails chosen on the session and not yet handed over (held by
+      // running and paused leads alike), and the credits the record finds free (reported, less those delivered since and
+      // those InMail work may still have spent), at least min(free, n) are backed: fewer reads on a credit (the read says
+      // `inmail_unavailable`) than n - min(free, n). Over two hours of the run's clock: a report or a settlement reaches the
+      // engine at its next tick, not this one.
+      if (!drained) {
+        const holders = leads.filter((l) => senderOf(l) === s.id && trackOf(l)?.inmail === "chosen" && trackOf(l)?.finishedAt === null && !inmailed(l) && states.get(l.id)?.subject.ended === null);
+        let blocked = 0;
+        for (const l of waiting) {
+          const read = (await h.request<{ tracks: { trackId: string; nextStep?: { when: { why?: string } } | null }[] }>("GET", `/api/enrollments/${l.id}`)).body;
+          if (read.tracks.find((t) => t.trackId === campaigns[l.campaign]!.li.id)?.nextStep?.when.why === "inmail_unavailable") blocked++;
+        }
+        const free = planned(s.id, now) && freshAt(s.id, now) && li.sessions.get(s.id)?.healthy === true ? Math.max(0, creditsAt(s.id, now) - uncertainOn(s.id)) : 0;
+        const short = holders.length - blocked < Math.min(free, holders.length);
+        if (!short) creditWaitSince.delete(s.id);
+        else if (!creditWaitSince.has(s.id)) creditWaitSince.set(s.id, now);
+        else if (now - creditWaitSince.get(s.id)! > 2 * H) {
+          problem(`L26: since ${iso(creditWaitSince.get(s.id)!)}, ${blocked} of the ${holders.length} InMails chosen on ${s.id} wait on a credit, though the record finds ${free} free`);
+          creditWaitSince.delete(s.id);
+        }
+        continue;
+      }
       if (waiting.length === 0) continue;
       if (!planned(s.id, now) || !freshAt(s.id, now) || !li.sessions.get(s.id)?.healthy || (allowances.get(s.id)?.messages ?? 0) === 0) continue;
-      if (creditsAt(s.id, now) >= 1) problem(`L26: ${waiting.map((l) => l.id).join(" and ")} still wait for an InMail from ${s.id}, which reports ${creditsAt(s.id, now)} credits free`);
+      const free = creditsAt(s.id, now) - uncertainOn(s.id);
+      if (free >= 1) problem(`L26: ${waiting.map((l) => l.id).join(" and ")} still wait for an InMail from ${s.id}, which reports ${creditsAt(s.id, now)} credits with ${free} free by the record`);
       else features.add("chosen-inmails-beyond-the-credits");
     }
+    if (leads.some((l) => stopped.has(l.id) && li.handoverLog.some((x) => x.subjectId === l.id && x.action === "inmail" && markedWork.has(x.key) && !li.deliveryLog.some((d) => d.key === x.key)))) features.add("an-inmail-settled-unsent-on-a-stopped-lead");
     for (const a of leads) {
       const ta = trackOf(a);
       if (!ta || (ta.inmail !== "chosen" && ta.inmail !== "sent")) continue;
@@ -826,6 +971,45 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
 
   /** The council's draws on `8b0c846`, each at the moment it bites (see `editWhenChosen`). */
   async function chosenEvents(): Promise<void> {
+    // Item C's draw: armed once a contested lead's invite has gone, so its next action, the InMail, is answered unknown.
+    if (unsettle?.phase === "arm") {
+      const l = leads.find((x) => x.campaign === 0 && x.profile !== null && h.linkedin.deliveryLog.some((d) => d.subjectId === x.id && d.action === "invite"));
+      if (l?.profile) {
+        const script: ProfileScript = { ...(l.script ?? {}), unknownUnsent: 1 };
+        l.script = script;
+        h.linkedin.profiles.set(l.profile, script);
+        unsettle = { phase: "handed", lead: l };
+      }
+    } else if (unsettle?.phase === "handed") {
+      const l = unsettle.lead;
+      const handed = h.linkedin.handoverLog.find((x) => x.subjectId === l.id && x.action === "inmail");
+      if (handed && !stopped.has(l.id) && !marked.has(l.id)) {
+        unsettle = { phase: "stopped", lead: l, key: handed.key };
+        const r = await h.request("POST", `/api/enrollments/${l.id}/controls`, { requestId: `g-${++requestNo}`, action: "stop" });
+        if (r.status === 200) {
+          stopped.set(l.id, h.clock);
+          stops.set(l.id, [...(stops.get(l.id) ?? []), { from: h.clock, to: null }]);
+          if (!h.linkedin.deliveryLog.some((d) => d.key === handed.key)) features.add("a-lead-stopped-with-its-inmail-unsettled");
+          // The session's credits spent by hand to one meanwhile, so the credit this work holds is the one the next lead needs.
+          const was = h.linkedin.sessions.get(handed.sender)?.inmail;
+          if (was && (was.plan === "premium" || was.plan === "sales_navigator")) await storeReport(handed.sender, { plan: was.plan, credits: 1 });
+        } else unsettle = null;
+      }
+    } else if (unsettle?.phase === "stopped") {
+      // Settled by the user's mark as soon as it is unresolved: the session never sent it.
+      const { lead: l, key } = unsettle;
+      const st = await h.store.engine.subject(l.id, h.clock);
+      const w = st?.work.find((x) => x.key === key);
+      if (!w || w.settled !== null) unsettle = null;
+      else if (w.unresolvedSince !== null) {
+        const a = st?.attempts.filter((x) => x.idempotencyKey === key).at(-1);
+        unsettle = null;
+        if (a && !h.linkedin.deliveryLog.some((d) => d.key === key) && (await h.engine.markAttempt(a.id, "not_sent"))) {
+          markedWork.set(key, h.clock);
+          features.add("unresolved-marked-not-sent");
+        }
+      }
+    }
     for (const r of [...restarts]) {
       if (r.at > h.clock) continue;
       restarts.splice(restarts.indexOf(r), 1);
@@ -865,8 +1049,10 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           const added = { id: `${tr.id}-y${++requestNo}`, waitDays: 1, subject: "", body: "A message added while the InMail waits.", threading: "new_subject" as const, removed: false };
           return at < 0 ? tr : { ...tr, steps: [...tr.steps.slice(0, at), added, ...tr.steps.slice(at)] };
         }
+        // A reorder moves the first follow-up in front of the first message, across the step the InMail replaces, so a kept
+        // step then sits before the replaced one (review bot on 56030c4, item B); with three messages or more.
         if (kind === "reorder" && messages.length > 2) {
-          const [, a, b] = messages;
+          const [a, b] = messages;
           const steps = [...tr.steps];
           const ia = steps.findIndex((s) => s.id === a!.id);
           const ib = steps.findIndex((s) => s.id === b!.id);
@@ -1525,7 +1711,10 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       const atExpiry = tp.inmail == null || tp.inmail === "no_plan" || tp.inmail === "no_credit";
       const endedAt = atExpiry ? deadline : (tp.finishedWall ?? deadline);
       if (tp.finishReason === "invite_not_accepted") {
-        features.add(atExpiry ? "an-invite-expired" : `the-withdrawal-path-after-an-inmail-${tp.inmail}`);
+        const after = tp.inmail;
+        if (atExpiry) features.add("an-invite-expired");
+        else if (after === "stale_report" || after === "refused" || after === "switched_off" || after === "skipped_by_user") features.add(`the-withdrawal-path-after-an-inmail-${after}`);
+        else problem(`L24: ${lead.id}'s track took the withdrawal path with its InMail ${after ?? "unjudged"}`);
         if (outages.some((o) => o.from < deadline && deadline < o.to)) features.add("an-expiry-while-the-laptop-was-off");
         if (atExpiry && tp.finishedWall !== deadline) problem(`L8: ${lead.id}'s invite expired at ${iso(tp.finishedWall ?? 0)}, not at the deadline ${iso(deadline)}`);
         if (!atExpiry && (tp.finishedWall ?? 0) < deadline) problem(`L20: ${lead.id}'s track took the InMail's withdrawal path at ${iso(tp.finishedWall ?? 0)}, before the deadline ${iso(deadline)}`);

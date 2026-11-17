@@ -43,6 +43,11 @@ export interface ProfileScript {
   rateLimited?: number;
   /** Its next actions are done but their answer is lost (`unknown`), this many times: only a lookup finds them. */
   loseAnswer?: number;
+  /**
+   * Its next actions are answered `unknown` and nothing is done (no send, no credit spent), this many times; a lookup of one
+   * answers `unknown` too, so the work stays unresolved until the user marks it (review bot on 56030c4, item C).
+   */
+  unknownUnsent?: number;
   /** Its next withdrawals answer `unknown`, this many times, before they take effect. */
   withdrawUnknown?: number;
   /** An invite to the profile is already pending, sent by hand outside this application (the pre-send check: `pending`). */
@@ -109,6 +114,8 @@ export class FakeLinkedInPort implements SendPort {
   private readonly invites: Invite[] = [];
   private readonly events: { visibleAt: number; event: ProviderEvent }[] = [];
   private nextRef = 0;
+  /** Work answered `unknown` with nothing done (`unknownUnsent`): its lookups answer `unknown` too. */
+  private readonly unknownKeys = new Set<string>();
 
   constructor(options: { readonly now: () => number; readonly sessions: readonly FakeSession[] }) {
     this.now = options.now;
@@ -187,6 +194,11 @@ export class FakeLinkedInPort implements SendPort {
       return Promise.resolve(refuse("rate_limited"));
     }
     if (action === "message" && !this.connectedNow(request.sender, request.destination) && !this.inmailThread(request.sender, request.destination)) return Promise.resolve(refuse("not_connected"));
+    if ((script.unknownUnsent ?? 0) > 0) {
+      script.unknownUnsent = (script.unknownUnsent ?? 1) - 1;
+      this.unknownKeys.add(request.idempotencyKey);
+      return Promise.resolve({ kind: "unknown" });
+    }
     if (action === "inmail") {
       // The recipient's settings refuse it, or the session cannot send one: LinkedIn spends no credit on either.
       if (script.refusesInmail) return Promise.resolve(refuse("inmail_refused"));
@@ -293,7 +305,7 @@ export class FakeLinkedInPort implements SendPort {
   /** The session reads the profile or the thread: the action done is `sent`; none is `not-sent`, which is not final. */
   lookup(ref: AttemptRef): Promise<LookupResult> {
     const d = this.deliveryLog.find((x) => x.key === ref.idempotencyKey);
-    const answer: LookupResult = d ? { kind: "sent", sentAt: d.at, providerRef: d.providerRef } : { kind: "not-sent" };
+    const answer: LookupResult = d ? { kind: "sent", sentAt: d.at, providerRef: d.providerRef } : this.unknownKeys.has(ref.idempotencyKey) ? { kind: "unknown" } : { kind: "not-sent" };
     this.lookupLog.push({ at: this.now(), key: ref.idempotencyKey, answer: answer.kind });
     return Promise.resolve(answer);
   }

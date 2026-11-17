@@ -44,10 +44,10 @@ async function world(inmailStanding: FakeSession["inmail"] | null = { plan: "pre
   const h = new EngineHarness({ start: MONDAY_9 - H, accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }], linkedin: { sessions: [session] } });
   await h.tick();
   expect((await h.request("PUT", `/api/sender-accounts/${linkedinAccountId(S1)}/allowances`, { invitesPerDay: options.invitesPerDay ?? 20, messagesPerDay: 20, notesPerMonth: 20 })).status).toBe(200);
-  const campaign = async (tracks: TrackDefinition[]) => {
-    const { campaign: c } = await h.createCampaign("LinkedIn", { businesses: BUSINESSES, people: options.people ?? PEOPLE });
+  const campaign = async (tracks: TrackDefinition[], people: typeof PEOPLE = options.people ?? PEOPLE, at = MONDAY_9) => {
+    const { campaign: c } = await h.createCampaign("LinkedIn", { businesses: BUSINESSES, people });
     await h.defineSequence(c.id, definition(tracks));
-    h.clock = MONDAY_9;
+    h.clock = at;
     const launched = await h.launch(c.id);
     if (launched.status !== 200) throw new Error(`launch refused: ${JSON.stringify(launched.body)}`);
     const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows;
@@ -423,5 +423,174 @@ describe("the step the InMail replaces is named when it is chosen (council on 8b
     await h.advanceTo(WEDNESDAY_0 + 8 * DAY);
     expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "im", "m2", "m3"]);
     expect((await results(c.lead("Pat Oneil"))).some((r) => r.reason === "inmail_instead")).toBe(false);
+  });
+});
+
+/**
+ * The review bot on 56030c4, item B: the step the InMail replaces is fixed at the choice, and its result (`inmail_instead`)
+ * is a fact about that step only. It never stands for the steps placed before it: every kept step with no result of its
+ * own is sent, wherever the replaced step sits after an edit. The InMail is chosen at Wednesday 00:00 (the deadline) and
+ * goes when the 09:00 window opens, so an edit at 02:00 falls between the choice and the handover.
+ */
+describe("kept steps around the replaced one (review bot on 56030c4, item B)", () => {
+  const M4 = step("m4", 1, "A fourth note.");
+  const BASE = [...FALLBACK, M4];
+  const by = (ids: string[]) => ids.map((id) => BASE.find((s) => s.id === id)!);
+  /** Launch on BASE, apply `edit` at `at`, run a week on, and return what went to Pat and which step was replaced. */
+  async function run(edit: StepDefinition[] | null, at: number, start: StepDefinition[] = BASE) {
+    const { h, campaign, delivered, results, track } = await world();
+    const c = await campaign([linkedin(start, OFFICE)]);
+    await h.advanceTo(at);
+    if (edit) expect((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, definition([linkedin(edit, OFFICE)]))).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 12 * DAY);
+    const lead = c.lead("Pat Oneil");
+    const replaced = (await results(lead)).filter((r) => r.reason === "inmail_instead").map((r) => r.stepId);
+    return { went: delivered(PAT).map((d) => d.stepId), replaced, track: await track(lead) };
+  }
+  const AFTER_CHOICE = WEDNESDAY_0 + 2 * H;
+
+  test("the bot's reproduction: m2 moved before m1 after the choice; m2, m3 and m4 go after the InMail, and only m1 is replaced", async () => {
+    const r = await run(by(["inv", "im", "m2", "m1", "m3", "m4"]), AFTER_CHOICE);
+    expect(r.went).toEqual(["inv", "im", "m2", "m3", "m4"]);
+    expect(r.replaced).toEqual(["m1"]);
+    expect(r.track?.finishReason).toBe("completed");
+  });
+
+  test("a message inserted before the replaced step after the choice goes, and only m1 is replaced", async () => {
+    const added = step("x", 1, "A message added while the InMail waits.");
+    const r = await run([...by(["inv", "im"]), added, ...by(["m1", "m2", "m3", "m4"])], AFTER_CHOICE);
+    expect(r.went).toEqual(["inv", "im", "x", "m2", "m3", "m4"]);
+    expect(r.replaced).toEqual(["m1"]);
+  });
+
+  test("two steps moved before the replaced one, then the one just before it removed: the other goes, and only m1 is replaced", async () => {
+    const { h, campaign, delivered, results } = await world();
+    const c = await campaign([linkedin(BASE, OFFICE)]);
+    await h.advanceTo(AFTER_CHOICE);
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, definition([linkedin(by(["inv", "im", "m2", "m3", "m1", "m4"]), OFFICE)]))).status).toBe(200);
+    await h.advanceTo(AFTER_CHOICE + H);
+    const removed = by(["inv", "im", "m2", "m3", "m1", "m4"]).map((s) => (s.id === "m3" ? { ...s, removed: true } : s));
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, definition([linkedin(removed, OFFICE)]))).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 12 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "im", "m2", "m4"]);
+    expect((await results(c.lead("Pat Oneil"))).filter((r) => r.reason === "inmail_instead").map((r) => r.stepId)).toEqual(["m1"]);
+  });
+
+  test("the replaced step moved to the end after the choice: every other message goes, and only m1 is replaced", async () => {
+    const r = await run(by(["inv", "im", "m2", "m3", "m4", "m1"]), AFTER_CHOICE);
+    expect(r.went).toEqual(["inv", "im", "m2", "m3", "m4"]);
+    expect(r.replaced).toEqual(["m1"]);
+  });
+
+  test("an edit at the choice's own instant comes after it: m2 moved before m1 then goes, and only m1 is replaced", async () => {
+    const r = await run(by(["inv", "im", "m2", "m1", "m3", "m4"]), WEDNESDAY_0);
+    expect(r.went).toEqual(["inv", "im", "m2", "m3", "m4"]);
+    expect(r.replaced).toEqual(["m1"]);
+  });
+
+  test("the same reorder before the choice: the first message at the choice is m2, so m2 is the one replaced, and m1, m3 and m4 go", async () => {
+    const r = await run(by(["inv", "im", "m2", "m1", "m3", "m4"]), MONDAY_9 + 2 * H);
+    expect(r.went).toEqual(["inv", "im", "m1", "m3", "m4"]);
+    expect(r.replaced).toEqual(["m2"]);
+  });
+
+  test("the same reorder after the InMail went: m2, m3 and m4 go, and only m1 is replaced", async () => {
+    const r = await run(by(["inv", "im", "m2", "m1", "m3", "m4"]), WEDNESDAY_0 + 10 * H);
+    expect(r.went).toEqual(["inv", "im", "m2", "m3", "m4"]);
+    expect(r.replaced).toEqual(["m1"]);
+  });
+
+  test("in a test run: an edit ends the test, so no step can move around the replaced one; unedited, the follow-ups go and only m1 is replaced", async () => {
+    const TEST = "https://www.linkedin.com/in/fictional-own-test-profile";
+    const start = async () => {
+      const w = await world();
+      const c = await w.campaign([linkedin(BASE, OFFICE)]);
+      expect((await w.h.request("PUT", `/api/campaigns/${c.id}/test-contacts`, { email: "", mobile: "", linkedin: TEST })).status).toBe(200);
+      const tab = (await w.h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${c.id}/test-runs`)).body;
+      expect((await w.h.request("POST", `/api/campaigns/${c.id}/test-runs`, { requestId: "run-1", renderAs: c.lead("Pat Oneil"), expect: { definitionVersion: tab.definitionVersion } })).status).toBe(200);
+      const read = async () => (await w.h.request<{ run: { ending: string | null; steps: { stepId: string; state: string }[] } | null }>("GET", `/api/campaigns/${c.id}/test-runs`)).body.run;
+      return { ...w, c, read, sent: () => w.h.linkedin.deliveryLog.filter((d) => d.destination === TEST).map((d) => d.stepId) };
+    };
+    const edited = await start();
+    await edited.h.advanceTo(AFTER_CHOICE);
+    expect((await edited.h.request("PUT", `/api/campaigns/${edited.c.id}/sequence`, definition([linkedin(by(["inv", "im", "m2", "m1", "m3", "m4"]), OFFICE)]))).status).toBe(200);
+    await edited.h.advanceTo(WEDNESDAY_0 + 12 * DAY);
+    expect((await edited.read())?.ending).toBe("edited");
+    expect(edited.sent()).toEqual(["inv"]);
+    const plain = await start();
+    await plain.h.advanceTo(WEDNESDAY_0 + 12 * DAY);
+    expect(plain.sent()).toEqual(["inv", "im", "m2", "m3", "m4"]);
+    expect((await plain.read())?.steps.filter((s) => s.state === "skipped").map((s) => s.stepId)).toEqual(["m1"]);
+  });
+});
+
+/**
+ * The review bot on 56030c4, item C: a credit is held by named work and released by named events, and the release runs
+ * on every transition that settles held work as not sent, whatever the lead's state. Pat's InMail is answered `unknown`
+ * with nothing sent, and its lookups stay unknown, so the work is unresolved; Pat is stopped meanwhile (the holding is kept:
+ * the InMail may have gone). The session reports one credit throughout. Nia's campaign, launched later on the same
+ * session, reaches its own expiry after the work settles.
+ */
+describe("a holding kept through a stop, then settled (review bot on 56030c4, item C)", () => {
+  const NIA_ONLY = [PEOPLE[1]!];
+  const PAT_ONLY = [PEOPLE[0]!];
+  async function unresolvedPat() {
+    const w = await world({ plan: "premium", credits: 1 });
+    const a = await w.campaign([linkedin(FALLBACK, OFFICE)], PAT_ONLY);
+    const pat = a.lead("Pat Oneil");
+    // Once the invite has gone, Pat's next action (the InMail) is answered unknown with nothing sent.
+    await w.h.advanceTo(MONDAY_9 + 2 * H);
+    w.h.linkedin.profiles.set(PAT, { unknownUnsent: 1 });
+    // Wednesday 09:00: the InMail is handed over and answered unknown; by the afternoon its lookups have left it unresolved.
+    await w.h.advanceTo(WEDNESDAY_0 + 15 * H);
+    const st = await w.h.store.engine.subject(pat, w.h.clock);
+    const attempt = st?.attempts.find((x) => x.stepId === "im");
+    expect(attempt?.state).toBe("handed");
+    expect(st?.work.find((x) => x.key === attempt?.idempotencyKey)?.unresolvedSince).not.toBeNull();
+    const control = (action: string) => w.h.request("POST", `/api/enrollments/${pat}/controls`, { requestId: `pat-${action}-${w.h.clock}`, action });
+    return { ...w, pat, attempt: attempt!, control };
+  }
+  const holdOf = async (h: EngineHarness, lead: string) => (await h.store.engine.subject(lead, h.clock))?.tracks.find((t) => t.trackId === "li")?.inmailHoldWall ?? null;
+
+  test("the bot's reproduction: stopped, then marked not sent; the credit is released and the next lead's InMail takes it and goes", async () => {
+    const { h, campaign, pat, attempt, control, delivered, track } = await unresolvedPat();
+    expect((await control("stop")).status).toBe(200);
+    expect(await holdOf(h, pat)).not.toBeNull();
+    expect(await h.engine.markAttempt(attempt.id, "not_sent")).toBe(true);
+    expect(await holdOf(h, pat)).toBeNull();
+    const b = await campaign([linkedin(FALLBACK, OFFICE)], NIA_ONLY, h.clock + H);
+    await h.advanceTo(WEDNESDAY_0 + 4 * DAY);
+    expect(delivered(NIA).map((d) => d.stepId)).toContain("im");
+    expect((await track(b.lead("Nia Cole")))?.inmail).toBe("sent");
+  });
+
+  test("restarted before the mark: the lead's InMail still owes its send, so it keeps the credit and goes; the next lead finds none", async () => {
+    const { h, campaign, pat, attempt, control, delivered, track } = await unresolvedPat();
+    expect((await control("stop")).status).toBe(200);
+    expect((await control("resume_from_next_step")).status).toBe(200);
+    expect(await h.engine.markAttempt(attempt.id, "not_sent")).toBe(true);
+    const b = await campaign([linkedin(FALLBACK, OFFICE)], NIA_ONLY, h.clock + H);
+    await h.advanceTo(WEDNESDAY_0 + 4 * DAY);
+    expect(delivered(PAT).filter((d) => d.action === "inmail")).toHaveLength(1);
+    expect(delivered(NIA).some((d) => d.action === "inmail")).toBe(false);
+    expect((await track(pat))?.inmail).toBe("sent");
+    expect((await track(b.lead("Nia Cole")))?.inmail).toBe("no_credit");
+  });
+
+  test("marked sent instead: the holding stays until a report after the send includes it, then the next lead may take the credit the session reports", async () => {
+    const { h, campaign, pat, attempt, control, delivered } = await unresolvedPat();
+    expect((await control("stop")).status).toBe(200);
+    expect(await h.engine.markAttempt(attempt.id, "sent")).toBe(true);
+    // Still held: the InMail went, and no report since has counted it.
+    expect(await holdOf(h, pat)).not.toBeNull();
+    const standing = async () => (await h.store.engine.subject(pat, h.clock))?.accounts[linkedinAccountId(S1)]?.inmail?.holdings.map((x) => x.key) ?? [];
+    expect(await standing()).toHaveLength(1);
+    // The next sync's report (later than the send) includes it: it no longer counts against the credit the session reports.
+    await h.advanceTo(h.clock + 10 * MIN);
+    expect(await standing()).toEqual([]);
+    const b = await campaign([linkedin(FALLBACK, OFFICE)], NIA_ONLY, h.clock + H);
+    await h.advanceTo(WEDNESDAY_0 + 4 * DAY);
+    expect(delivered(NIA).some((d) => d.action === "inmail")).toBe(true);
+    expect(b.lead("Nia Cole")).not.toBe("");
   });
 });

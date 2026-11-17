@@ -292,10 +292,15 @@ export function nextStepOf(state: SubjectState, track: TrackDefinition): string 
  * waiting for acceptance waits at its first message, as with the fallback off.
  */
 export function remainingSteps(state: SubjectState, track: TrackDefinition): string[] {
-  const resolved = new Set(state.results.filter((r) => r.trackId === track.id).map((r) => r.stepId));
+  const results = state.results.filter((r) => r.trackId === track.id);
+  const resolved = new Set(results.map((r) => r.stepId));
+  // The cursor is the last step resolved by something that happened to it. The skip the InMail's send writes on the step it
+  // replaced (`inmail_instead`) is a fact about that step alone: it stops that step, and never stands for the steps an edit
+  // placed before it, which go if they have no result of their own (review bot on 56030c4, item B).
+  const moves = new Set(results.filter((r) => rules.replacedSkipMovesCursor || r.reason !== "inmail_instead").map((r) => r.stepId));
   let lastResolved = -1;
   track.steps.forEach((s, i) => {
-    if (resolved.has(s.id)) lastResolved = i;
+    if (moves.has(s.id)) lastResolved = i;
   });
   const p = progressOf(state, track.id);
   const chosen = p?.inmail === "chosen" || (!rules.inmailWaitsForExpiry && (p?.inmail ?? null) === null);
@@ -315,6 +320,16 @@ export const rules = {
    * session is not a number, a profile not a mobile), so the per-channel filter in the other reads is defence in depth.
    */
   pairsByChannel: true,
+  /**
+   * The InMail's replaced step's skip moves the step walk's cursor, as `56030c4` had it; false except for the mutation "a
+   * step moved before the replaced step is not sent" (review bot on 56030c4, item B).
+   */
+  replacedSkipMovesCursor: false,
+  /**
+   * Work settled as not sent releases a holding its finished track or ended lead kept while the work might have gone; false
+   * only for the mutation "a holding settled unsent on a stopped lead is kept" (review bot on 56030c4, item C).
+   */
+  settledUnsentReleases: true,
   /** A refusal because the connection is gone fails the track and keeps the profile good (Q37); true only for a mutation. */
   notConnectedMarksBad: false,
   /** An edit of the acceptance wait re-resolves every waiting deadline (ADR 0004 3.2); false only for a mutation. */
@@ -719,7 +734,25 @@ function carrierOf(state: SubjectState, key: string): Attempt | undefined {
  * or the user settles it.
  */
 export function attend(state: SubjectState, now: number): SubjectState {
-  return alignPending(attendWork(state, now), now);
+  return releaseSettledHolds(alignPending(attendWork(state, now), now));
+}
+
+/**
+ * A credit held by an InMail that no longer owes its send, released once nothing it holds may have gone (review bot on
+ * 56030c4, item C). Every transition that settles work passes here (`applyToWork` and `applyToAttempt` end with `attend`):
+ * a lookup's answer, a provider's refusal or late answer, a confirmed withdrawal, the user's mark, a claim that expires (at
+ * store open too), whatever the lead's state. A track finished, or a lead ended (stopped, replied, won back onto another
+ * branch), owes no InMail; its holding was kept at that moment only while its InMail might have gone (14.5). A running or
+ * paused lead's chosen InMail still owes its send, so its holding stays; sent work keeps it until a report absorbs it.
+ */
+function releaseSettledHolds(state: SubjectState): SubjectState {
+  if (!rules.settledUnsentReleases) return state;
+  let s = state;
+  for (const p of state.tracks) {
+    if ((p.inmailHoldWall ?? null) === null || (p.finishedAt === null && state.subject.ended === null)) continue;
+    s = releaseInmailHold(s, p.trackId);
+  }
+  return s;
 }
 
 function attendWork(state: SubjectState, now: number): SubjectState {
