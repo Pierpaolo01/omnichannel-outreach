@@ -2549,14 +2549,14 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
     focused: (page) => page.getByRole("menuitem", { name: "Email track" }),
   },
   {
-    name: "Up on Add track opens its menu on the last item, LinkedIn track",
+    name: "Up on Add track opens its menu on the last item, Instagram track",
     open: async (page) => {
       const id = await campaignWith(page, "Focus: menu opens on last");
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
     },
     act: (page) => page.keyboard.press("ArrowUp"),
-    focused: (page) => page.getByRole("menuitem", { name: "LinkedIn track" }),
+    focused: (page) => page.getByRole("menuitem", { name: "Instagram track" }),
   },
   // Ticket 14c: phone tracks.
   {
@@ -2565,7 +2565,8 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       const id = await campaignWith(page, "Focus: add a phone track");
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
-      // Up opens the menu on its last item, LinkedIn track (ticket 24b); Phone track is the one above it.
+      // Up opens the menu on its last item, Instagram track (ticket 25); LinkedIn track is above it, then Phone track.
+      await page.keyboard.press("ArrowUp");
       await page.keyboard.press("ArrowUp");
       await page.keyboard.press("ArrowUp");
     },
@@ -2667,7 +2668,8 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       const id = await campaignWith(page, "Focus: add a win-back SMS track", WITH_A_BRANCH);
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add win-back track" }).focus();
-      // Email, SMS, then LinkedIn (ticket 24b): Up opens on LinkedIn, and SMS is above it.
+      // Email, SMS, LinkedIn, then Instagram (ticket 25): Up opens on Instagram, and SMS is two above it.
+      await page.keyboard.press("ArrowUp");
       await page.keyboard.press("ArrowUp");
       await page.keyboard.press("ArrowUp");
     },
