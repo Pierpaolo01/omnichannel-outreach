@@ -189,3 +189,30 @@ describe("a first message skipped while waiting for acceptance (the generated ru
     expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "im", "m2", "m3"]);
   });
 });
+
+describe("a chosen InMail that cannot go yet, and one the user skips (ADR 0004 13.3)", () => {
+  test("its session's credits spent by hand after the expiry chose it: it waits, said with its reason and no time", async () => {
+    const { h, campaign, delivered, track } = await world({ plan: "premium", credits: 1 });
+    const c = await campaign([linkedin(FALLBACK, OFFICE)]);
+    await h.advanceTo(WEDNESDAY_0 + 2 * H);
+    // Nia's track took the one credit at the expiry; Pat's found none.
+    const chosen = (await track(c.lead("Pat Oneil")))?.inmail === "chosen" ? "Pat Oneil" : "Nia Cole";
+    expect((await track(c.lead(chosen)))?.inmail).toBe("chosen");
+    h.linkedin.sessions.get(S1)!.inmail!.credits = 0;
+    await h.advanceTo(WEDNESDAY_0 + 12 * H);
+    expect(h.linkedin.handoverLog.some((x) => x.action === "inmail")).toBe(false);
+    const read = (await h.request<{ tracks: { trackId: string; nextStep: { when: { kind: string; why?: string; inmail?: string } } | null }[] }>("GET", `/api/enrollments/${c.lead(chosen)}`)).body;
+    expect(read.tracks.find((t) => t.trackId === "li")?.nextStep?.when).toMatchObject({ kind: "waits", why: "inmail_unavailable", inmail: "no_credit" });
+    expect(delivered(PAT).filter((d) => d.action === "inmail")).toHaveLength(0);
+  });
+
+  test("skipped by the user: not sent, and the track takes the withdrawal path at the skip", async () => {
+    const { h, campaign, delivered, track } = await world();
+    const c = await campaign([linkedin(FALLBACK, OFFICE)]);
+    await h.advanceTo(WEDNESDAY_0 + 2 * H);
+    expect((await h.request("POST", `/api/enrollments/${c.lead("Pat Oneil")}/controls`, { requestId: "skip-im", action: "skip" })).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 12 * H);
+    expect(delivered(PAT).map((d) => d.action)).toEqual(["invite"]);
+    expect(await track(c.lead("Pat Oneil"))).toMatchObject({ inmail: "skipped_by_user", finishReason: "invite_not_accepted", finishedWall: WEDNESDAY_0 + 2 * H });
+  });
+});

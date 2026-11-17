@@ -362,9 +362,12 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
    * session reports nothing, so its last report stands; seed 24016), less the InMails it delivered at or after that report.
    */
   const creditsAt = (session: string, at: number): number => {
-    const report = h.linkedin.inmailReportLog.filter((r) => r.session === session && r.at <= at).at(-1);
+    // The report the tick at `at` began with (its first at that instant), else the last before it; then the InMails delivered
+    // from that report up to, not including, `at` (an InMail the same tick sends is after its judgment; seed 24024).
+    const reports = h.linkedin.inmailReportLog.filter((r) => r.session === session && r.at <= at);
+    const report = reports.find((r) => r.at === at) ?? reports.at(-1);
     if (!report) return 0;
-    const since = h.linkedin.deliveryLog.filter((d) => d.action === "inmail" && d.sender === session && d.at >= report.at && d.at <= at).length;
+    const since = h.linkedin.deliveryLog.filter((d) => d.action === "inmail" && d.sender === session && d.at >= report.at && d.at < at).length;
     return Math.max(0, report.credits - since);
   };
   /**

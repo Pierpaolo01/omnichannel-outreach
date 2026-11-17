@@ -19,7 +19,8 @@ export const LINKEDIN_SEED = 24000;
  */
 // 15 (ticket 24b, the search on a6c1700): a step no session it may use has any allowance for, read as no allowance; the
 // seed of the mutation "no allowance reads as full for the day".
-export const LINKEDIN_FIXED_SEEDS: readonly number[] = [5, 8, 15, 18, 29, 46, 69, 73, 93];
+// 7, 16 and 24 (ticket 27, ADR 0004 13.11): an InMail sent (7, 16), and a follow-up after it (24), found over offsets 0 to 29.
+export const LINKEDIN_FIXED_SEEDS: readonly number[] = [5, 7, 8, 15, 16, 18, 24, 29, 46, 69, 73, 93];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const LINKEDIN_FEATURES: readonly string[] = [
   "a-campaign-paused",
@@ -59,6 +60,7 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "a-stuck-withdrawal-marked-by-the-user",
   "a-third-session",
   "a-withdrawal-answered-unknown",
+  "a-follow-up-after-an-inmail",
   "a-withdrawal-found-it-accepted",
   "already-connected",
   "an-answer-of-one-session",
@@ -68,6 +70,16 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "an-invite-expired",
   "an-invite-pending-elsewhere",
   "an-invite-without-its-note",
+  "an-acceptance-before-the-inmail-went",
+  "an-inmail-refused",
+  "an-inmail-sent",
+  "an-inmail-text-edited",
+  "an-inmail-without-a-credit",
+  "an-inmail-without-a-plan",
+  "inmail-credits-spent-by-hand",
+  "the-fallback-switched-off",
+  "the-fallback-switched-on",
+  "the-withdrawal-path-after-an-inmail-refused",
   "connected-by-acceptance",
   "email-after-linkedin",
   "email-beside-linkedin",
@@ -78,7 +90,15 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "unresolved-marked-not-sent",
 ];
 /** Behaviours the runs can name that the fixed seeds do not reach, each pinned by an example test instead (`linkedin-review.test.ts`). */
-export const LINKEDIN_OTHER_FEATURES: readonly string[] = ["unresolved-marked-sent"];
+// The InMail fallback's (ticket 27): each pinned by `linkedin-inmail.test.ts` ("a running edit of the switch"; "a chosen
+// InMail that cannot go yet, and one the user skips").
+export const LINKEDIN_OTHER_FEATURES: readonly string[] = [
+  "unresolved-marked-sent",
+  "an-inmail-switched-off-before-it-went",
+  "the-withdrawal-path-after-an-inmail-switched_off",
+  "the-withdrawal-path-after-an-inmail-skipped_by_user",
+  "an-inmail-waiting-for-a-credit",
+];
 /**
  * Invariant 29's fresh-engine comparison in `pnpm check` (a fresh engine per check doubles a run's engine work, and the
  * per-push set must fit CI's check job): after every FRESH_EVERY-th worker tick and after every tick that moved a
@@ -103,7 +123,7 @@ const reached = new Set<string>();
 
 export function linkedinChunks(): void {
   const offsets = FULL_SEARCH ? Array.from({ length: SEARCH_SEEDS }, (_, i) => i).filter(inShard) : [...LINKEDIN_FIXED_SEEDS];
-  describe(`generated LinkedIn runs keep L1 to L17 (${FULL_SEARCH ? "full search" : "fixed seeds"})`, () => {
+  describe(`generated LinkedIn runs keep L1 to L25 (${FULL_SEARCH ? "full search" : "fixed seeds"})`, () => {
     if (offsets.length === 0) test.skip("no seed of this run in this shard", () => undefined);
     for (let i = 0; i < offsets.length; i += 10) {
       const chunk = offsets.slice(i, i + 10);
