@@ -38,6 +38,7 @@ function lead(status: OutreachStatus, fields: Partial<RecordLead> = {}): RecordL
     reply: null,
     sender: null,
     smsSender: null,
+    linkedinReply: null,
     zone: ZONE,
     tracks: [],
     branch: "main",

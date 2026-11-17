@@ -9,7 +9,7 @@ import { isLive, isUncertain } from "../domain/sequence/attempt.ts";
 import { localDayNumber } from "../domain/sequence/clock.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
 import { liveSteps, liveTracks, ownSubject, poolOf, winBackEntry, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { callbackHold, goodEmail, hasGoodNumber, progressOf, runs } from "../domain/sequence/progress.ts";
+import { callbackHold, goodEmail, goodProfile, hasGoodNumber, progressOf, runs } from "../domain/sequence/progress.ts";
 import type { AccountState, CallDay, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
 import { trackLabel, trackPhrase } from "../shared/track-label.ts";
@@ -48,6 +48,8 @@ async function campaignLeads(store: OutreachStore, campaignId: string, definitio
       // Calls may use the company's main line for any lead: a good number as the engine counts it
       // (direct, mobile or main line), which is what starts a phone track (ticket 14c).
       phone: hasGoodNumber(state),
+      // A usable member profile, as a LinkedIn track starts with it (ADR 0004 section 5): never a company lead's (Q35).
+      linkedin: row.kind === "person" && goodProfile(state.lead.details) !== null,
       lacks: [...fields.keys()].filter((f) => !state.lead.mergeData[f]?.trim()),
     };
     out.push({ lead: previewLead(row, enrollment.id, channels), state, details });
@@ -55,7 +57,7 @@ async function campaignLeads(store: OutreachStore, campaignId: string, definitio
   return out;
 }
 
-function previewLead(row: LeadRow, enrollmentId: string, channels: Pick<PreviewLead, "email" | "mobile" | "phone" | "lacks">): PreviewLead {
+function previewLead(row: LeadRow, enrollmentId: string, channels: Pick<PreviewLead, "email" | "mobile" | "phone" | "linkedin" | "lacks">): PreviewLead {
   return row.kind === "person"
     ? { id: enrollmentId, kind: "person", recordId: row.id, name: row.name, title: row.title, company: row.company.name, ...channels }
     : { id: enrollmentId, kind: "company", recordId: row.id, name: row.name, title: "", company: row.name, ...channels };
@@ -104,6 +106,7 @@ export async function beforeLaunchView(store: OutreachStore, campaignId: string,
       email: leads.filter((l) => l.lead.email !== null).length,
       mobile: leads.filter((l) => l.lead.mobile).length,
       phone: leads.filter((l) => l.lead.phone).length,
+      linkedin: leads.filter((l) => l.lead.linkedin).length,
     },
     mergeFields,
     load: launched ? null : await loadProjection(store, campaignId, definition, leads, now),

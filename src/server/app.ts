@@ -5,7 +5,7 @@ import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus, OUTREACH_STATUSES, type OutreachStatus } from "../domain/outreach-status.ts";
 import { LEAD_CONTROLS } from "../domain/sequence/controls.ts";
 import { maySend } from "../domain/sequence/attempt.ts";
-import { campaignControls, controlsView } from "./engine/controls-view.ts";
+import { campaignControls, controlsView, linkedinReplyView } from "./engine/controls-view.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
 import type { ActivityView, ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, CompanyRecord, FileCheckResult, PersonRecord, RecordCalls, SmsProviderStatus, TestContactsRefusal, TestRunTab } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
@@ -658,7 +658,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // (the P2 seeds of the search on ab6fe8e). Pure: nothing is written; the next round evaluates the same.
   const readOf = (stored: SubjectState, at: number, env: StepEnv): EnrollmentRead => {
     const state = rules.previewAsOf(stored, at, rules.evaluate);
-    return { ...progressView(state, at, env, rules.stepWhen), controls: controlsView(state, at, rules, env), mayStillSend: state.work.filter(maySend).length };
+    return { ...progressView(state, at, env, rules.stepWhen), controls: controlsView(state, at, rules, env), mayStillSend: state.work.filter(maySend).length, linkedinReply: linkedinReplyView(stored, at, rules) };
   };
   const enrollmentRead = async (id: string): Promise<EnrollmentRead | null> => {
     const at = Date.parse(now());

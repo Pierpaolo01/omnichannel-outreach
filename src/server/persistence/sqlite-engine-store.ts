@@ -2028,7 +2028,8 @@ function toTestRun(r: Row): TestRunRecord {
     id: str(r, "id"),
     campaignId: str(r, "campaign_id"),
     renderAs: str(r, "render_as"),
-    contacts: { email: contact("email_value", "email_key"), mobile: contact("mobile_value", "mobile_key") },
+    // The test profile too (ticket 24b: the Test run tab read it as none, a part a omission); `linkedin` absent when none.
+    contacts: { email: contact("email_value", "email_key"), mobile: contact("mobile_value", "mobile_key"), ...(r["linkedin_key"] == null ? {} : { linkedin: contact("linkedin_value", "linkedin_key") }) },
     startedWall: num(r, "started_wall"),
     definitionVersion: num(r, "definition_version"),
     definitionEditedAt: strOrNull(r, "definition_edited_at"),

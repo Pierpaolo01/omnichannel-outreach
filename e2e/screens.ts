@@ -215,6 +215,7 @@ export function galleryLead(id: string, campaignId: string, status: OutreachStat
     reply: status === "replied" ? { channel: "email", at: "2026-11-10T14:05:00.000Z" } : null,
     sender: null,
     smsSender: null,
+    linkedinReply: null,
     zone: "Europe/London",
     tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, when: { kind: "at", at: "2026-11-11T09:00:00.000Z" } }, callTask: null, steps: [] }],
     branch: status === "in_win_back" ? "win_back" : "main",

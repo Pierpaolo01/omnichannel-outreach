@@ -11,7 +11,7 @@ import { currentStep, judgeCampaignControl, previewDigest, LEAD_CONTROLS, skipTa
 import { isLive } from "../../domain/sequence/attempt.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
-import type { CampaignControlView, ControlStepView, ControlView } from "../../shared/api.ts";
+import type { CampaignControlView, ControlStepView, ControlView, LinkedinReplyMark } from "../../shared/api.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 import { trackLabel } from "../../shared/track-label.ts";
 
@@ -83,6 +83,17 @@ export function effectOf(before: SubjectState, action: LeadControl, after: Subje
 /** Every control of the lead, in a fixed order. */
 export function controlsView(stored: SubjectState, now: number, rules: Rules, env: StepEnv = {}): ControlView[] {
   return LEAD_CONTROLS.map((action) => controlView(stored, action, now, rules, env));
+}
+
+/**
+ * Whether the user may mark the subject replied on LinkedIn now (ADR 0004 section 7; ticket 24b): the mark's own transition
+ * (`rules.markReplied`) on a copy of the subject as of the read, exactly as `Engine.markReplied` judges it before its
+ * confirmation, storing nothing, so the read's refusal is the action's. Null when the campaign has no LinkedIn track.
+ */
+export function linkedinReplyView(stored: SubjectState, now: number, rules: Pick<Rules, "markReplied" | "asOfAction" | "evaluate"> = DEFAULT_RULES): LinkedinReplyMark | null {
+  if (!stored.campaign.definition.tracks.some((t) => t.channel === "linkedin")) return null;
+  const marked = rules.markReplied(rules.asOfAction(stored, now, rules.evaluate), "read", now);
+  return marked.ok ? { allowed: true } : { allowed: false, reason: marked.reason };
 }
 
 /** The campaign's pause and resume, judged on its row exactly as `Engine.setCampaignPause` judges them. */

@@ -235,7 +235,15 @@ export interface EnrollmentRead extends EnrollmentProgress {
    * withdrawal is asked again until then; a send is recorded once and starts nothing while the lead is held.
    */
   readonly mayStillSend: number;
+  /**
+   * Whether the user may mark this lead replied on LinkedIn now (ADR 0004 section 7), by the engine's own rule
+   * (`markRepliedRefusal`), with its reason when refused; null when the campaign has no LinkedIn track (ticket 24b).
+   */
+  readonly linkedinReply: LinkedinReplyMark | null;
 }
+
+/** The LinkedIn reply mark as a read allows it: allowed, or refused with the engine's reason (ticket 24b). */
+export type LinkedinReplyMark = { readonly allowed: true } | { readonly allowed: false; readonly reason: string };
 
 /** One enrollment's read on a person's or company lead's record (ticket 17b), with its campaign's launch and pause as read at the same instant. */
 export interface RecordLead extends EnrollmentRead {
@@ -752,6 +760,8 @@ export interface PreviewLead {
   readonly mobile: boolean;
   /** A good phone number to call: their own, or the company's main line. */
   readonly phone: boolean;
+  /** A usable LinkedIn member profile of the decision maker's (ADR 0004 section 5); a company lead has none (Q35). */
+  readonly linkedin: boolean;
   /** Merge fields the live copy uses that this lead has no value for. */
   readonly lacks: readonly string[];
 }
@@ -760,8 +770,8 @@ export interface PreviewLead {
 export interface BeforeLaunchView {
   readonly campaignId: string;
   readonly leads: readonly PreviewLead[];
-  /** Spec "Before launch": how many leads have an email, a mobile or a phone number. */
-  readonly coverage: { readonly leads: number; readonly email: number; readonly mobile: number; readonly phone: number };
+  /** Spec "Before launch": how many leads have an email, a mobile, a phone number or a LinkedIn member profile (ticket 24b). */
+  readonly coverage: { readonly leads: number; readonly email: number; readonly mobile: number; readonly phone: number; readonly linkedin: number };
   /** Every merge field the live copy uses, with how many leads lack it and the fallbacks written for it. */
   readonly mergeFields: readonly {
     readonly field: string;
@@ -1659,6 +1669,9 @@ export interface TestRunTab {
     /** A lead's record now has it: it cannot be used (question Q29). */
     readonly emailIsALead: boolean;
     readonly mobileIsALead: boolean;
+    /** The user's own test LinkedIn profile (ADR 0004 section 8), and whether a person's record now has it. */
+    readonly linkedin: string | null;
+    readonly linkedinIsALead: boolean;
   };
   readonly noTestSinceEdit: boolean;
   /** The leads a test may render its copy for, by name. */
@@ -1684,9 +1697,13 @@ export interface TestRunRead {
   readonly renderAs: { readonly id: string; readonly name: string };
   readonly email: string | null;
   readonly mobile: string | null;
+  /** The test LinkedIn profile it sends to (ADR 0004 section 8). */
+  readonly linkedin: string | null;
   /** Its messages still with a provider, which may still be sent after it ended. */
   readonly mayStillSend: number;
   readonly steps: readonly TestStepRow[];
+  /** Whether the user may mark this test replied on LinkedIn now, by the engine's rule; null with no LinkedIn track (ticket 24b). */
+  readonly linkedinReply: LinkedinReplyMark | null;
 }
 
 /** What happened to one step of the canvas in a test run, from its stored facts only. */
@@ -1723,6 +1740,8 @@ export interface TestStepRow {
   readonly at: string | null;
   /** For a due step with no time the engine can promise: why it waits (`StepWaitApi`); null otherwise. */
   readonly waits: StepWaitApi | null;
+  /** With `awaiting_acceptance`: the day the acceptance wait ends, a fact of the read (ADR 0004 section 9), never a send. */
+  readonly until?: string;
   /** For a call: its task, and the outcome logged. */
   readonly taskId: string | null;
   readonly outcome: string | null;
