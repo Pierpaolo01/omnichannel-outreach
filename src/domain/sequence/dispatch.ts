@@ -257,6 +257,16 @@ function unclaimedWhen(state: SubjectState, trackId: string, stepId: string, now
   return why === null ? { kind: "ready" } : { kind: "waits", why };
 }
 
+/**
+ * The accounts the track's pending step may be claimed on, each as its kind of action sees it, as `chooseAccount` reads
+ * them: the fixed sender or the pool, less the pairs another subject holds, and for an invite only the sessions whose
+ * connection check answered clear (ADR 0004 6). Every read that explains a sender-side wait derives from this and from
+ * nothing else (ticket 24b; review bot on a6c1700).
+ */
+export function eligibleSessions(state: SubjectState, trackId: string, now: number): AccountState[] {
+  return candidatesOf(state, trackId, now);
+}
+
 /** The candidate accounts of the track's channel, as `chooseAccount` reads them. */
 function candidatesOf(state: SubjectState, trackId: string, now: number): AccountState[] {
   const channel = channelOf(state, trackId);
@@ -323,14 +333,21 @@ function leadWait(state: SubjectState, trackId: string, stepId: string): { kind:
   return null;
 }
 
+/**
+ * A LinkedIn step that every session it may use allows none of, of its kind of action (ADR 0004 4, item 6): the user's
+ * allowance is zero or never set, so no reset brings room. The one test `stepWhen` and the reads share (ticket 24b, item 15).
+ */
+export function noAllowanceOnAnySession(state: SubjectState, trackId: string, now: number): boolean {
+  if (channelOf(state, trackId) !== "linkedin") return false;
+  const sessions = candidatesOf(state, trackId, now);
+  return sessions.length > 0 && sessions.every((a) => a.dailyLimit <= 0);
+}
+
 /** What the engine knows at the read rules out every sender for the step: none connected, or every daily limit zero. */
 function noSenderKnown(state: SubjectState, trackId: string, now: number): { kind: "waits"; why: StepWait } | null {
   const channel = channelOf(state, trackId) ?? "email";
   // A LinkedIn step: every session it may use allows none of its kind of action, the user's setting (ADR 0004 4, item 6).
-  if (channel === "linkedin") {
-    const sessions = candidatesOf(state, trackId, now);
-    return sessions.length > 0 && sessions.every((a) => a.dailyLimit <= 0) ? { kind: "waits", why: "sending_capacity" } : null;
-  }
+  if (channel === "linkedin") return noAllowanceOnAnySession(state, trackId, now) ? { kind: "waits", why: "sending_capacity" } : null;
   if (channel !== "email" && channel !== "sms") return null;
   const fixed = senderOf(state, channel);
   const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];

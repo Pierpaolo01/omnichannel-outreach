@@ -4,12 +4,12 @@ import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { carriedInto, isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
 import { linkedinStepKind, socialActionOf } from "../../domain/sequence/definition.ts";
-import { accountAvailable, candidatesFor, claimRefusal, forAction, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
+import { accountAvailable, claimRefusal, eligibleSessions, noAllowanceOnAnySession, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
 import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
 import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
-import { inviteOpenOn, invitePendingUntil, inviteWithdrawalStuck, channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
+import { inviteOpenOn, invitingWork, invitePendingUntil, inviteWithdrawalStuck, channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
 import type { LinkedinTrackView, AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi, SessionKinds } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
@@ -270,14 +270,12 @@ export async function needsAttention(
       }
       // A claim carrying uncertain work already holds its reservation: it never waits for capacity.
       if (inheritedWork(s, item.stepId)) continue;
-      const usable = candidatesFor(s, item.trackId)
-        .map((x) => s.accounts[x])
-        .filter((a): a is AccountState => a !== undefined && a.channel === channel && accountAvailable(a, now))
-        .map((a) => forAction(a, action));
+      // The sessions dispatch would claim on, from its own selection (review bot on a6c1700): never a restatement of it.
+      const usable = eligibleSessions(s, item.trackId, now).filter((a) => accountAvailable(a, now));
       if (usable.length === 0 || usable.some((a) => a.used < a.capacity)) continue;
       const resetsAt = Math.min(...usable.map((a) => startOfLocalDay(localDayNumber(now, a.resetZone) + 1, a.resetZone)));
       // A LinkedIn step whose kind no session allows at all (item 15): no reset brings room, so the read says so.
-      waitingForCapacity.push({ ...base, campaignId: s.campaign.id, accountIds: usable.map((a) => a.id).sort(), resetsAt: new Date(resetsAt).toISOString(), action, noAllowance: action !== null && usable.every((a) => a.capacity <= 0) });
+      waitingForCapacity.push({ ...base, campaignId: s.campaign.id, accountIds: usable.map((a) => a.id).sort(), resetsAt: new Date(resetsAt).toISOString(), action, noAllowance: noAllowanceOnAnySession(s, item.trackId, now) });
     }
   }
   // Ticket 20a (follow-up 42 item 50): every lead that ended with no usable channel, from any cause, most recent first,
@@ -342,15 +340,36 @@ async function senderProblems(store: EngineStore, accounts: readonly AccountStat
 
 const earliest = (ts: readonly number[]): number | null => (ts.length === 0 ? null : Math.min(...ts));
 
+/** Why a LinkedIn track was skipped as a missing channel, from the stored facts alone (council on a6c1700, item 10). */
+function skipCauseOf(s: SubjectState, startedWith: string | null): NonNullable<LinkedinTrackView["skipCause"]> {
+  if (startedWith !== null) return "replaced";
+  if (s.lead.details.some((d) => d.channel === "linkedin" && d.bad)) return "marked_bad";
+  switch (s.lead.importedProfile) {
+    case undefined:
+      return "company_lead";
+    case "not_member":
+      return "not_a_member_profile";
+    case "none":
+    case "member":
+      return "no_profile";
+    default: {
+      const unhandled: never = s.lead.importedProfile;
+      throw new Error(`An imported profile with no cause: ${String(unhandled)}`);
+    }
+  }
+}
+
 /** A LinkedIn track's stored facts as the read gives them (ADR 0004 section 9): nothing computed beside the engine's own. */
 export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTrackView {
   const p = s.tracks.find((x) => x.trackId === trackId);
-  const invite = s.work.find((w) => w.trackId === trackId && w.kind === "invite" && w.firstHandedWall !== null && w.settled !== "rejected");
+  // The invite work that counts (item 8): the one known sent, else the latest still unsettled.
+  const counting = invitingWork(s, trackId);
   const withdrawal = p?.inviteWithdrawal ?? null;
-  const sent = invite !== undefined && (invite.settled === "sent" || invite.settled === "user_sent" || invite.sentWall !== null);
   return {
-    invite: sent ? "sent" : invite !== undefined && invite.settled === null ? "handed" : null,
-    note: invite?.note ?? null,
+    invite: counting === null ? null : counting.sent ? "sent" : "handed",
+    note: counting?.work.note ?? null,
+    withdrawalAsked: withdrawal === "wanted" && (p?.inviteWithdrawalUnknowns ?? 0) > 0,
+    skipCause: p?.finishReason === "skipped_missing_channel" ? skipCauseOf(s, p.destinationDetailId ?? null) : null,
     connection: p?.connection ?? null,
     connectedAt: iso(p?.connectedWall ?? null),
     acceptedAt: iso(p?.acceptedWall ?? null),

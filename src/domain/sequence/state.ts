@@ -450,6 +450,11 @@ export interface LeadDetail {
 export interface LeadFacts {
   /** The prospect's zone: the person's, else the company's, else the campaign default (3.4). */
   readonly zone: string;
+  /**
+   * What the import holds for a decision maker's LinkedIn address (ticket 24b, council on a6c1700, item 10): a member
+   * profile, an address that is not one (a company page, a search), or none. Absent for a company lead or a test run.
+   */
+  readonly importedProfile?: "member" | "not_member" | "none";
   readonly details: readonly LeadDetail[];
   /**
    * Every detail id an attempt or track names, resolved to the live detail it stands for now.

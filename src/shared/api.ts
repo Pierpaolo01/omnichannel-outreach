@@ -591,6 +591,14 @@ export interface LinkedinTrackView {
   readonly acceptedAfterFinish: boolean;
   /** The withdrawal after the acceptance wait: wanted, done, found accepted first, or kept by the user; null when none. */
   readonly withdrawal: "wanted" | "withdrawn" | "accepted_first" | "kept_by_user" | null;
+  /** With `wanted`: the session has been asked at least once, and answered unknown (council on a6c1700, item 9). */
+  readonly withdrawalAsked: boolean;
+  /**
+   * Why the track was skipped as a missing channel (council on a6c1700, item 10), from stored facts: no LinkedIn address in
+   * the import; an address that is not a member profile; a company lead; the profile it started with replaced by a
+   * re-import; the profile marked unreachable. Null for any other finish.
+   */
+  readonly skipCause: "no_profile" | "not_a_member_profile" | "company_lead" | "replaced" | "marked_bad" | null;
   /** The session answered the withdrawal unknown too many times: listed in Needs attention for the user. */
   readonly withdrawalStuck: boolean;
   /** An invite this application sent is still open on LinkedIn (sent, not accepted, not withdrawn), whatever the lead's state. */
@@ -1343,10 +1351,18 @@ export interface WithheldTrack {
    */
   readonly why: "no_sender" | "not_modelled";
   /**
-   * Another campaign's track (council on dee365d, item 8): a campaign competing for this one's senders, by name, whose
-   * live LinkedIn track the estimate cannot simulate. Absent for this campaign's own tracks.
+   * Another subject's track (council on dee365d, item 8; on a6c1700, items 3 to 5): a campaign, or a running test, competing
+   * with this one, whose LinkedIn track is still to finish for some of its leads, which the estimate cannot simulate; with
+   * why it competes. Absent for this campaign's own tracks.
    */
-  readonly campaign?: string;
+  readonly competing?: {
+    readonly name: string;
+    /** A running test run of campaign `name`; `own` when it is this campaign's own test. */
+    readonly test: boolean;
+    readonly own: boolean;
+    /** It shares a sender inbox, an SMS number or a LinkedIn session with this campaign, the call list, or senders through another campaign. */
+    readonly why: "inbox" | "number" | "session" | "calls" | "through_another";
+  };
 }
 
 export interface WithheldBy {

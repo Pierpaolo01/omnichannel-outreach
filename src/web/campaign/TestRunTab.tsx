@@ -566,6 +566,8 @@ function TestLinkedinControls({ run, presses }: { run: TestRunRead | null; press
     );
   const mark = run.linkedinReply;
   const stuck = run.linkedinTracks.filter((t) => t.view.withdrawalStuck);
+  // A LinkedIn message of this run recorded sent: the first LinkedIn row of a track is its invite.
+  const messageSent = run.steps.some((r, i, all) => r.channel === "linkedin" && r.state === "sent" && all.findIndex((x) => x.trackId === r.trackId) !== i);
   if (mark === null && stuck.length === 0 && closed === null) return null;
   const keyOf = (c: TestConfirmation) => (c.kind === "reply" ? "reply" : `${c.kind}:${c.trackId}`);
   function open(c: TestConfirmation): void {
@@ -599,7 +601,8 @@ function TestLinkedinControls({ run, presses }: { run: TestRunRead | null; press
         <>
           {stuck.map((t) => (
             <div key={t.trackId} className="flex flex-col gap-1.5">
-              <p className="text-[13.5px] text-ink-2">LinkedIn hasn’t confirmed the test invite was withdrawn. Check your test profile on LinkedIn and say what you found.</p>
+              {/* The expiry's own line says LinkedIn hasn't answered (council on a6c1700, item 7): only the question here. */}
+              <p className="text-[13.5px] text-ink-2">Was the test invite withdrawn from your test profile?</p>
               <div className="flex flex-wrap gap-1.5" role="group" aria-label="Was the test invite withdrawn?">
                 {(["withdrawn", "kept"] as const).map((kind, i) => (
                   <button
@@ -635,7 +638,8 @@ function TestLinkedinControls({ run, presses }: { run: TestRunRead | null; press
                 <Icon name="linkedin" className="size-4" />
                 Mark replied on LinkedIn
               </button>
-              <span className="text-[13px] text-muted">Once you have answered a test message on your test profile.</span>
+              {/* Worded for what has gone (council on a6c1700, item 7): a message, or only the invite. */}
+              <span className="text-[13px] text-muted">{messageSent ? "Once you have answered a test message on your test profile." : "Only the test invite has gone so far: mark it once you have written back on LinkedIn from your test profile."}</span>
             </div>
           )}
         </>

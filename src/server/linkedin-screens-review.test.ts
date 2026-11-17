@@ -1,7 +1,10 @@
 import { describe, expect, test } from "vitest";
 import { linkedinAccountId } from "./engine/ports.ts";
 import { EngineHarness } from "../../test/support/engine-harness.ts";
-import { business, person } from "../../test/support/export-builder.ts";
+import { business, csvOf, person } from "../../test/support/export-builder.ts";
+import { inviteOpenOn, invitingWork } from "../domain/sequence/progress.ts";
+import type { SubjectState } from "../domain/sequence/state.ts";
+import { linkedinTrackView } from "./engine/views.ts";
 import { PREVIEW_CHANGED } from "../domain/sequence/controls.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../domain/sequence/definition.ts";
 import type { BeforeLaunchView, EnrollmentRead, LeadSearchResult, NeedsAttention, SequenceView, TestRunTab } from "../shared/api.ts";
@@ -124,7 +127,7 @@ describe("item 8: another campaign on the same senders with a LinkedIn track wit
     const mine = await campaign("Email only");
     await h.defineSequence(mine, definition([email()], []));
     const load = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${mine}/before-launch`)).body.load;
-    expect(load?.withheldBy?.tracks).toEqual([{ trackId: "li", channel: "linkedin", label: "the LinkedIn track", why: "not_modelled", campaign: "LinkedIn first, then email" }]);
+    expect(load?.withheldBy?.tracks).toEqual([{ trackId: "li", channel: "linkedin", label: "the LinkedIn track", why: "not_modelled", competing: { name: "LinkedIn first, then email", test: false, own: false, why: "inbox" } }]);
     expect(load?.leadsToStart).toBeNull();
   });
 });
@@ -208,5 +211,166 @@ describe("item 11, continued: a step handed over and not yet reported promises n
     const read = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${await lead(id)}`)).body;
     expect(read.status).toBe("queued");
     expect(read.tracks.find((t) => t.trackId === "li")?.linkedin?.invite).toBe("handed");
+  });
+});
+
+describe("item 2 of the review of a6c1700: no allowance is judged on the sessions the engine uses for the lead", () => {
+  test("a lead keeping session A (invites, no messages) beside B (messages, no invites): no allowance on the record and on Today alike", async () => {
+    const S2 = "li-session-2";
+    const h = new EngineHarness({
+      start: MONDAY_9 - H,
+      accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+      linkedin: { sessions: [{ id: S1, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }, { id: S2, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }] },
+    });
+    await h.tick();
+    expect((await h.request("PUT", `/api/sender-accounts/${SESSION}/allowances`, { invitesPerDay: 20, messagesPerDay: 0, notesPerMonth: 0 })).status).toBe(200);
+    expect((await h.request("PUT", `/api/sender-accounts/${linkedinAccountId(S2)}/allowances`, { invitesPerDay: 0, messagesPerDay: 10, notesPerMonth: 0 })).status).toBe(200);
+    h.linkedin.profiles.set(PAT, { acceptAfterMs: H });
+    const { campaign } = await h.createCampaign("Two sessions", { businesses: BUSINESSES, people: PEOPLE });
+    await h.defineSequence(campaign.id, definition([linkedin()], [SESSION, linkedinAccountId(S2)]));
+    h.clock = MONDAY_9;
+    expect((await h.launch(campaign.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 3 * H);
+    expect(h.linkedin.deliveryLog.filter((d) => d.destination === PAT).map((d) => [d.action, d.sender])).toEqual([["invite", S1]]);
+    const pat = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
+    const when = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.tracks.find((t) => t.trackId === "li")?.nextStep?.when;
+    expect(when).toMatchObject({ kind: "waits", why: "no_allowance" });
+    const waiting = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.waitingForCapacity;
+    expect(waiting.map((w) => [w.stepId, w.action, w.noAllowance])).toEqual([["m1", "message", true]]);
+  });
+});
+
+describe("item 5 of the review of a6c1700: a competing campaign withholds the figure only while its LinkedIn track is still to finish", () => {
+  test("once every lead of the other campaign has finished its LinkedIn track, this campaign's figure is shown", async () => {
+    const { h, campaign } = await world();
+    h.linkedin.profiles.set(PAT, { acceptAfterMs: H });
+    const other = await campaign("LinkedIn, done");
+    // Its email waits five days after the LinkedIn track, so its lead is still running with that track finished.
+    await h.defineSequence(other, definition([linkedin(), email({ kind: "after", trackId: "li", delayDays: 5 })]));
+    h.clock = MONDAY_9;
+    expect((await h.launch(other)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + DAY);
+    const running = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${other}`)).body.rows[0]?.enrollments[0];
+    expect(running?.status).toBe("active");
+    const mine = await campaign("Email only");
+    await h.defineSequence(mine, definition([email()], []));
+    const load = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${mine}/before-launch`)).body.load;
+    expect(load?.withheldBy).toBeNull();
+  });
+});
+
+describe("the review bot on a6c1700: every sender-side explanation comes from dispatch's own eligible sessions", () => {
+  const S2 = "li-session-2";
+  const twoSessions = async (s1: { invitesPerDay: number; messagesPerDay: number }, s2: { invitesPerDay: number; messagesPerDay: number }) => {
+    const h = new EngineHarness({
+      start: MONDAY_9 - H,
+      accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+      linkedin: { sessions: [{ id: S1, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }, { id: S2, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }] },
+    });
+    await h.tick();
+    expect((await h.request("PUT", `/api/sender-accounts/${SESSION}/allowances`, { ...s1, notesPerMonth: 0 })).status).toBe(200);
+    expect((await h.request("PUT", `/api/sender-accounts/${linkedinAccountId(S2)}/allowances`, { ...s2, notesPerMonth: 0 })).status).toBe(200);
+    const { campaign } = await h.createCampaign("Two sessions", { businesses: BUSINESSES, people: PEOPLE });
+    await h.defineSequence(campaign.id, definition([linkedin()], [SESSION, linkedinAccountId(S2)]));
+    const read = async () => {
+      const pat = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
+      return {
+        when: (await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body.tracks.find((t) => t.trackId === "li")?.nextStep?.when,
+        waiting: (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.waitingForCapacity.map((w) => [w.stepId, w.accountIds, w.noAllowance]),
+      };
+    };
+    return { h, id: campaign.id, read };
+  };
+
+  test("(a) already connected on s1, which allows no messages, s2 allowing ten: both reads say no allowance on s1 alone", async () => {
+    const { h, id, read } = await twoSessions({ invitesPerDay: 10, messagesPerDay: 0 }, { invitesPerDay: 10, messagesPerDay: 10 });
+    h.linkedin.profiles.set(PAT, { sessions: { [S1]: { connected: true } } });
+    h.clock = MONDAY_9;
+    expect((await h.launch(id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H);
+    const { when, waiting } = await read();
+    expect(when).toMatchObject({ kind: "waits", why: "no_allowance" });
+    expect(waiting).toEqual([["m1", [SESSION], true]]);
+  });
+
+  test("(b) s1 clear with no invite allowance, s2 allowing ten but with an invite pending from elsewhere: both reads say no allowance, and the lead is listed", async () => {
+    const { h, id, read } = await twoSessions({ invitesPerDay: 0, messagesPerDay: 10 }, { invitesPerDay: 10, messagesPerDay: 10 });
+    h.linkedin.profiles.set(PAT, { sessions: { [S2]: { pendingElsewhere: true } } });
+    h.clock = MONDAY_9;
+    expect((await h.launch(id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H);
+    expect(h.linkedin.deliveryLog.filter((d) => d.destination === PAT)).toEqual([]);
+    const { when, waiting } = await read();
+    expect(when).toMatchObject({ kind: "waits", why: "no_allowance" });
+    expect(waiting).toEqual([["inv", [SESSION], true]]);
+  });
+});
+
+describe("item 8 of a6c1700's council: the invite work that counts, whatever the order of attempts", () => {
+  const work = (fields: Record<string, unknown>) => ({ trackId: "li", kind: "invite", firstHandedWall: 1, settled: null, sentWall: null, note: "with", ...fields });
+  const state = (w: Record<string, unknown>[], track: Record<string, unknown> = {}) => ({ work: w, tracks: [{ trackId: "li", acceptedWall: null, connection: null, inviteWithdrawal: null, ...track }] }) as unknown as SubjectState;
+  test("an earlier attempt settled not sent never hides a later one that was sent, in either order", () => {
+    const failed = work({ firstHandedWall: 1, settled: "not_sent" });
+    const sent = work({ firstHandedWall: 2, settled: "sent", sentWall: 3 });
+    for (const order of [[failed, sent], [sent, failed]]) {
+      expect(invitingWork(state(order), "li")).toMatchObject({ sent: true, work: { firstHandedWall: 2 } });
+      expect(inviteOpenOn(state(order), "li")).toBe(true);
+    }
+  });
+  test("with none sent, the latest still unsettled counts as handed; settled not sent alone counts as nothing", () => {
+    const failed = work({ firstHandedWall: 1, settled: "user_not_sent" });
+    const pending = work({ firstHandedWall: 2 });
+    expect(invitingWork(state([failed, pending]), "li")).toMatchObject({ sent: false, work: { firstHandedWall: 2 } });
+    expect(invitingWork(state([failed]), "li")).toBeNull();
+    expect(inviteOpenOn(state([failed, pending]), "li")).toBe(false);
+  });
+});
+
+describe("item 9 of a6c1700's council: a withdrawal is said as asked only once the session was asked", () => {
+  test("wanted with no answer yet reads not asked; after an unknown answer, asked", async () => {
+    const { h, campaign, lead } = await world();
+    h.linkedin.profiles.set(PAT, { withdrawUnknown: 50 });
+    const id = await campaign("Expiry");
+    await h.defineSequence(id, definition([linkedin(1)]));
+    h.clock = MONDAY_9;
+    expect((await h.launch(id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 2 * DAY);
+    const stored = await h.store.engine.subject(await lead(id), h.clock);
+    if (!stored) throw new Error("no subject");
+    const asked = linkedinTrackView(stored, "li");
+    expect(asked).toMatchObject({ withdrawal: "wanted", withdrawalAsked: true });
+    // The same track before the worker's first ask: the stored answers removed.
+    const before = { ...stored, tracks: stored.tracks.map((t) => (t.trackId === "li" ? { ...t, inviteWithdrawalUnknowns: 0, inviteWithdrawalLastWall: null } : t)) };
+    expect(linkedinTrackView(before, "li")).toMatchObject({ withdrawal: "wanted", withdrawalAsked: false });
+  });
+});
+
+describe("item 10 of a6c1700's council: a skip as a missing channel says its stored cause", () => {
+  test("a profile replaced by a re-import, a company page, and no address each read their own cause", async () => {
+    const { h } = await world();
+    h.linkedin.profiles.set(PAT, { acceptAfterMs: null });
+    const people = [
+      ...PEOPLE,
+      person({ person_id: "p2", business_id: "b1", full_name: "Kim Hart", email: "kim@harbour.example", linkedin_url: "https://www.linkedin.com/company/fictional-harbour" }),
+      person({ person_id: "p3", business_id: "b1", full_name: "Ola Berg", email: "ola@harbour.example" }),
+    ];
+    const { campaign: c } = await h.createCampaign("Causes", { businesses: BUSINESSES, people });
+    const slow = { ...linkedin(), steps: [step("inv", 0, "Hello."), step("m1", 3, "Thanks.")] };
+    await h.defineSequence(c.id, definition([slow, email({ kind: "after", trackId: "li", delayDays: 9 })]));
+    h.clock = MONDAY_9;
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H);
+    // Pat's invite went; a re-import gives Pat a different member profile, retiring the one the track started with.
+    const again = await h.request("POST", `/api/campaigns/${c.id}/imports`, csvOf({ businesses: BUSINESSES, people: [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", linkedin_url: "https://www.linkedin.com/in/fictional-pat-oneil-2" })] }));
+    expect(again.status).toBeLessThan(300);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows;
+    const cause = async (name: string) => {
+      const id = rows.find((r) => r.name === name)?.enrollments.find((e) => e.campaign.id === c.id)?.id ?? "";
+      return (await h.request<EnrollmentRead>("GET", `/api/enrollments/${id}`)).body.tracks.find((t) => t.trackId === "li")?.linkedin?.skipCause;
+    };
+    expect(await cause("Pat Oneil")).toBe("replaced");
+    expect(await cause("Kim Hart")).toBe("not_a_member_profile");
+    expect(await cause("Ola Berg")).toBe("no_profile");
   });
 });

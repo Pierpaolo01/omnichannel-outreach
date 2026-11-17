@@ -1,6 +1,7 @@
 import type { Rules } from "../../src/server/engine/rules.ts";
 import { SqliteEngineStore } from "../../src/server/persistence/sqlite-engine-store.ts";
 import { DEFAULT_RULES } from "../../src/server/engine/rules.ts";
+import { viewRules } from "../../src/server/engine/step-when-view.ts";
 import { applyReply, awaitingAcceptance, connect, end, finishTrack, progressOf, rules as progressRules } from "../../src/domain/sequence/progress.ts";
 import { linkedinStepKind } from "../../src/domain/sequence/definition.ts";
 import { markedReplyId } from "../../src/domain/sequence/reply-identity.ts";
@@ -54,7 +55,23 @@ function flag<K extends "notConnectedMarksBad" | "pairsByChannel" | "waitEditRea
   };
 }
 
+/** The seed offset that reaches a step no session has any allowance for (the search's 24015 on a6c1700). */
+const NO_ALLOWANCE_SEED = 15;
+
 export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
+  // L13 (ticket 24b, item 15): a step no session it may use has any allowance for reads as full for the day.
+  "no allowance reads as full for the day": {
+    invariant: "L13",
+    seed: NO_ALLOWANCE_SEED,
+    rules: {},
+    patch: () => {
+      const was = viewRules.noAllowanceReadAs;
+      viewRules.noAllowanceReadAs = "sending_capacity";
+      return () => {
+        viewRules.noAllowanceReadAs = was;
+      };
+    },
+  },
   // L1: an invite waiting for acceptance is offered again as ready, and claimed and handed over again.
   "an invite waiting for acceptance is sent again": {
     invariant: "L1",

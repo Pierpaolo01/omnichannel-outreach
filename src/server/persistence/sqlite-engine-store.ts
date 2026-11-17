@@ -1272,7 +1272,7 @@ export class SqliteEngineStore implements EngineStore {
     // A test run (ADR 0003 "Ticket 21") reaches its own test contacts and nothing else, renders as the lead it names, and
     // keeps the campaign's zone (question Q2's interim); every other part of its state is loaded as a lead's is.
     const reach = test ? this.testReach(test, definition) : this.leadReach(e, definition);
-    const { details, phones, resolved, zone, mergeData, owner } = reach;
+    const { details, phones, resolved, zone, mergeData, owner, importedProfile } = reach;
 
     const tracks = this.sql("SELECT * FROM track_progress WHERE subject_id = ? ORDER BY track_id").all(subjectId).map(toTrack);
     const attempts = this.sql("SELECT * FROM attempts WHERE subject_id = ? ORDER BY claimed_wall, rowid").all(subjectId).map(toAttempt);
@@ -1281,7 +1281,7 @@ export class SqliteEngineStore implements EngineStore {
       .map((r): CallAttempt => ({ id: str(r, "id"), requestId: str(r, "request_id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, redial: num(r, "redial") === 1, callbackAt: numOrNull(r, "callback_at"), declinedPath: declinedPathOrNull(strOrNull(r, "declined_path")), numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") }));
     if (!test) this.resolveReferenced(resolved, owner, [...tracks.map((t) => t.destinationDetailId), ...attempts.map((a) => a.destinationDetailId), ...callAttempts.map((c) => c.numberDetailId)]);
     if (!test) this.resolveProfiles(resolved, strOrNull(e, "person_id"), details, [...tracks.map((t) => t.destinationDetailId), ...attempts.map((a) => a.destinationDetailId)]);
-    return this.assemble(subjectId, test ? "test_run" : "enrollment", e, c, definition, now, { details, phones, resolved, zone, mergeData, owner, tracks, attempts, callAttempts });
+    return this.assemble(subjectId, test ? "test_run" : "enrollment", e, c, definition, now, { details, phones, resolved, zone, mergeData, owner, tracks, attempts, callAttempts, ...(importedProfile ? { importedProfile } : {}) });
   }
 
   /** The reach of a test run: its test contacts, as details of its own (ids `test:<run>:email|mobile`), never a CRM record's. */
@@ -1386,9 +1386,11 @@ export class SqliteEngineStore implements EngineStore {
     // The decision maker's LinkedIn profile from the import (ADR 0004 section 5): a company lead has none (question Q35).
     const profile = personId === null ? null : this.profileOf(personId);
     if (profile) details.push(profile);
+    const importedUrl = personId === null ? null : (strOrNull(this.sql("SELECT linkedin_url FROM people WHERE id = ?").get(personId) ?? {}, "linkedin_url") ?? "").trim();
 
     return {
       details,
+      ...(importedUrl === null ? {} : { importedProfile: importedUrl === "" ? ("none" as const) : linkedinProfileKey(importedUrl) === null ? ("not_member" as const) : ("member" as const) }),
       phones,
       resolved: {},
       zone: prospectZone([strOrNull(person ?? {}, "timezone"), company ? strOrNull(company, "timezone") : null], definition.timezone),
@@ -1441,7 +1443,7 @@ export class SqliteEngineStore implements EngineStore {
     now: number,
     p: Reach & { readonly tracks: TrackProgress[]; readonly attempts: Attempt[]; readonly callAttempts: CallAttempt[] },
   ): SubjectState {
-    const { details, phones, resolved, zone, mergeData, owner, tracks, attempts, callAttempts } = p;
+    const { details, phones, resolved, zone, mergeData, owner, tracks, attempts, callAttempts, importedProfile } = p;
     const accountIds = new Set([
       ...definition.emailPool,
       ...poolOf(definition, "sms"),
@@ -1524,7 +1526,7 @@ export class SqliteEngineStore implements EngineStore {
         // The lead's LinkedIn profile is a destination of conversations too (ADR 0004, question Q41): its session's pairs.
         .all({ kind: owner?.kind ?? "", owner: owner?.id ?? "", own: JSON.stringify(owner ? [] : details.filter((d) => d.mobile).map((d) => d.key)), profiles: JSON.stringify(details.filter((d) => d.channel === "linkedin").map((d) => d.key)), subject: subjectId })
         .map((b) => ({ channel: strOrNull(b, "pair_channel") === "linkedin" ? ("linkedin" as const) : ("sms" as const), sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, ownerSent: Number(b["owner_sent"]) === 1, ownerAnswered: Number(b["owner_answered"]) === 1 })),
-      lead: { zone, details, resolved, mergeData, phones },
+      lead: { zone, details, resolved, mergeData, phones, ...(importedProfile ? { importedProfile } : {}) },
       markBad: [],
       accounts,
       callTasks: this.sql("SELECT * FROM call_tasks WHERE subject_id = ? ORDER BY placed_wall, rowid").all(subjectId).map(toCallTask),
@@ -1990,6 +1992,8 @@ interface Reach {
   readonly mergeData: MergeData;
   /** The lead's owner; null for a test run, which has no record. */
   readonly owner: Owner | null;
+  /** What the import holds for a decision maker's LinkedIn address (ticket 24b); absent for a company lead or a test run. */
+  readonly importedProfile?: "member" | "not_member" | "none";
 }
 
 /** A test contact's detail id on its run (ADR 0003 "Ticket 21"): names no CRM record, and the triggers of migration 18 accept it only for a test run. */

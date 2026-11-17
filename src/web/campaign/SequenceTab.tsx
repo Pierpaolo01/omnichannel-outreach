@@ -1381,7 +1381,7 @@ function AcceptWaitControl({ track, locked, launched, onChange }: { track: Track
         days
       </label>
       <p id={hint} className="text-[12.5px] text-muted">
-        Counted in calendar days from when the invite is sent; time a lead is paused doesn’t count. If they haven’t accepted by then, the invite is withdrawn and this track ends for them, and their other tracks carry on.
+        Counted in calendar days from when the invite is sent; time a lead is paused doesn’t count. If they haven’t accepted by then, this track ends for them and the app asks LinkedIn to withdraw the invite; their other tracks carry on.
         {launched ? " A change reaches every lead still waiting, counted from when their invite was sent." : ""}
       </p>
     </div>

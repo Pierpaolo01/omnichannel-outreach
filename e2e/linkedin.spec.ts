@@ -62,7 +62,7 @@ test("the record's LinkedIn states: waiting for acceptance with the day it ends,
 
   await test.step("Ola, stopped after her invite went: the record says it is still open on LinkedIn", async () => {
     await at(page, f, `/leads/people/${await f.person("Ola Berg")}`);
-    await expect(page.getByText("The connection invite sent from this campaign is still open on LinkedIn. Only a wait for acceptance that runs out withdraws an invite, so this one stays until they answer it or you withdraw it on LinkedIn.")).toBeVisible();
+    await expect(page.getByText("The connection invite sent from this campaign is still open on LinkedIn. The app asks LinkedIn to withdraw an invite only when the wait for acceptance runs out, so this one stays until they answer it or you withdraw it on LinkedIn.")).toBeVisible();
   });
 
   await test.step("Pat: connected, and skipped in the second campaign, which names the first; Kim has no member profile and the mark is refused with why", async () => {
@@ -71,7 +71,7 @@ test("the record's LinkedIn states: waiting for acceptance with the day it ends,
     await expect(page.getByText(/^The LinkedIn track was skipped: .*campaign Clinics on LinkedIn/)).toBeVisible();
     await shot(page, "10-record-connected-and-skipped");
     await at(page, f, `/leads/people/${await f.person("Kim Hart")}`);
-    await expect(page.getByText("The LinkedIn track was skipped: there is no LinkedIn member profile for them in the import.")).toBeVisible();
+    await expect(page.getByText("The LinkedIn track was skipped: the LinkedIn address in the import isn’t a member profile (a company page, for one), so it can’t receive an invite.")).toBeVisible();
   });
 });
 
@@ -81,7 +81,7 @@ test("a withdrawal LinkedIn never confirmed: Needs attention names it, the recor
   await expect(page.getByText("Check whether Nia Cole’s LinkedIn invite was withdrawn")).toBeVisible();
   await shot(page, "11-today-withdrawal-to-check");
   await page.getByRole("link", { name: "Open Nia Cole’s record" }).click();
-  await expect(page.getByText("LinkedIn hasn’t confirmed the invite was withdrawn. Check their profile on LinkedIn and say what you found.")).toBeVisible();
+  await expect(page.getByText(/LinkedIn hasn’t answered whether it did: check their profile on LinkedIn and say what you found\.$/)).toBeVisible();
   await page.getByRole("button", { name: /^It’s withdrawn: the LinkedIn invite to Nia Cole/ }).click();
   await expect(page.getByText(/^Mark the invite withdrawn\?/)).toBeVisible();
   await shot(page, "12-withdrawal-answer");

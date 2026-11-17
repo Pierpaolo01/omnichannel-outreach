@@ -1584,6 +1584,19 @@ export function connectionChecked(state: SubjectState, trackId: string, session:
 }
 
 /**
+ * The invite work that counts for a LinkedIn track (council on a6c1700, item 8): the one known sent (by the session, a lookup
+ * or the user's mark), else the latest handed over and not yet settled; never an earlier attempt that settled not sent,
+ * withdrawn or refused. The record's read, `inviteOpenOn` and with it the controls' digest read this one choice.
+ */
+export function invitingWork(state: SubjectState, trackId: string): { readonly work: SubjectState["work"][number]; readonly sent: boolean } | null {
+  const handed = state.work.filter((w) => w.trackId === trackId && w.kind === "invite" && w.firstHandedWall !== null);
+  const sent = handed.find((w) => w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null);
+  if (sent) return { work: sent, sent: true };
+  const open = handed.filter((w) => w.settled === null).sort((a, b) => (b.firstHandedWall ?? 0) - (a.firstHandedWall ?? 0))[0];
+  return open ? { work: open, sent: false } : null;
+}
+
+/**
  * Whether an invite this subject sent on a LinkedIn track is still open on LinkedIn (ADR 0004 3.4; ticket 24b): sent, not
  * accepted, not connected, not withdrawn and not found accepted. Only the acceptance expiry asks for a withdrawal, so an
  * invite stays open through a stop, a reply, a move to win-back, an ending with no channel or a removing edit. The one test
@@ -1591,8 +1604,7 @@ export function connectionChecked(state: SubjectState, trackId: string, session:
  */
 export function inviteOpenOn(state: SubjectState, trackId: string): boolean {
   const p = state.tracks.find((x) => x.trackId === trackId);
-  const invite = state.work.find((w) => w.trackId === trackId && w.kind === "invite" && w.firstHandedWall !== null && w.settled !== "rejected");
-  const sent = invite !== undefined && (invite.settled === "sent" || invite.settled === "user_sent" || invite.sentWall !== null);
+  const sent = invitingWork(state, trackId)?.sent === true;
   const withdrawal = p?.inviteWithdrawal ?? null;
   return sent && p?.acceptedWall == null && (p?.connection ?? null) === null && withdrawal !== "withdrawn" && withdrawal !== "accepted_first";
 }

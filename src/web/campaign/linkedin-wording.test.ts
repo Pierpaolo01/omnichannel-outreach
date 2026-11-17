@@ -6,7 +6,7 @@ import { expiryLine, INVITE_HANDED, INVITE_STILL_OPEN, linkedinTrackLines, MARK_
 
 /** The record's and Today's LinkedIn sentences, one per state of the read (ticket 24b; ADR 0004 section 9). */
 const ZONE = "Europe/London";
-const VIEW: LinkedinTrackView = { invite: null, note: null, connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalStuck: false, inviteOpen: false, pendingElsewhereSince: null };
+const VIEW: LinkedinTrackView = { invite: null, note: null, connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalAsked: false, skipCause: null, withdrawalStuck: false, inviteOpen: false, pendingElsewhereSince: null };
 const track = (linkedin: Partial<LinkedinTrackView> | null, fields: Partial<TrackProgressView> = {}): TrackProgressView => ({
   trackId: "li",
   channel: "linkedin",
@@ -42,7 +42,10 @@ describe("a LinkedIn track's facts on the record", () => {
   });
 
   test("the expiry by each withdrawal state, never a time promised", () => {
-    expect(expiryLine("wanted")).toBe("No acceptance was recorded within the track’s wait, so the LinkedIn track ended for them. The app has asked LinkedIn to withdraw the invite; it isn’t confirmed withdrawn yet.");
+    // Item 9: not asked yet, asked, and stuck (said once, item 7).
+    expect(expiryLine("wanted")).toBe("No acceptance was recorded within the track’s wait, so the LinkedIn track ended for them. The invite is to be withdrawn; the app hasn’t asked LinkedIn yet.");
+    expect(expiryLine("wanted", "them", { withdrawalAsked: true, withdrawalStuck: false })).toBe("No acceptance was recorded within the track’s wait, so the LinkedIn track ended for them. The app has asked LinkedIn to withdraw the invite; it isn’t confirmed withdrawn yet.");
+    expect(expiryLine("wanted", "them", { withdrawalAsked: true, withdrawalStuck: true })).toBe("No acceptance was recorded within the track’s wait, so the LinkedIn track ended for them. The app has asked LinkedIn to withdraw the invite, and LinkedIn hasn’t answered whether it did: check their profile on LinkedIn and say what you found.");
     expect(expiryLine("withdrawn")).toBe("No acceptance was recorded within the track’s wait, so the LinkedIn track ended for them, and the invite was withdrawn.");
     expect(expiryLine("accepted_first")).toContain("LinkedIn showed it had been accepted first, so it wasn’t withdrawn");
     expect(expiryLine("kept_by_user")).toContain("so it wasn’t withdrawn");
@@ -58,22 +61,34 @@ describe("a LinkedIn track's facts on the record", () => {
   test("an invite still open on LinkedIn is said once the lead no longer runs (Q38), never while it runs", () => {
     const open = track({ note: "with", inviteOpen: true });
     expect(linkedinTrackLines(open, "stopped_manually", ZONE)).toContain(INVITE_STILL_OPEN);
+    // Item 6: what the application does, never that a withdrawal will happen.
+    expect(INVITE_STILL_OPEN).toContain("The app asks LinkedIn to withdraw an invite only when the wait for acceptance runs out");
+    expect(INVITE_STILL_OPEN).not.toMatch(/withdraws an invite|will be withdrawn|is withdrawn/);
     expect(linkedinTrackLines(open, "replied", ZONE)).toContain(INVITE_STILL_OPEN);
     expect(linkedinTrackLines(open, "active", ZONE)).not.toContain(INVITE_STILL_OPEN);
     // Every other ending of the track leaves it open too (item 6): a finished track says so whatever the lead's status.
     expect(linkedinTrackLines(track({ note: "with", inviteOpen: true }, { finishReason: "dropped_for_win_back" }), "in_win_back", ZONE)).toContain(INVITE_STILL_OPEN);
     // An expiry's withdrawal, stuck or not, is said by its own line, never as left open by a stop.
-    expect(linkedinTrackLines(track({ inviteOpen: true, withdrawal: "wanted", withdrawalStuck: true }, { finishReason: "invite_not_accepted" }), "sequence_finished_no_response", ZONE)).not.toContain(INVITE_STILL_OPEN);
+    expect(linkedinTrackLines(track({ inviteOpen: true, withdrawal: "wanted", withdrawalAsked: false, skipCause: null, withdrawalStuck: true }, { finishReason: "invite_not_accepted" }), "sequence_finished_no_response", ZONE)).not.toContain(INVITE_STILL_OPEN);
   });
 
   test("a pending invite from elsewhere, a stuck withdrawal, a skip naming the owner, a missing profile", () => {
     expect(linkedinTrackLines(track({ pendingElsewhereSince: "2026-11-02T09:00:00.000Z" }), "active", ZONE)).toEqual(["An invite to them was already pending on LinkedIn, not sent by this application (first seen Mon 2 Nov). This track waits until it is accepted or gone."]);
-    expect(linkedinTrackLines(track({ withdrawalStuck: true, withdrawal: "wanted" }, { finishReason: "invite_not_accepted" }), "active", ZONE).at(-1)).toBe("LinkedIn hasn’t confirmed the invite was withdrawn. Check their profile on LinkedIn and say what you found.");
+    // A stuck withdrawal is said once, in the expiry's own line (council on a6c1700, item 7).
+    const stuck = linkedinTrackLines(track({ withdrawalStuck: true, withdrawalAsked: true, withdrawal: "wanted" }, { finishReason: "invite_not_accepted" }), "active", ZONE);
+    expect(stuck.filter((l) => /hasn’t (answered|confirmed)/.test(l))).toHaveLength(1);
     const taken = linkedinTrackLines(track(null, { finishReason: "skipped_conversation_taken", conversationOwners: [{ name: "Spring clinics", test: false }] }), "active", ZONE);
     expect(taken[0]).toContain("campaign Spring clinics");
     expect(taken[0]).toContain("LinkedIn");
     expect(taken[0]).not.toMatch(/mobile|\btext\b/);
-    expect(linkedinTrackLines(track(null, { finishReason: "skipped_missing_channel" }), "active", ZONE)).toEqual(["The LinkedIn track was skipped: there is no LinkedIn member profile for them in the import."]);
+    // Item 10: each stored cause in its own words; a replaced profile is never said to be missing from the import.
+    const skipped = (skipCause: LinkedinTrackView["skipCause"]) => linkedinTrackLines(track({ skipCause }, { finishReason: "skipped_missing_channel" }), "active", ZONE)[0];
+    expect(skipped("no_profile")).toBe("The LinkedIn track was skipped: there is no LinkedIn address for them in the import.");
+    expect(skipped("not_a_member_profile")).toContain("isn’t a member profile (a company page, for one)");
+    expect(skipped("company_lead")).toContain("a company lead has no member profile");
+    expect(skipped("replaced")).toBe("The LinkedIn track was skipped: a later import gave them a different LinkedIn profile, so the one this track started with is no longer theirs.");
+    expect(skipped("marked_bad")).toContain("marked unreachable");
+    expect(skipped("replaced")).not.toContain("in the import.");
   });
 
   test("the reply mark says the handoff on LinkedIn, never a phone", () => {

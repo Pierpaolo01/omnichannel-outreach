@@ -236,7 +236,7 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
   // A campaign competing for these senders with a live LinkedIn track (council on dee365d, item 8): the projection would
   // simulate it without its LinkedIn work, so what starts after that track never would, and this figure would be too
   // low. It is withheld, naming that campaign and track.
-  const linkedinElsewhere = await linkedinTracksOf(store, others);
+  const linkedinElsewhere = await linkedinTracksOf(store, campaignId, definition, others, ownCalls);
   if (linkedinElsewhere.length > 0) return { projection: null, withheldBy: { tracks: linkedinElsewhere }, callsNotCounted: [], held: [] };
   const held = await unsettled(store, [...others, ...leads.map((l) => l.state)], competing.reach);
   if (held.length > 0) return { projection: null, withheldBy: null, callsNotCounted: [], held };
@@ -262,18 +262,37 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
   return { projection, stoppedEarly: stop.reason === "horizon" ? "horizon" : null, stop, withheldBy: null, callsNotCounted, held: [] };
 }
 
-/** Each live LinkedIn track of the campaigns `subjects` belong to, once per campaign, named with its campaign. */
-async function linkedinTracksOf(store: OutreachStore, subjects: readonly SubjectState[]): Promise<WithheldTrack[]> {
-  const seen = new Set<string>();
-  const out: WithheldTrack[] = [];
+/**
+ * Each LinkedIn track of a competing campaign or running test still to finish for at least one of its running subjects,
+ * once per campaign or test (council on a6c1700, item 5: a track every lead has finished or passed withholds nothing), named
+ * as the SMS owner is ("the test run of campaign X", item 3) and with why it competes (item 4), from the subject's own pools,
+ * fixed senders and live attempts against this campaign's pools, else the call list, else through another campaign.
+ */
+async function linkedinTracksOf(store: OutreachStore, campaignId: string, definition: CampaignDefinition, subjects: readonly SubjectState[], ownCalls: boolean): Promise<WithheldTrack[]> {
+  const mine = { inbox: new Set(definition.emailPool), number: new Set(poolOf(definition, "sms")), session: new Set(poolOf(definition, "linkedin")) };
+  const why = (group: readonly SubjectState[]): NonNullable<WithheldTrack["competing"]>["why"] => {
+    const uses = new Set(group.flatMap((x) => [...accountsOf(x), ...poolOf(x.campaign.definition, "linkedin")]));
+    if ([...uses].some((a) => mine.inbox.has(a))) return "inbox";
+    if ([...uses].some((a) => mine.number.has(a))) return "number";
+    if ([...uses].some((a) => mine.session.has(a))) return "session";
+    return ownCalls && group.some((x) => liveTracks(x.campaign.definition, "main").some((t) => t.channel === "call")) ? "calls" : "through_another";
+  };
+  const groups = new Map<string, SubjectState[]>();
   for (const s of subjects) {
-    if (seen.has(s.campaign.id)) continue;
-    seen.add(s.campaign.id);
-    const def = s.campaign.definition;
-    const tracks = [...liveTracks(def, "main"), ...liveTracks(def, "win_back")].filter((t) => t.channel === "linkedin");
+    const key = s.subject.kind === "test_run" ? `test:${s.subject.id}` : s.campaign.id;
+    groups.set(key, [...(groups.get(key) ?? []), s]);
+  }
+  const out: WithheldTrack[] = [];
+  for (const group of groups.values()) {
+    const first = group[0] as SubjectState;
+    const def = first.campaign.definition;
+    const unfinished = (t: { readonly id: string }) => group.some((x) => x.subject.ended === null && (progressOf(x, t.id)?.finishedAt ?? null) === null);
+    const tracks = [...liveTracks(def, "main"), ...liveTracks(def, "win_back")].filter((t) => t.channel === "linkedin" && unfinished(t));
     if (tracks.length === 0) continue;
-    const name = (await store.campaign(s.campaign.id))?.name ?? "";
-    for (const t of tracks) out.push({ trackId: t.id, channel: "linkedin", label: trackPhrase(def, t), why: "not_modelled", campaign: s.subject.kind === "test_run" ? `the test run of ${name}` : name });
+    const name = (await store.campaign(first.campaign.id))?.name ?? "";
+    const test = first.subject.kind === "test_run";
+    const competing = { name, test, own: test && first.campaign.id === campaignId, why: why(group) };
+    for (const t of tracks) out.push({ trackId: t.id, channel: "linkedin", label: trackPhrase(def, t), why: "not_modelled", competing });
   }
   return out;
 }

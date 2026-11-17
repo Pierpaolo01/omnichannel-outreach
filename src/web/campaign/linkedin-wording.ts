@@ -49,13 +49,15 @@ function connectionLine(view: LinkedinTrackView, userZone: string): string | nul
  * state, and nothing more: "withdrawn" only once LinkedIn or the user said so (council on dee365d, item 2). `whom` is "them"
  * on the record and "this test" on the Test run tab, which says it through this same function.
  */
-export function expiryLine(withdrawal: LinkedinTrackView["withdrawal"], whom: "them" | "this test" = "them"): string {
+export function expiryLine(withdrawal: LinkedinTrackView["withdrawal"], whom: "them" | "this test" = "them", ask: Pick<LinkedinTrackView, "withdrawalAsked" | "withdrawalStuck"> = { withdrawalAsked: false, withdrawalStuck: false }): string {
   const ended = `No acceptance was recorded within the track’s wait, so the LinkedIn track ended for ${whom}`;
   switch (withdrawal) {
     case null:
       return `${ended}.`;
+    // Asked only once the read says the session was asked (council on a6c1700, item 9); stuck said once, here (item 7).
     case "wanted":
-      return `${ended}. The app has asked LinkedIn to withdraw the invite; it isn’t confirmed withdrawn yet.`;
+      if (ask.withdrawalStuck) return `${ended}. The app has asked LinkedIn to withdraw the invite, and LinkedIn hasn’t answered whether it did: check ${whom === "them" ? "their profile" : "your test profile"} on LinkedIn and say what you found.`;
+      return ask.withdrawalAsked ? `${ended}. The app has asked LinkedIn to withdraw the invite; it isn’t confirmed withdrawn yet.` : `${ended}. The invite is to be withdrawn; the app hasn’t asked LinkedIn yet.`;
     case "withdrawn":
       return `${ended}, and the invite was withdrawn.`;
     case "accepted_first":
@@ -78,7 +80,7 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
   if (track.channel !== "linkedin") return [];
   const lines: string[] = [];
   const view = track.linkedin;
-  if (track.finishReason === "skipped_missing_channel") lines.push("The LinkedIn track was skipped: there is no LinkedIn member profile for them in the import.");
+  if (track.finishReason === "skipped_missing_channel") lines.push(`The LinkedIn track was skipped: ${SKIP_CAUSE[view?.skipCause ?? "no_profile"]}.`);
   // A pair another campaign holds (Q41): named by the one conversation wording, in LinkedIn's words.
   if (track.finishReason === "skipped_conversation_taken") lines.push(`The LinkedIn track was skipped: ${conversationTaken(track.conversationOwners, "linkedin")}.`);
   if (view === null) return lines;
@@ -88,7 +90,7 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
   if (view.invite === "handed") lines.push(INVITE_HANDED);
   const connected = connectionLine(view, userZone);
   if (connected) lines.push(connected);
-  if (track.finishReason === "invite_not_accepted") lines.push(expiryLine(view.withdrawal));
+  if (track.finishReason === "invite_not_accepted") lines.push(expiryLine(view.withdrawal, "them", view));
   // An acceptance recorded after the track ended (council on dee365d, item 14): said as recorded late, with the time
   // LinkedIn gave for it, which the port's contract allows to be an upper bound ("by"), never as accepted late.
   if (view.acceptedAfterFinish) {
@@ -100,12 +102,20 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
   // longer runs, and only while no withdrawal was asked for: an expiry's withdrawal is said by its own line.
   if (view.inviteOpen && view.withdrawal === null && (track.finishReason !== null || statusGroup(status) === "handed_to_you" || statusGroup(status) === "ended")) lines.push(INVITE_STILL_OPEN);
   if (view.pendingElsewhereSince) lines.push(`An invite to them was already pending on LinkedIn, not sent by this application (first seen ${dateIn(userZone, view.pendingElsewhereSince)}). This track waits until it is accepted or gone.`);
-  if (view.withdrawalStuck) lines.push("LinkedIn hasn’t confirmed the invite was withdrawn. Check their profile on LinkedIn and say what you found.");
   return lines;
 }
 
-/** Q38's interim, on the record (ADR 0004 3.4), for every ending but the acceptance expiry. */
-export const INVITE_STILL_OPEN = "The connection invite sent from this campaign is still open on LinkedIn. Only a wait for acceptance that runs out withdraws an invite, so this one stays until they answer it or you withdraw it on LinkedIn.";
+/** Q38's interim, on the record (ADR 0004 3.4), for every ending but the acceptance expiry (council on a6c1700, item 6). */
+export const INVITE_STILL_OPEN = "The connection invite sent from this campaign is still open on LinkedIn. The app asks LinkedIn to withdraw an invite only when the wait for acceptance runs out, so this one stays until they answer it or you withdraw it on LinkedIn.";
+
+/** Why a LinkedIn track was skipped as a missing channel, by the read's stored cause (council on a6c1700, item 10). */
+export const SKIP_CAUSE: Readonly<Record<NonNullable<LinkedinTrackView["skipCause"]>, string>> = {
+  no_profile: "there is no LinkedIn address for them in the import",
+  not_a_member_profile: "the LinkedIn address in the import isn’t a member profile (a company page, for one), so it can’t receive an invite",
+  company_lead: "a company lead has no member profile to invite",
+  replaced: "a later import gave them a different LinkedIn profile, so the one this track started with is no longer theirs",
+  marked_bad: "their LinkedIn profile is marked unreachable",
+};
 
 /** An invite handed to the session and not known to have gone: the unresolved state's words (`HOLD_CLAUSE.unresolved`). */
 export const INVITE_HANDED = "The connection invite is with the LinkedIn session, which hasn’t confirmed whether it went.";

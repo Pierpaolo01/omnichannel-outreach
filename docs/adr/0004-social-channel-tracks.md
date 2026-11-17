@@ -250,6 +250,7 @@ Each must be killed by a recorded seed in `pnpm check`, failing the invariant it
 | an edited wait keeps the old deadline | L8 | 6 |
 | a binding lookup ignores the channel (the LinkedIn session taken from any pair the subject owns) | L13 here (the invite waits for ever on the SMS number); L16 in the SMS track runs, seed 3 from their SEED | 11 |
 | a check's result is stored for the track, not the session (and asked of the first healthy session only) | L17 | 2 |
+| no allowance reads as full for the day (ticket 24b: a step no eligible session has any allowance for, read `sending_capacity`) | L13 | 15 |
 
 The connection check pass is a layer the first mutations did not reach, so it is a `Rules` entry (`connectionCheckDue`, `connectionChecked`) and the L9 and L11 mutations swap it as well.
 
@@ -436,6 +437,13 @@ Fifteen items, each reproduced as a failing test first (`src/server/linkedin-scr
 - **The load figure** is withheld as `not_modelled` for any live LinkedIn track of this campaign, session or none, and for one of a campaign competing for its senders, named; said in `ink-2`, not as an error (items 1, 8, 9).
 - **Confirmations** are snapshots of the read and the subject they opened on: a test run's close when the shown run changes (or a test is starting), and a mark or answer names its run in its route; the record's LinkedIn confirmations close when the read no longer offers them; each says why, and focus returns to the opening control or the closing line, with `useFocusRescue` for anything else (items 3, 10, 12). A test run's stuck withdrawal is answered on its tab (`POST /api/test-runs/:id/invite-withdrawal`).
 - **Words per case**: the first message's changed wait counts from the connection (item 5); each failure reason has its own sentence, a removed connection never "profile not reachable" (item 13).
+
+### The reviews of `a6c1700` and the search on it (17 November 2026)
+
+- **One selection of sessions** (council item 2, review bot): dispatch's `eligibleSessions` (the fixed sender or the pool, less pairs another subject holds, and for an invite only the sessions whose check answered clear) is the one source for every sender-side explanation; `noAllowanceOnAnySession` is built on it and read by `stepWhen`, the record's read, the control previews, the Test run tab and Needs attention. The pool-wide approximation is gone. Through HTTP: the bot's two reproductions and the council's two-session case.
+- **The search's L13 failures** (seeds 24011, 24013, 24015, 24037, 24045, 24053, 24054, 24055, 24071, 24094): the record still required `sending_capacity`. It now requires `no_allowance` exactly when no session it finds eligible by section 6 (fixed sender or pool, pairs taken out, an invite's sessions with an invite pending from elsewhere out) has an allowance of the step's kind, and refuses `no_allowance` where one does. Offset 15 joins the fixed seeds, with the mutation "no allowance reads as full for the day".
+- **The load figure** (items 3 to 5): a competitor is named as an SMS owner is named, with why it competes (an inbox, a number, a session, the call list, or through another campaign), and only while some running subject of it has its LinkedIn track still to finish; this campaign's own running test says the figure returns when the test ends.
+- **Done facts** (items 6 to 10): the invite work that counts is one helper (`invitingWork`: known sent, else the latest unsettled), read by the record, `inviteOpenOn` and so the digest; a withdrawal is said as asked only once the session answered (`withdrawalAsked`), and a stuck one once; a skip as a missing channel carries its stored cause (`skipCause`, from the import's own address, `LeadFacts.importedProfile`, a bad mark, or a profile replaced by a re-import); the inspector and the open-invite sentence say the app asks LinkedIn to withdraw, never that it is withdrawn.
 
 ## Consequences
 

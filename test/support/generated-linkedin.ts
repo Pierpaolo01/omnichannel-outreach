@@ -900,11 +900,14 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           // An invite goes only from a session with no invite pending from elsewhere (section 6; seeds 24062, 24094).
           const fromWhich = kind === "invites" && lead.profile !== null ? usableSessions(lead).filter((id) => !pendingOn(li.profiles.get(lead.profile!) ?? {}, id)) : usableSessions(lead);
           const noRoom = kind !== null && !awaiting && fromWhich.length > 0 && fromWhich.every((id) => (allowances.get(id)?.[kind] ?? 0) === 0);
+          // The read says no allowance exactly when the record finds none on any session the step may use (zero or never
+          // set), and full for the day only where an allowance exists and is used up (ticket 24b, item 15).
           if (noRoom && (shown?.hold ?? null) === null) {
-            if (shown?.nextStep?.when.why !== "sending_capacity") problem(`L13: ${lead.id}'s ${p.nextStepId} has no allowance on any session and its read does not say so (${JSON.stringify(shown?.nextStep?.when)})`);
+            if (shown?.nextStep?.when.why !== "no_allowance") problem(`L13: ${lead.id}'s ${p.nextStepId} has no allowance on any session and its read does not say so (${JSON.stringify(shown?.nextStep?.when)})`);
             else features.add("a-step-waiting-on-a-zero-allowance");
             continue;
           }
+          if (shown?.nextStep?.when.why === "no_allowance") problem(`L13: ${lead.id}'s ${p.nextStepId} reads no allowance, though ${fromWhich.filter((id) => kind !== null && (allowances.get(id)?.[kind] ?? 0) > 0).join(" and ") || "a session it may use"} has one`);
           const hold = shown?.hold ?? null;
           // L17 (review bot on e261ffa): a track is never held on one session's answer while another session of its pool
           // could act: held as pending only while every session it may use is pending, and never left at its invite while

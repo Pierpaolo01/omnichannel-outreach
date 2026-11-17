@@ -17,7 +17,9 @@ export const LINKEDIN_SEED = 24000;
  * to 99 failed on before e261ffa's next push (35, 62, 71, 94) run in the search only, to keep `pnpm check` inside CI's job:
  * three were the record's errors, and 62's engine change has its own test through HTTP.
  */
-export const LINKEDIN_FIXED_SEEDS: readonly number[] = [5, 8, 18, 29, 46, 69, 73, 93];
+// 15 (ticket 24b, the search on a6c1700): a step no session it may use has any allowance for, read as no allowance; the
+// seed of the mutation "no allowance reads as full for the day".
+export const LINKEDIN_FIXED_SEEDS: readonly number[] = [5, 8, 15, 18, 29, 46, 69, 73, 93];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const LINKEDIN_FEATURES: readonly string[] = [
   "a-campaign-paused",

@@ -120,7 +120,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
     const when = (rules.stepWhen ?? stepWhen)(s, track.id, now, env);
     if (when?.kind !== "waits" || when.why === "with_provider") return null;
     // The day an acceptance wait ends is the read's fact (ADR 0004 section 9): said as when the wait ends, never a send.
-    return { waits: readWait(when.why, s, track.id), ...(when.why === "awaiting_acceptance" && when.until !== undefined ? { until: iso(when.until) } : {}) };
+    return { waits: readWait(when.why, s, track.id, now), ...(when.why === "awaiting_acceptance" && when.until !== undefined ? { until: iso(when.until) } : {}) };
   };
   for (const track of tracks) {
     const label = trackLabel(def, track);
@@ -170,7 +170,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
         switch (when?.kind) {
           case "waits":
             // The day an acceptance wait ends is the read's fact (ADR 0004 section 9): said as when the wait ends, never a send.
-            rows.push({ ...base, state: "due", at: null, waits: readWait(when.why, s, track.id), ...(when.why === "awaiting_acceptance" && when.until !== undefined ? { until: iso(when.until) } : {}) });
+            rows.push({ ...base, state: "due", at: null, waits: readWait(when.why, s, track.id, now), ...(when.why === "awaiting_acceptance" && when.until !== undefined ? { until: iso(when.until) } : {}) });
             break;
           case "ready":
             rows.push({ ...base, state: "due", at: iso(now) });

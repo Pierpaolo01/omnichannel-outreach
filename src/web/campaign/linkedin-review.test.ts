@@ -11,7 +11,7 @@ import { withheldExplanation } from "./withheld.ts";
 
 /** The council's first review of `dee365d` (ticket 24b): each screen sentence or snapshot that could say something untrue. */
 
-const VIEW: LinkedinTrackView = { invite: "sent", note: "with", connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalStuck: false, inviteOpen: true, pendingElsewhereSince: null };
+const VIEW: LinkedinTrackView = { invite: "sent", note: "with", connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalAsked: false, skipCause: null, withdrawalStuck: false, inviteOpen: true, pendingElsewhereSince: null };
 const liTrack = (view: Partial<LinkedinTrackView>): TrackProgressView => ({ trackId: "li", channel: "linkedin", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: { ...VIEW, ...view }, hold: null, holdOwners: [], nextStep: null, callTask: null, steps: [] });
 const control = (action: "stop" | "move_to_win_back"): AllowedControl => ({ action, allowed: true, statusAfter: "stopped_manually", skips: null, next: null, withProvider: 0, digest: `${action}|x|invite_open` });
 const lead = (controls: ControlView[], tracks: TrackProgressView[]): RecordLead => ({
@@ -62,9 +62,15 @@ describe("item 5: a running edit's wait, by the step's role", () => {
 
 describe("items 1, 8 and 9: the load withheld for LinkedIn", () => {
   test("another campaign's LinkedIn track is named as the reason", () => {
-    expect(withheldExplanation({ tracks: [{ trackId: "li", channel: "linkedin", label: "the LinkedIn track", why: "not_modelled", campaign: "Clinics on LinkedIn" }] })).toBe(
-      "No load is projected for this campaign: campaign Clinics on LinkedIn shares its senders and has a LinkedIn track, which the estimate doesn’t model yet, so a figure here would leave out what it sends after it.",
+    const competing = (fields: Partial<{ name: string; test: boolean; own: boolean; why: "inbox" | "number" | "session" | "calls" | "through_another" }>) => ({ tracks: [{ trackId: "li", channel: "linkedin" as const, label: "the LinkedIn track", why: "not_modelled" as const, competing: { name: "Clinics on LinkedIn", test: false, own: false, why: "inbox" as const, ...fields } }] });
+    expect(withheldExplanation(competing({}))).toBe(
+      "No load is projected for this campaign: campaign Clinics on LinkedIn, which shares a sender inbox with it, still has a LinkedIn track to finish, which the estimate doesn’t model yet, so a figure here would leave out what it sends after it.",
     );
+    // Item 4: a campaign pulled in by the call list is never said to share senders.
+    expect(withheldExplanation(competing({ why: "calls" }))).toContain("which shares your call list with it");
+    // Item 3: a test run is named as an SMS owner is; this campaign's own says the figure returns when it ends.
+    expect(withheldExplanation(competing({ test: true }))).toContain("the test run of campaign Clinics on LinkedIn, which");
+    expect(withheldExplanation(competing({ test: true, own: true }))).toBe("No load is projected while this campaign’s own test is running: its LinkedIn track, which the estimate doesn’t model yet, uses the same senders. The figure returns when the test ends.");
   });
 });
 

@@ -159,8 +159,8 @@ export function stepDetail(row: TestStepRow, run: Pick<TestRunRead, "email" | "m
   if (row.state === "skipped" && row.reason === "sms_conversation_taken") return `Skipped: ${conversationTaken(row.owners ?? [], row.channel, "your test")}`;
   // An acceptance wait that ran out: said from the run's own withdrawal state, through the record's function (item 2).
   if (row.state === "skipped" && row.reason === "invite_not_accepted") {
-    const withdrawal = run.linkedinTracks?.find((t) => t.trackId === row.trackId)?.view.withdrawal ?? null;
-    const said = expiryLine(withdrawal, "this test");
+    const view = run.linkedinTracks?.find((t) => t.trackId === row.trackId)?.view;
+    const said = expiryLine(view?.withdrawal ?? null, "this test", view ?? { withdrawalAsked: false, withdrawalStuck: false });
     return `Skipped: ${said.charAt(0).toLowerCase()}${said.slice(1)}`;
   }
   if (row.state === "skipped") return row.reason === "missing_channel" ? `Skipped: no test ${row.channel === "email" ? "email" : row.channel === "linkedin" ? "LinkedIn profile" : "mobile"} saved` : SKIPPED_BECAUSE[row.reason ?? ""] ?? "Skipped";
