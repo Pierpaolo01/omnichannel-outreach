@@ -348,7 +348,7 @@ If both hold, the track **does not finish**: `inmail = chosen`, `inmail_session`
 | - | - |
 | invite | always (as before) |
 | InMail | `connection` is null and `inmail = chosen` |
-| first message | `connection` is set (as before) |
+| first message | `connection` is set (as before), or `inmail = sent` (a step promoted to this place by an edit after the InMail; the replaced one was skipped at the InMail's send; 13.15) |
 | follow-up | `connection` is set, or `inmail = sent` |
 
 So a follow-up after an InMail goes without a connection, and nothing else does: no first message without a connection, no InMail before the expiry chose it or after a connection, no follow-up after an InMail not known sent. Handover predicate 19 and the due-time resolution read this one function, as before.
@@ -488,6 +488,16 @@ Verified on the simulated provider only. Unverified until a Premium or Sales Nav
   - Behaviours the fixed seeds do not reach are pinned by example tests (`linkedin-inmail.test.ts`): a skipped InMail, and an InMail waiting for a credit.
   - Mutation seeds, found over offsets 0 to 29: L18 24, L19 16, L20 7, L21 18, L22 0, L23 24, L24 18, L25 7.
 - **No change for the fallback off, email, SMS or calls.** `scripts/no-inmail-digest.ts` gives the same digest on the tip `5c43963` and on this branch: `284e00a5982d36894e10ae87757f6773886c12fa3b40a26639284c6ae9869781`. That run is a LinkedIn track without the fallback, then email: 12 handovers, 11 deliveries, 2 acceptances, 4 withdrawals, 25 checks and 1 refusal. `scripts/no-social-digest.ts` still gives `eb4141e8…3708`.
+
+### 13.15 The review bot on `b49a71b`
+
+Three defects, each reproduced first as a failing test through HTTP (`linkedin-inmail.test.ts`, "the review bot on b49a71b"):
+
+1. **A running edit after the InMail stalled the follow-ups.** The edit removed the replaced first message, so the next follow-up read as the first message by position, and the gate held it for a connection. *Changed:* the gate lets a step that reads as the first message through once an InMail is known sent (13.4). The first message the InMail replaced was already skipped at the InMail's send, so a step promoted to that position by an edit is a follow-up the user kept.
+2. **An acceptance after a refused InMail did not connect the track.** The InMail had been refused for a limit, and the invite was accepted before the retry. Any InMail work that had been handed over stopped the skip, so the track was neither connected nor able to send. *Changed:* only InMail work that may have gone (unsettled, or sent) stops the skip. Work that was refused, or settled not sent, does not.
+3. **Two concurrent expiries could commit the same last credit.** The evaluation's version guard did not cover the shared InMail standing. *Changed:* an evaluation that judges an InMail also requires the standing of each session it judged to be unchanged at the write (`inmailJudgedSessions`). Otherwise it is discarded and decided again on fresh state, which covers a new report too.
+
+**Fixing the class:** every decision that reads state another subject can change now names that state in the write's guard.
 
 ## The review of `194fc44` (council, review bot and verifier, 16 November 2026)
 
