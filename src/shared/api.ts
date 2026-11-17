@@ -952,6 +952,8 @@ export interface CopyPreview {
     readonly channel: "email" | "sms" | "linkedin";
     /** Its number within its track: Email 2, Text 1. */
     readonly number: number;
+    /** A LinkedIn InMail fallback, named by its role (ADR 0004 13.9). */
+    readonly role?: "inmail";
     /** The day the projection sends it to this lead, counting launch day as day 1; null with `noDay` otherwise. */
     readonly day: number | null;
     /**

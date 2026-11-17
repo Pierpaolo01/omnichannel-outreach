@@ -975,7 +975,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       const connected = li.presendLog.some((p) => p.destination === d.destination && p.sender === d.sender && p.answer === "connected" && p.at <= d.at) && !invite;
       // L23: a follow-up goes without a connection only after an InMail delivered from that session to that profile (13.4).
       const afterInmail = li.deliveryLog.some((x) => x.subjectId === d.subjectId && x.action === "inmail" && x.sender === d.sender && x.destination === d.destination && x.at <= d.at && x.visibleAt <= d.at);
-      if (!accepted && !connected && !afterInmail) problem(`${invite && li.deliveryLog.some((x) => x.subjectId === d.subjectId && x.action === "inmail") ? "L23" : "L2"}: ${d.subjectId}'s ${d.stepId} was handed over at ${iso(d.at)} before any connection${afterInmail ? "" : " or InMail known sent"}`);
+      if (!accepted && !connected && !afterInmail) problem(`${invite && li.deliveryLog.some((x) => x.subjectId === d.subjectId && x.action === "inmail") ? "L23" : "L2"}: ${d.subjectId}'s ${d.stepId} was handed over at ${iso(d.at)} before any connection or InMail known sent`);
       if (afterInmail && !accepted) features.add("a-follow-up-after-an-inmail");
     }
     for (const d of li.deliveryLog.filter((x) => x.action === "message")) {

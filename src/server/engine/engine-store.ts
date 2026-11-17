@@ -108,7 +108,7 @@ export function storableAccount<T extends SenderAccountConfig>(reported: T, chan
   // InMail never goes on a report the engine cannot read.
   const inmail = r["inmail"];
   const report = inmail as { plan?: unknown; credits?: unknown } | null | undefined;
-  const readable = inmail === undefined || inmail === null || (report !== null && typeof report === "object" && ["premium", "sales_navigator", "none"].includes(String(report?.plan)) && whole(report?.credits, 0));
+  const readable = inmail === undefined || inmail === null || (report !== null && typeof report === "object" && ["premium", "sales_navigator", "none"].includes(String(report.plan)) && whole(report.credits, 0));
   if (!readable) return storableAccount({ ...reported, inmail: null }, channel);
   if (valid) return reported;
   return {

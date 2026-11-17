@@ -8,7 +8,7 @@ import { missingFields, renderSegments, type Segment } from "../domain/copy-prev
 import { isLive, isUncertain } from "../domain/sequence/attempt.ts";
 import { localDayNumber } from "../domain/sequence/clock.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
-import { liveSteps, liveTracks, ownSubject, poolOf, winBackEntry, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
+import { liveSteps, liveTracks, stepNumber, stepRoleOf, ownSubject, poolOf, winBackEntry, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { callbackHold, goodEmail, goodProfile, hasGoodNumber, progressOf, runs } from "../domain/sequence/progress.ts";
 import type { AccountState, CallDay, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
@@ -500,7 +500,7 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
       else if (projectedOn !== undefined) day = projectedOn;
       else noDay = stopped = missing.length > 0 ? "not_sent" : "beyond_horizon";
       steps.push({
-        step: { trackId: track.id, stepId: step.id, channel: copyChannel(track), number: i + 1, day, noDay, waitsOnCall: waitsOn, skipped: skip, threading: step.threading, subject, body, missing },
+        step: { trackId: track.id, stepId: step.id, channel: copyChannel(track), number: stepNumber(track, step.id), ...stepRoleOf(track, step.id), day, noDay, waitsOnCall: waitsOn, skipped: skip, threading: step.threading, subject, body, missing },
         order: trackIndex * 10_000 + i,
       });
     });
@@ -512,11 +512,12 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
     .filter((t) => t.channel !== "call")
     .flatMap((track) => {
       const skip = skipped(track);
-      return rendered(track).map(({ step, i, subject, body, missing }): CopyPreview["steps"][number] => ({
+      return rendered(track).map(({ step, subject, body, missing }): CopyPreview["steps"][number] => ({
         trackId: track.id,
         stepId: step.id,
         channel: copyChannel(track),
-        number: i + 1,
+        number: stepNumber(track, step.id),
+        ...stepRoleOf(track, step.id),
         day: null,
         noDay: skip ? "skipped" : "win_back",
         waitsOnCall: null,

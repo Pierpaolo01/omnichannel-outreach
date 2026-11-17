@@ -45,7 +45,23 @@ function connectedAtTheSend(s: SubjectState): SubjectState {
 }
 
 /** A swap of one of progress.ts's rule flags for a replay, undone after it. */
-function flag<K extends "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession" | "conversationKeysOwnOnly">(name: K, value: (typeof progressRules)[K]): () => () => void {
+type Flag = "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession" | "conversationKeysOwnOnly" | "inmailJudgesStanding" | "inmailWaitsForExpiry" | "acceptanceSkipsInmail" | "refusedInmailEndsTrack" | "switchOffReachesChosen" | "inmailOffWhenRemoved" | "inmailTakesFirstPlace";
+/** Several flags swapped at once for one replay, undone after it. */
+function flags(values: Partial<Record<Flag, boolean>>): () => () => void {
+  return () => {
+    const undo = Object.entries(values).map(([name, value]) => flag(name as Flag, value as never)());
+    return () => {
+      for (const u of undo.reverse()) u();
+    };
+  };
+}
+/** A LinkedIn track's InMail step (any, live or removed) that already has a sent result: the one the L18 mutation offers again. */
+function sentInmailOf(s: SubjectState, trackId: string): string | null {
+  const track = s.campaign.definition.tracks.find((t) => t.id === trackId);
+  const step = track?.steps.find((x) => x.role === "inmail" && s.results.some((r) => r.stepId === x.id && r.result === "sent"));
+  return step?.id ?? null;
+}
+function flag<K extends Flag>(name: K, value: (typeof progressRules)[K]): () => () => void {
   return () => {
     const was = progressRules[name];
     progressRules[name] = value;
@@ -54,6 +70,9 @@ function flag<K extends "notConnectedMarksBad" | "pairsByChannel" | "waitEditRea
     };
   };
 }
+
+/** The InMail mutations' killing seed offsets (ticket 27), found over offsets 0 to 29; ADR 0004 13.11 records them. */
+const INMAIL_SEEDS = { L18: 0, L19: 0, L20: 0, L21: 0, L22: 0, L23: 0, L24: 0, L25: 0 } as const;
 
 /** The seed offset that reaches a step no session has any allowance for (the search's 24015 on a6c1700). */
 const NO_ALLOWANCE_SEED = 15;
@@ -292,6 +311,76 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     seed: 11,
     rules: {},
     patch: flag("conversationKeysOwnOnly", true),
+  },
+  // The InMail fallback (ticket 27, ADR 0004 13.11): one mutation per invariant L18 to L25. Their seeds are recorded in 13.11.
+  // L18: an InMail already sent is offered again as ready, claimed and handed over again.
+  "an InMail sent is sent again": {
+    invariant: "L18",
+    seed: INMAIL_SEEDS.L18,
+    rules: {
+      readyItems: (state, now) => [
+        ...DEFAULT_RULES.readyItems(state, now),
+        ...state.tracks.flatMap((p) => {
+          const im = sentInmailOf(state, p.trackId);
+          if (!im || p.finishedAt !== null || state.attempts.some((a) => a.stepId === im && (a.state === "claimed" || a.state === "handed" || a.state === "accepted"))) return [];
+          return [{ subjectId: state.subject.id, trackId: p.trackId, stepId: im, touched: state.subject.touched, dueWall: now }];
+        }),
+      ],
+      claimRefusal: (state, item, now) => (sentInmailOf(state, item.trackId) === item.stepId ? null : DEFAULT_RULES.claimRefusal(state, item, now)),
+      handoverFailures: (state, attempt, account, now) => {
+        const failed = DEFAULT_RULES.handoverFailures(state, attempt, account, now);
+        return sentInmailOf(state, attempt.trackId) === attempt.stepId ? failed.filter((f) => f !== 3 && f !== 4 && f !== 6 && f !== 7 && f !== 19) : failed;
+      },
+    },
+  },
+  // L19: the fallback switched off before it went is ignored: a removed InMail step is still chosen at the expiry and sent.
+  "a switched-off InMail is still sent": {
+    invariant: "L19",
+    seed: INMAIL_SEEDS.L19,
+    rules: {},
+    patch: flags({ inmailOffWhenRemoved: false }),
+  },
+  // L20: the InMail is not held for the expiry's choice: it goes as soon as the invite is sent.
+  "the InMail goes before the expiry": {
+    invariant: "L20",
+    seed: INMAIL_SEEDS.L20,
+    rules: {},
+    patch: flags({ inmailWaitsForExpiry: false }),
+  },
+  // L21: an acceptance after the expiry does not stop the InMail, and the session's "connected" does not either.
+  "an acceptance does not stop the InMail": {
+    invariant: "L21",
+    seed: INMAIL_SEEDS.L21,
+    rules: {},
+    patch: flags({ acceptanceSkipsInmail: false }),
+  },
+  // L22: the expiry takes every session as eligible: no plan and no credit are ignored.
+  "every session taken as eligible for InMail": {
+    invariant: "L22",
+    seed: INMAIL_SEEDS.L22,
+    rules: {},
+    patch: flags({ inmailJudgesStanding: false }),
+  },
+  // L23: the InMail does not take the first message's place: the first message goes after it, without a connection.
+  "the first message goes after the InMail": {
+    invariant: "L23",
+    seed: INMAIL_SEEDS.L23,
+    rules: {},
+    patch: flags({ inmailTakesFirstPlace: false }),
+  },
+  // L24: a refused InMail leaves the track running (the InMail is asked again, or the track left pending).
+  "a refused InMail leaves the track running": {
+    invariant: "L24",
+    seed: INMAIL_SEEDS.L24,
+    rules: {},
+    patch: flags({ refusedInmailEndsTrack: false }),
+  },
+  // L25: switching the fallback off does not reach an InMail already chosen.
+  "a switch-off does not reach a chosen InMail": {
+    invariant: "L25",
+    seed: INMAIL_SEEDS.L25,
+    rules: {},
+    patch: flags({ switchOffReachesChosen: false }),
   },
   // L13: a taken pair held instead of skipped: the second campaign's lead is left waiting on it for ever.
   "a taken LinkedIn pair is held, not skipped": {

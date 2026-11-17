@@ -948,7 +948,7 @@ export function alignPending(state: SubjectState, now: number): SubjectState {
     if (!track || inFlight(s, p.trackId)) continue;
     // The InMail the expiry chose, switched off before it was handed over (ADR 0004 13.8): it is not sent, and the track takes
     // the withdrawal path at the edit's instant.
-    if (rules.switchOffReachesChosen && rules.inmailOffWhenRemoved && p.inmail === "chosen" && p.nextStepId !== null && linkedinStepKind(track, p.nextStepId) === "inmail" && !track.steps.some((x) => x.id === p.nextStepId && !x.removed)) {
+    if (rules.switchOffReachesChosen && rules.inmailOffWhenRemoved && p.inmail === "chosen" && linkedinStepKind(track, p.nextStepId) === "inmail" && !track.steps.some((x) => x.id === p.nextStepId && !x.removed)) {
       s = inmailNotSent(s, track.id, "switched_off", leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now));
       continue;
     }

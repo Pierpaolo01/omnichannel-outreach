@@ -96,6 +96,10 @@ const REASON: Readonly<Record<string, string>> = {
   "profile unreachable": "LinkedIn refused the profile as unreachable. It is marked wrong.",
   // Q37: the connection is gone (they removed it); the profile stays theirs and is not marked wrong.
   "not connected": "LinkedIn refused the message: they are no longer connected. The profile isn’t marked wrong.",
+  // The InMail fallback (ticket 27; ADR 0004 13.3).
+  "inmail refused": "LinkedIn refused the InMail for this person. The profile isn’t marked wrong.",
+  inmail_instead: "Not sent: the InMail went instead.",
+  accepted: "No InMail: they accepted the invite before it went.",
 };
 
 const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
