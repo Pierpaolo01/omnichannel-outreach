@@ -220,10 +220,11 @@ function dueOf(lead: Pick<RecordLead, "tracks">, step: ControlStepView): StepWhe
 }
 
 /**
- * What of this lead's outreach has left the app (verifier on f2824d4, item 10): three states on every channel, never two.
- * `nothing`: nothing handed to any provider. `unknown`: something handed over that is not yet known to have gone (handed,
- * accepted, claimed or unresolved): it may have reached them, so "nothing has gone out" would be untrue. `sent`: something
- * is recorded sent. Each names the channel of the work it speaks of.
+ * What of this lead's outreach has left the app (verifier on f2824d4, item 10): three states on every channel, never two,
+ * each from a stored fact. `nothing`: nothing handed to any provider, a claim never handed over included (the council on
+ * 5a30b9f: a claim is not a handover). `unknown`: work the app handed over (`handedAt`, stored in the handover's own write)
+ * that is not known to have gone or not: it may have reached them, so "nothing has gone out" would be untrue. `sent`:
+ * something recorded sent. Each names the channel of the work it speaks of.
  */
 export type OutgoingSoFar = { readonly state: "nothing" } | { readonly state: "unknown"; readonly channel: TrackChannelApi } | { readonly state: "sent"; readonly channel: TrackChannelApi };
 
@@ -233,17 +234,20 @@ export function outgoingSoFar(lead: Pick<RecordLead, "tracks">): OutgoingSoFar {
     for (const step of track.steps) {
       for (const send of step.sends) {
         const state: AttemptState = send.state;
+        const handed = send.handedAt !== null;
         switch (state) {
           case "sent":
             return { state: "sent", channel: track.channel };
+          // A claim is said by whether it was handed over, not by its state's name: never handed, nothing went.
           case "claimed":
           case "handed":
           case "accepted":
-            unknown ??= track.channel;
+            if (handed) unknown ??= track.channel;
             break;
+          // Ended: refused or withdrawn and known so, nothing went; ended with its outcome untold, as handed if it was.
           case "rejected":
           case "withdrawn":
-            if (send.unresolved) unknown ??= track.channel;
+            if (handed && send.unresolved) unknown ??= track.channel;
             break;
           default: {
             const unhandled: never = state;

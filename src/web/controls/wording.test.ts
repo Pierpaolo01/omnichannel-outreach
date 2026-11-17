@@ -291,7 +291,7 @@ describe("a time inside a repeated hour says which one (verifier on cc9bf55, ite
 });
 
 describe("what has left the app, in three states on every channel (verifier on f2824d4, item 10)", () => {
-  const send = (state: SendView["state"], unresolved = false): SendView => ({ attemptId: "a1", state, sender: "s", destination: "d", copy: null, handedAt: state === "claimed" ? null : "2026-11-02T09:00:00.000Z", sentAt: state === "sent" ? "2026-11-02T09:00:01.000Z" : null, endedBy: null, rejectReason: null, unresolved });
+  const send = (state: SendView["state"], unresolved = false, handed = state !== "claimed"): SendView => ({ attemptId: "a1", state, sender: "s", destination: "d", copy: null, handedAt: handed ? "2026-11-02T09:00:00.000Z" : null, sentAt: state === "sent" ? "2026-11-02T09:00:01.000Z" : null, endedBy: null, rejectReason: null, unresolved });
   const withSend = (channel: TrackChannelApi, sends: SendView[], result: "sent" | null = null) =>
     running("queued", { tracks: [{ trackId: "t1", channel, branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, messageRequest: null, hold: null, holdOwners: [], nextStep: null, callTask: null, steps: [{ stepId: "s1", number: 1, removed: false, result, reason: null, at: null, sends, calls: [] }] }] });
   const NOUN = { email: "An email", sms: "A text", linkedin: "A LinkedIn invite or message", instagram: "An Instagram message" } as const;
@@ -299,14 +299,19 @@ describe("what has left the app, in three states on every channel (verifier on f
   test.each(Object.keys(NOUN) as (keyof typeof NOUN)[])("%s: nothing handed over, handed over and not known, recorded sent", (channel) => {
     expect(outgoingSoFar(withSend(channel, []))).toEqual({ state: "nothing" });
     expect(nextStepSentence(withSend(channel, []), ZONE)).toMatch(/^Nothing has gone out yet\./);
-    for (const s of [send("handed"), send("accepted"), send("claimed"), send("rejected", true), send("withdrawn", true)]) {
+    // Handed over, by the stored handover time: a claim too, when it carries work handed over earlier.
+    for (const s of [send("handed"), send("accepted"), send("claimed", false, true), send("rejected", true), send("withdrawn", true)]) {
       expect(outgoingSoFar(withSend(channel, [s])), s.state).toEqual({ state: "unknown", channel });
       const sentence = nextStepSentence(withSend(channel, [s]), ZONE);
       expect(sentence).toMatch(new RegExp(`^${NOUN[channel]} was handed over, and it isn’t known yet whether it went\\.`));
       expect(sentence).not.toContain("Nothing has gone out");
     }
-    // Refused or withdrawn, and known so: nothing went.
-    for (const s of [send("rejected"), send("withdrawn")]) expect(outgoingSoFar(withSend(channel, [s])), s.state).toEqual({ state: "nothing" });
+    // Refused or withdrawn and known so, or a claim never handed over (the council on 5a30b9f), or a claim withdrawn or
+    // expired before its handover, whatever its outcome flag: nothing went.
+    for (const s of [send("rejected"), send("withdrawn"), send("claimed"), send("withdrawn", true, false)]) {
+      expect(outgoingSoFar(withSend(channel, [s])), `${s.state} handed ${String(s.handedAt)}`).toEqual({ state: "nothing" });
+      expect(nextStepSentence(withSend(channel, [s]), ZONE)).toMatch(/^Nothing has gone out yet\./);
+    }
     expect(outgoingSoFar(withSend(channel, [send("handed"), send("sent")]))).toEqual({ state: "sent", channel });
     expect(outgoingSoFar(withSend(channel, [], "sent"))).toEqual({ state: "sent", channel });
     expect(soFarSentence({ state: "sent", channel })).toBe(`${NOUN[channel]} has gone out.`);
