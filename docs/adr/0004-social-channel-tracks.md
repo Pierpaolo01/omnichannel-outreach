@@ -464,6 +464,7 @@ Numbered on from Q50 (ticket 25 uses Q43 to Q49). Each names what is built meanw
 - **Q55. A refused InMail.** *Built:* the track takes the withdrawal path; the profile is not marked bad.
 - **Q56. An acceptance after the wait ended, before the InMail went.** *Built:* the InMail is not sent and the first message follows the connection. The alternative sends the InMail anyway.
 - **Q57. A test run reaching the InMail spends a real credit.** *Built:* included, as the ticket asks, and said on the Test run tab while the fallback is on.
+- **Q58. How old a session's report may be before eligibility is not judged on it.** A session reports with every listing while it is signed in; signed out, it reports nothing, and its last report stands. *Built:* 24 hours (`INMAIL_REPORT_MAX_AGE`). An expiry on an older report takes the withdrawal path (`stale_report`); a chosen InMail waits until a fresh report backs it. Every sentence of eligibility says the report's day. A shorter or longer age is one constant.
 
 ### 13.13 Unverified
 
@@ -506,6 +507,37 @@ Three defects, each reproduced first as a failing test through HTTP (`linkedin-i
 3. **Two concurrent expiries could commit the same last credit.** The evaluation's version guard did not cover the shared InMail standing. *Changed:* an evaluation that judges an InMail also requires the standing of each session it judged to be unchanged at the write (`inmailJudgedSessions`). Otherwise it is discarded and decided again on fresh state, which covers a new report too.
 
 **Fixing the class:** every decision that reads state another subject can change now names that state in the write's guard.
+
+### 13.16 The council on `8b0c846`
+
+Each item was reproduced first through HTTP, in `linkedin-inmail.test.ts` ("credits held by named work", "the step the InMail replaces is named when it is chosen") and `linkedin.test.ts` (item 3). Every one of those tests fails on `8b0c846`.
+
+1. **The step the InMail replaces is named once, at the choice** (`track_progress.inmail_replaces`). It is the first message by its place among every step of the track, removed ones included. Only that step is ever skipped as `inmail_instead`, and only if it is live with no result. The gate reads the same fact. Before, the send took whichever live step read as the first message, so a follow-up the user kept after removing the first message was skipped. This is the other side of 13.15 item 1. *Class:* a fact read at two moments is stored at the first one.
+2. **Items 2, 7 and 8 are one design: a credit is held by a named piece of work** (13.5, rewritten). Before, three places counted credits afresh from counts that did not record who holds what:
+   - two chosen InMails sharing one credit deadlocked (item 2);
+   - a restart restored a commitment it had not acquired (item 7);
+   - a handover ignored a report that came after its claim (item 8).
+3. **A pending invitation stops every step but the InMail and the follow-ups after it, as on the integration tip.** Since 13.3, a `pending` answer from the pre-send check had stopped invites only, so a message to a removed connection with an invitation pending was handed over and refused. Reproduced against the tip first: the tip stops it, `8b0c846` did not. The digest's world `scripts/no-inmail-digest.ts` now scripts the case, and its digest is equal on the tip and here.
+4. **The undo helper derives the migration's version by name**, and the upgrade is tested on a lead the tip left waiting for acceptance (`test/fixtures/upgrade/tip-5c43963-linkedin-waiting.sql`, written by the tip's own code). After the upgrade, its expiry takes the withdrawal path with the fallback null.
+5. **The report's age** (13.5, question Q58).
+6. **Wording.** A chosen InMail is said as chosen and not gone; the next step's line says why it waits. Copy for a lead mentions the InMail path while the fallback is on.
+7. **The open invite is said only while the read says it is open** (`inviteOpen`). An acceptance after the InMail is said on its own line.
+
+**The generated runs** draw, from a fourth stream:
+- a running edit of the messages while an InMail is chosen (the first message removed, a message added, two reordered);
+- a lead with its InMail chosen stopped, then restarted;
+- the session's report changed between an InMail's claim and its handover (no credit, or no plan), with credits returning a day later.
+
+New invariants, asserted by the record:
+- **L22 at the handover:** an InMail is handed over only on a report read by then that has a plan and a credit free.
+- **L23's other side:** every follow-up the user kept goes.
+- **L26:** with `c` credits reported and `n` InMails chosen on a session, `min(c, n)` go; none waits for want of sharing while a credit is free.
+- **L27:** a restart never takes a credit back from a lead that chose while it was stopped.
+
+Mutations, with seeds recorded in `linkedin-mutations.ts`:
+- "the replaced step is found among the live steps at the handover" (L23);
+- "a restart restores a commitment without acquiring" (L27);
+- "the handover does not re-read the report" (L22).
 
 ## The review of `194fc44` (council, review bot and verifier, 16 November 2026)
 
