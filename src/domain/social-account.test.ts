@@ -49,7 +49,7 @@ describe("instagramAccountKey", () => {
 
 describe("facebookAccountKey", () => {
   it("normalises a profile's or a Page's username URL to one key", () => {
-    const key = "https://www.facebook.com/example.harbour.physio";
+    const key = "https://www.facebook.com/exampleharbourphysio";
     for (const url of [
       "https://www.facebook.com/example.harbour.physio",
       "https://www.facebook.com/example.harbour.physio/",
@@ -62,8 +62,16 @@ describe("facebookAccountKey", () => {
     }
   });
 
+  it("reads usernames that differ only in their periods as one account, as Facebook does (the review bot on c072ae8)", () => {
+    const key = facebookAccountKey("https://www.facebook.com/examplejohnsmith55");
+    for (const url of ["https://www.facebook.com/Example.John.Smith55", "https://www.facebook.com/example.john.smith.55/", "https://m.facebook.com/examplejohn.smith55"]) expect(facebookAccountKey(url), url).toBe(key);
+    // Instagram's periods stay part of the name.
+    expect(instagramAccountKey("https://www.instagram.com/example.pat")).not.toBe(instagramAccountKey("https://www.instagram.com/examplepat"));
+  });
+
   it("reads a Page with no username of its own, its name and number joined by dashes, as one", () => {
     expect(facebookAccountKey("https://www.facebook.com/Example-Harbour-Physio-100012345678901/")).toBe("https://www.facebook.com/example-harbour-physio-100012345678901");
+    expect(facebookAccountKey("https://www.facebook.com/Example.Harbour-Physio-100012345678901")).toBe("https://www.facebook.com/exampleharbour-physio-100012345678901");
   });
 
   it("normalises a profile.php address by its number, dropping every other parameter", () => {

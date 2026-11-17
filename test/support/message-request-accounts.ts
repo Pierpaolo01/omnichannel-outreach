@@ -12,7 +12,8 @@ export function exampleAccount(channel: MessageRequestChannel, name: string): st
     case "instagram":
       return `https://www.instagram.com/example_${plain.replace(/[^a-z0-9._]/g, "_")}`;
     case "facebook":
-      return `https://www.facebook.com/example.${plain.replace(/[^a-z0-9.]/g, ".")}`;
+      // Dashes, not periods: Facebook ignores a username's periods, so an address with them is not the account's key.
+      return `https://www.facebook.com/example-${plain.replace(/[^a-z0-9]/g, "-")}`;
     default: {
       const unhandled: never = channel;
       throw new Error(`no example account form for ${String(unhandled)}`);

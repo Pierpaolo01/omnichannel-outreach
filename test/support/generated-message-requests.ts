@@ -110,7 +110,8 @@ const FORMS: { readonly [C in RunChannel]: ChannelForms } = {
       const m = /^\s*https?:\/\/(?:www\.|m\.|web\.)?facebook\.com\/([A-Za-z0-9.-]{1,100})\/?(?:[?#].*)?\s*$/i.exec(raw);
       const name = m?.[1]?.toLowerCase();
       if (!name || name.startsWith(".") || name.endsWith(".") || name.endsWith(".php") || ["groups", "events", "pages", "people", "watch", "marketplace", "login", "share", "sharer", "profile"].includes(name)) return null;
-      return `https://www.facebook.com/${name}`;
+      // Facebook ignores a username's periods: one account however it is dotted.
+      return `https://www.facebook.com/${name.split(".").join("")}`;
     },
   },
 };

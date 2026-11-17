@@ -40,7 +40,8 @@ const FACEBOOK_RESERVED = new Set([
  * `http(s)://(www.|m.|web.)facebook.com/profile.php?id=<digits>`, a profile or Page with no username. Other query
  * parameters and the fragment are dropped. A username is 1 to 100 letters, digits, `.` and `-` (a Page with no username
  * of its own has a name and its number joined by `-`), not starting or ending with `.`, not one of the site's own first
- * segments, and lower-cased. The key is `https://www.facebook.com/<username>` or `https://www.facebook.com/profile.php?id=<digits>`.
+ * segments, and lower-cased. Facebook ignores a username's periods and its case, so the key drops both: it is
+ * `https://www.facebook.com/<username without periods>` or `https://www.facebook.com/profile.php?id=<digits>`.
  * Anything else (empty, a post, a group, an event, a photo, a share link, a `/pages/…` path, another host, a bare handle)
  * is not an account (null).
  */
@@ -57,7 +58,10 @@ export function facebookAccountKey(raw: string): string | null {
   const name = match?.[1]?.toLowerCase();
   if (name === undefined || !/^[a-z0-9.-]{1,100}$/.test(name) || name.startsWith(".") || name.endsWith(".") || !/[a-z0-9]/.test(name)) return null;
   if (FACEBOOK_RESERVED.has(name) || name.endsWith(".php")) return null;
-  return `https://www.facebook.com/${name}`;
+  // Facebook does not tell usernames apart by their periods: `john.smith.55` and `johnsmith55` are one account (the review
+  // bot on c072ae8). The key drops them, so every comparison (a test contact against the import, a conversation's pair, a
+  // bad mark) sees one account. Instagram's usernames keep theirs: there a period is part of the name.
+  return `https://www.facebook.com/${name.replace(/\./g, "")}`;
 }
 
 function httpUrl(raw: string): URL | null {
