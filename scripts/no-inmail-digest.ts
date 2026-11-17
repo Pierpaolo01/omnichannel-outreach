@@ -60,7 +60,9 @@ await h.advanceTo(Date.parse("2026-11-04T12:00:00Z"));
 h.linkedin.profiles.set(profile("pat"), { connectionRemoved: true, pendingElsewhere: true });
 await h.advanceTo(Date.parse("2026-11-20T10:00:00Z"));
 
-const strip = <T extends object>(entries: readonly T[]) => entries.map((e) => JSON.parse(JSON.stringify(e)) as unknown);
+// The simulated provider's own ordering field (`seq`, which ticket 27 added to its logs) is the test double's, not anything a
+// provider was asked or did, so it is left out: the tip's simulated provider has none.
+const strip = <T extends object>(entries: readonly T[]) => entries.map((e) => JSON.parse(JSON.stringify(e, (k, v: unknown) => (k === "seq" ? undefined : v))) as unknown);
 const li = h.linkedin;
 const record = {
   linkedinHandovers: strip(li.handoverLog),

@@ -32,7 +32,8 @@ describe("migration 25 on the integration tip's own database", () => {
     const db = tipDatabase();
     const before = new Map(tables(db).map((t) => [t, { cols: columns(db, t), rows: rowsOf(db, t, columns(db, t)) }]));
     const triggersBefore = db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all().map((r) => String(r["name"]));
-    migrate(db, () => "2026-11-17T09:00:00.000Z");
+    // Migration 25 alone: 26 (the InMail fallback) adds triggers of its own, tested in migration-26.test.ts.
+    migrate(db, () => "2026-11-17T09:00:00.000Z", MIGRATIONS.filter((m) => m.version <= 25));
     expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: 25 });
     for (const [table, was] of before) {
       if (table === "schema_migrations") continue;
