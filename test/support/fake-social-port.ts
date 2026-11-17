@@ -37,6 +37,8 @@ export interface AccountScript {
   rateLimited?: number;
   /** Its next messages are sent but their answer is lost (`unknown`), this many times: only a lookup finds them. */
   loseAnswer?: number;
+  /** Lookups of messages to it answer `unknown` (the thread could not be read), this many times. */
+  lookupUnknown?: number;
 }
 
 export interface SocialDelivery {
@@ -147,7 +149,10 @@ export class FakeSocialPort implements SendPort {
   /** The session reads the thread: the message there is `sent`; none is `not-sent`, which is not final. */
   lookup(ref: AttemptRef): Promise<LookupResult> {
     const d = this.deliveryLog.find((x) => x.key === ref.idempotencyKey);
-    const answer: LookupResult = d ? { kind: "sent", sentAt: d.at, providerRef: d.providerRef } : { kind: "not-sent" };
+    const script = d ? this.accountsScript.get(d.destination) : undefined;
+    const unknown = script?.lookupUnknown !== undefined && script.lookupUnknown > 0;
+    if (script && unknown) script.lookupUnknown = (script.lookupUnknown ?? 0) - 1;
+    const answer: LookupResult = unknown ? { kind: "unknown" } : d ? { kind: "sent", sentAt: d.at, providerRef: d.providerRef } : { kind: "not-sent" };
     this.lookupLog.push({ at: this.now(), key: ref.idempotencyKey, answer: answer.kind });
     return Promise.resolve(answer);
   }

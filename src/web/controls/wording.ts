@@ -10,6 +10,7 @@ import { isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, SOC
 import type { TrackChannelApi, SendChannelApi } from "../../shared/api.ts";
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
 import { clockTime } from "../time.ts";
+import type { AttemptState } from "../../domain/sequence/state.ts";
 import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead, StepWaitApi, StepWhenView } from "../../shared/api.ts";
 import { lowerLabel, stepTitle } from "../../shared/track-label.ts";
 import { callHoldSentence, dateIn, holdReasonClause, HOURS_CLOSED_PHRASE, listedForPhrase } from "../calls/wording.ts";
@@ -217,6 +218,68 @@ function dueOf(lead: Pick<RecordLead, "tracks">, step: ControlStepView): StepWhe
 }
 
 /**
+ * What of this lead's outreach has left the app (verifier on f2824d4, item 10): three states on every channel, never two.
+ * `nothing`: nothing handed to any provider. `unknown`: something handed over that is not yet known to have gone (handed,
+ * accepted, claimed or unresolved): it may have reached them, so "nothing has gone out" would be untrue. `sent`: something
+ * is recorded sent. Each names the channel of the work it speaks of.
+ */
+export type OutgoingSoFar = { readonly state: "nothing" } | { readonly state: "unknown"; readonly channel: TrackChannelApi } | { readonly state: "sent"; readonly channel: TrackChannelApi };
+
+export function outgoingSoFar(lead: Pick<RecordLead, "tracks">): OutgoingSoFar {
+  let unknown: TrackChannelApi | null = null;
+  for (const track of lead.tracks) {
+    for (const step of track.steps) {
+      for (const send of step.sends) {
+        const state: AttemptState = send.state;
+        switch (state) {
+          case "sent":
+            return { state: "sent", channel: track.channel };
+          case "claimed":
+          case "handed":
+          case "accepted":
+            unknown ??= track.channel;
+            break;
+          case "rejected":
+          case "withdrawn":
+            if (send.unresolved) unknown ??= track.channel;
+            break;
+          default: {
+            const unhandled: never = state;
+            throw new Error(`An attempt state with no meaning here: ${String(unhandled)}`);
+          }
+        }
+      }
+      if (step.result === "sent") return { state: "sent", channel: track.channel };
+    }
+  }
+  return unknown === null ? { state: "nothing" } : { state: "unknown", channel: unknown };
+}
+
+/** What a handed-over piece of work is on each channel, as the sentence names it. */
+const HANDED_NOUN: Readonly<Record<TrackChannelApi, string>> = {
+  email: "An email",
+  sms: "A text",
+  call: "A call",
+  linkedin: "A LinkedIn invite or message",
+  ...(Object.fromEntries(MESSAGE_REQUEST_CHANNELS.map((c) => [c, `An ${SOCIAL_CHANNELS[c].name} message`])) as Record<MessageRequestChannel, string>),
+};
+
+export function soFarSentence(soFar: OutgoingSoFar): string {
+  switch (soFar.state) {
+    case "nothing":
+      return "Nothing has gone out yet.";
+    case "unknown":
+      return `${HANDED_NOUN[soFar.channel]} was handed over, and it isn’t known yet whether it went.`;
+    case "sent":
+      return `${HANDED_NOUN[soFar.channel]} has gone out.`;
+    default: {
+      const unhandled: never = soFar;
+      throw new Error(`A state with no sentence: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+/**
  * The plain sentence under a campaign row's status (spec "Person page", 2): where the lead stands and what comes next,
  * from the record's read of the enrollment. Every status has one; the record, and anything else that says a lead's
  * status in a sentence, uses this one function.
@@ -237,7 +300,7 @@ export function nextStepSentence(lead: RecordLead, userZone: string): string {
   switch (status) {
     case "queued":
       if (!lead.campaignState.launched) return "Nothing goes out until this campaign launches.";
-      return join("Nothing has gone out yet.", next() || (campaignPaused ? frozen : ""));
+      return join(soFarSentence(outgoingSoFar(lead)), next() || (campaignPaused ? frozen : ""));
     case "active":
     case "in_win_back":
       return next() || (campaignPaused ? frozen : status === "in_win_back" ? "In this campaign’s win-back branch." : "Their outreach is running.");

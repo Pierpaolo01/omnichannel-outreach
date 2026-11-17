@@ -7,7 +7,7 @@ import { messageRequestStepKind, type CampaignDefinition, type TrackDefinition }
 
 /** Ticket 25 (ADR 0004 13.3, 13.4, 13.8): the record's Instagram sentences, each from a stored fact. */
 const VIEW: MessageRequestTrackView = { destination: "own", address: "https://www.instagram.com/example_pat", firstMessage: null, sender: null, skipCause: null };
-const track = (view: Partial<MessageRequestTrackView>, finishReason: TrackProgressView["finishReason"] = null) => ({ channel: "instagram", finishReason, messageRequest: { ...VIEW, ...view } });
+const track = (view: Partial<MessageRequestTrackView>, finishReason: TrackProgressView["finishReason"] = null) => ({ channel: "instagram" as const, finishReason, messageRequest: { ...VIEW, ...view } });
 
 describe("the record's Instagram lines", () => {
   test("“went” only for a first message recorded sent; one handed over is said as not known; nothing about acceptance is promised", () => {

@@ -4,8 +4,9 @@ import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { FakeSocialSession } from "../../../test/support/fake-social-port.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
-import type { ActivityView, CampaignMeasures, EnrollmentProgress, EnrollmentRead, LeadSearchResult, NeedsAttention, SocialProvidersStatus } from "../../shared/api.ts";
+import type { ActivityView, CampaignMeasures, EnrollmentProgress, EnrollmentRead, LeadSearchResult, NeedsAttention, RecordControls, SocialProvidersStatus } from "../../shared/api.ts";
 import { noUsableChannelItem } from "../../web/calls/interruption.ts";
+import { nextStepSentence, outgoingSoFar } from "../../web/controls/wording.ts";
 
 /**
  * The Instagram track (ticket 25, ADR 0004 section 13) through the real HTTP app, SQLite store and engine, against the
@@ -172,6 +173,24 @@ describe("refusals and lost answers (ADR 0004 13.3)", () => {
     expect((await progress(c.lead("Pat Oneil"))).tracks.find((t) => t.trackId === "ig")?.messageRequest?.firstMessage).toBe("sent");
     await h.advanceTo(MONDAY_9 + 3 * DAY);
     expect(delivered(PAT_OWN).map((d) => d.stepId)).toEqual(["m1", "m2"]);
+  });
+});
+
+describe("a message handed over whose answer is not known (verifier on f2824d4, item 10)", () => {
+  test("delivered, its answer lost and the lookup still unknown: the record never says nothing has gone out", async () => {
+    const { h, campaign, delivered } = await world({ people: [PEOPLE[0]!], businesses: [BUSINESSES[0]!] });
+    h.instagram.accountsScript.set(PAT_OWN, { loseAnswer: 1, lookupUnknown: 1_000 });
+    const c = await campaign([instagram("ig", three())]);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    // The simulated session's log shows it delivered; the engine cannot know yet.
+    expect(delivered(PAT_OWN).map((d) => d.stepId)).toEqual(["m1"]);
+    const person = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows[0]!.id;
+    const record = (await h.request<RecordControls>("GET", `/api/people/${person}`)).body;
+    const lead = record.leads.find((l) => l.id === c.lead("Pat Oneil"))!;
+    expect(outgoingSoFar(lead)).toEqual({ state: "unknown", channel: "instagram" });
+    const sentence = nextStepSentence(lead, record.userZone);
+    expect(sentence).toMatch(/^An Instagram message was handed over, and it isn’t known yet whether it went\./);
+    expect(sentence).not.toContain("Nothing has gone out");
   });
 });
 

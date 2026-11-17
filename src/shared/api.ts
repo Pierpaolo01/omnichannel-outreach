@@ -662,7 +662,7 @@ export interface MessageRequestTrackView {
 
 export interface TrackProgressView {
   readonly trackId: string;
-  readonly channel: string;
+  readonly channel: TrackChannelApi;
   /** The main sequence, or the campaign's win-back branch (ticket 16). */
   readonly branch: "main" | "win_back";
   readonly started: boolean;
