@@ -319,6 +319,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const fallbackOn = (d: CampaignDefinition, ci: number) => d.tracks.some((t) => t.id === campaigns[ci]!.li.id && t.steps.some((s) => s.role === "inmail" && !s.removed));
   const switches = new Map<number, { at: number; on: boolean }[]>(campaigns.map((c, i) => [i, [{ at: -Infinity, on: fallbackOn(c.definition, i) }]]));
   const fallbackAt = (ci: number, at: number) => (switches.get(ci) ?? []).filter((x) => x.at <= at).at(-1)?.on ?? false;
+  /** The switch as the expiry judged it: an edit at the deadline's own instant comes after that instant's tick (seed 24006). */
+  const fallbackJudgedAt = (ci: number, at: number) => (switches.get(ci) ?? []).filter((x) => x.at < at).at(-1)?.on ?? false;
   const noteSwitch = (ci: number, d: CampaignDefinition) => {
     const on = fallbackOn(d, ci);
     if (on !== fallbackAt(ci, h.clock)) switches.get(ci)!.push({ at: h.clock, on });
@@ -355,16 +357,28 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     }
     return { span, clampedAt };
   };
-  /** A session's credits by the record (13.5): its first report, less every InMail the session delivered, zero after a spend by hand. */
+  /**
+   * A session's credits as the engine can know them at `at` (13.5): the last report the session gave by then (a signed-out
+   * session reports nothing, so its last report stands; seed 24016), less the InMails it delivered at or after that report.
+   */
   const creditsAt = (session: string, at: number): number => {
-    const start = inmailPlans.get(session)?.credits ?? 0;
-    const events = [
-      ...h.linkedin.deliveryLog.filter((d) => d.action === "inmail" && d.sender === session && d.at <= at).map((d) => ({ at: d.at, drop: false })),
-      ...creditDrops.filter((x) => x.session === session && x.at <= at).map((x) => ({ at: x.at, drop: true })),
-    ].sort((a, b) => a.at - b.at);
-    let credits = start;
-    for (const e of events) credits = e.drop ? 0 : Math.max(0, credits - 1);
-    return credits;
+    const report = h.linkedin.inmailReportLog.filter((r) => r.session === session && r.at <= at).at(-1);
+    if (!report) return 0;
+    const since = h.linkedin.deliveryLog.filter((d) => d.action === "inmail" && d.sender === session && d.at >= report.at && d.at <= at).length;
+    return Math.max(0, report.credits - since);
+  };
+  /**
+   * The deadline the expiry judged at (13.3): an edit of the wait moves it only while the lead still waits, so an edit at or
+   * after the deadline it would have had is not applied (the InMail already judged; seed 24016).
+   */
+  const judgedDeadline = (lead: Lead, sentAt: number): number => {
+    let until = sentAt;
+    for (const e of [...(waitEdits.get(lead.campaign) ?? [])].sort((a, b) => a.at - b.at)) {
+      if (e.at <= sentAt) continue;
+      if (deadlineWall(lead, sentAt, until) <= e.at) break;
+      until = e.at;
+    }
+    return deadlineWall(lead, sentAt, until);
   };
   const planned = (session: string) => {
     const plan = inmailPlans.get(session)?.plan;
@@ -535,7 +549,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
         continue;
       }
       // L20: never before the record's own deadline.
-      const deadline = deadlineWall(lead, invite.at, x.at);
+      const deadline = judgedDeadline(lead, invite.at);
       if (x.at < deadline) problem(`L20: ${x.subjectId}'s InMail was handed over at ${iso(x.at)}, before the deadline ${iso(deadline)}`);
       // L21: never after the person accepted (the session would have found them connected), nor once connected in time.
       const acceptance = li.acceptanceLog.find((a) => a.key === invite.key);
@@ -549,13 +563,15 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       const tp = st?.tracks.find((x) => x.trackId === c.li.id);
       const invite = inviteOf(lead.id);
       if (!st || !tp || !invite) continue;
-      const deadline = deadlineWall(lead, invite.at, tp.finishedWall ?? now);
+      const deadline = judgedDeadline(lead, invite.at);
+      // A deadline the record cannot place (a hold still open where the lead's clock would reach it): nothing to judge by.
+      if (!Number.isFinite(deadline)) continue;
       const sender = invite.sender;
       const state = tp.inmail ?? null;
       const judged = state !== null;
       // L19, at the expiry: judged only with the fallback on then; with it on and no connection, never ignored.
-      if (judged && state !== "accepted" && !fallbackAt(lead.campaign, deadline)) problem(`L19: ${lead.id}'s InMail fallback was judged (${state}) though it was off at the deadline ${iso(deadline)}`);
-      if (!judged && tp.finishReason === "invite_not_accepted" && fallbackAt(lead.campaign, deadline) && !li.deliveryLog.some((x) => x.subjectId === lead.id && x.action !== "invite")) {
+      if (judged && state !== "accepted" && !fallbackJudgedAt(lead.campaign, deadline)) problem(`L19: ${lead.id}'s InMail fallback was judged (${state}) though it was off at the deadline ${iso(deadline)}`);
+      if (!judged && tp.finishReason === "invite_not_accepted" && fallbackJudgedAt(lead.campaign, deadline) && !li.deliveryLog.some((x) => x.subjectId === lead.id && x.action !== "invite")) {
         // Edited out after the deadline is the only way the record allows (none happens while the lead's clock stands still).
         problem(`L19: ${lead.id}'s invite expired with the fallback on and no InMail judged`);
       }
@@ -571,7 +587,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           const ot = (await h.store.engine.subject(o.id, now))?.tracks.find((x) => x.trackId === campaigns[o.campaign]!.li.id);
           const oi = inviteOf(o.id);
           if (!ot || !oi || oi.sender !== sender || ot.inmail == null || ot.inmail === "no_plan" || ot.inmail === "no_credit") continue;
-          const od = deadlineWall(o, oi.at, ot.finishedWall ?? now);
+          const od = judgedDeadline(o, oi.at);
           const spent = li.deliveryLog.some((x) => x.subjectId === o.id && x.action === "inmail" && x.at <= deadline) || li.refusals.some((r) => r.at <= deadline && li.handoverLog.some((y) => y.key === r.key && y.subjectId === o.id && y.action === "inmail"));
           if (od <= deadline && !spent) committed++;
         }
@@ -819,7 +835,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
             const t = st?.tracks.find((x) => x.trackId === c.li.id);
             const invite = h.linkedin.deliveryLog.find((x) => x.subjectId === l.id && x.action === "invite" && x.visibleAt !== Infinity);
             const sent = st?.results.find((r) => r.trackId === c.li.id && r.stepId === c.li.steps[0]!.id && r.result === "sent");
-            if (!st || !t || !invite || !sent || t.finishedAt !== null || (t.connection ?? null) !== null || t.acceptBy == null) continue;
+            // A lead whose InMail fallback the expiry already judged waits no more (13.3): its deadline is spent.
+            if (!st || !t || !invite || !sent || t.finishedAt !== null || (t.connection ?? null) !== null || t.acceptBy == null || (t.inmail ?? null) !== null) continue;
             const { span } = deadlineOf(l, invite.at, h.clock);
             if (t.acceptBy !== sent.at + span) problem(`L8: after the wait was edited to ${days} days at ${iso(h.clock)}, ${l.id}'s deadline is ${t.acceptBy - sent.at} ms of its clock after the send, not ${span}`);
             else features.add("a-deadline-checked-at-an-edit");
