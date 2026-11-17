@@ -5,7 +5,7 @@ import { skipLimitOf } from "../../domain/sequence/calls.ts";
 import { MERGE_FIELDS } from "../../domain/sequence/copy.ts";
 import { NO_WIN_BACK_BRANCH, declinedPathOf, winBackAvailable, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import { isMessageRequestChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
-import { messageRequestLimits, messageRequestNote } from "./message-request-wording.ts";
+import { anotherTrackChoseOtherSessions, messageRequestLimits, messageRequestNote, twoTracksNote } from "./message-request-wording.ts";
 import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, LinkedinProviderStatus, SequenceView, SmsProviderStatus, SocialProvidersStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
 import { stepTitle } from "../../shared/track-label.ts";
 import { useApi } from "../api.ts";
@@ -1496,7 +1496,7 @@ function TimingAndSender({ track, editor, onWindow, onSenders }: { track: TrackD
               <div className="text-[12.5px] text-muted">Launch is blocked while this track has no session.</div>
             </>
           ) : request ? (
-            <SenderChoice track={track} accounts={accounts} locked={locked} onChange={(senders) => onSenders?.(senders)} />
+            <SenderChoice track={track} accounts={accounts} locked={locked} otherTracks={anotherTrackChoseOtherSessions(editor.draft.tracks, track)} onChange={(senders) => onSenders?.(senders)} />
           ) : accounts.length === 0 ? (
             <>
               <span className="font-semibold text-crit">{sms ? "No connected SMS number." : "No connected sender inbox."}</span>
@@ -1715,7 +1715,7 @@ function LinkedinProviderReason() {
  * added by itself; a chosen session the provider no longer reports stays chosen and says that it sends nothing until it is
  * connected again. None chosen is launch blocker 3, said here as such.
  */
-function SenderChoice({ track, accounts, locked, onChange }: { track: TrackDefinition; accounts: readonly SequenceView["accounts"][number][]; locked: boolean; onChange: (senders: readonly string[]) => void }) {
+function SenderChoice({ track, accounts, locked, otherTracks, onChange }: { track: TrackDefinition; accounts: readonly SequenceView["accounts"][number][]; locked: boolean; otherTracks: boolean; onChange: (senders: readonly string[]) => void }) {
   const chosen = track.senders ?? [];
   const legendId = useId();
   const listed = new Set(accounts.map((a) => a.id));
@@ -1752,6 +1752,7 @@ function SenderChoice({ track, accounts, locked, onChange }: { track: TrackDefin
       ) : (
         <p className="text-[12.5px] text-muted">Only the sessions you tick start this track’s conversations. A lead already started keeps the session of its first message. A session connected later isn’t added by itself.</p>
       )}
+      {otherTracks && <p className="text-[12.5px] text-muted">{twoTracksNote(name)}</p>}
     </fieldset>
   );
 }

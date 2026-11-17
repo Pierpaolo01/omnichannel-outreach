@@ -4,7 +4,7 @@
  * (`trackId`, or for a merge field every message that uses it with no fallback), and by that track's
  * own channel and order ("the SMS track", "email track 2"), never by its position or a default channel.
  */
-import { isMessageRequestChannel, isSocialChannel, SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
+import { isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
 import type { CampaignDefinition, LaunchBlocker, LinkedinProviderStatus, SmsProviderStatus, TrackDefinition } from "../../shared/api.ts";
 import { stepTitle } from "../../shared/track-label.ts";
 import { fieldLabel, STEP_NOUN, trackName } from "./model.ts";
@@ -80,4 +80,44 @@ export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition, sms: 
     detail: channel === "sms" ? ["It can’t send until a number is connected.", whyNoSmsNumber(sms), "Remove the track to launch without it."].filter((x) => x !== null).join(" ") : "It can’t send until an inbox is connected.",
     actions: [{ label: "Open track", trackId: b.trackId }],
   };
+}
+
+/**
+ * Each way launch can be blocked, as Before launch names it when nothing blocks (the council on 5a30b9f, item 3): one entry
+ * per blocker the domain has, and the no-sender blocker's "none chosen" case of its own, so a new blocker fails typecheck here
+ * until both sentences name it. `cause`: what blocks; `holds`: what is true when it does not, for this definition (null when
+ * the campaign has nothing it applies to).
+ */
+type BlockerCase = LaunchBlocker["kind"] | "no_sender_chosen";
+const BLOCKER_CASES: Readonly<Record<BlockerCase, { readonly cause: string; readonly holds: (def: CampaignDefinition) => string | null }>> = {
+  empty_copy: { cause: "empty copy", holds: () => "every message has copy" },
+  missing_merge_field: { cause: "a merge field with no fallback that a lead lacks", holds: () => "every merge field has a fallback where a lead lacks it" },
+  no_sender: { cause: "no connected sender", holds: (def) => `every ${senderTracksPhrase(def)} has a sender` },
+  no_sender_chosen: {
+    cause: `${MESSAGE_REQUEST_CHANNELS.map((c) => `an ${SOCIAL_CHANNELS[c].name}`).join(" or ")} track with no sender session chosen`,
+    holds: (def) => {
+      const names = MESSAGE_REQUEST_CHANNELS.filter((c) => def.tracks.some((t) => !t.removed && t.channel === c)).map((c) => SOCIAL_CHANNELS[c].name);
+      return names.length === 0 ? null : `every ${names.join(" and ")} track has a sender session chosen`;
+    },
+  },
+};
+const listed = (parts: readonly string[], last: "and" | "or") => (parts.length <= 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join(", ")}${parts.length > 2 ? "," : ""} ${last} ${parts.at(-1) ?? ""}`);
+
+/** The tracks that need a sender, by channel, in a sentence: "email, SMS and Instagram track". */
+export function senderTracksPhrase(def: CampaignDefinition): string {
+  const has = (c: string) => def.tracks.some((t) => !t.removed && t.channel === c);
+  const words = ["email", "SMS", ...SOCIAL_CHANNEL_LIST.filter(has).map((c) => SOCIAL_CHANNELS[c].name)];
+  return `${words.slice(0, -1).join(", ")} and ${words.at(-1) ?? ""} track`;
+}
+
+/** With no track yet: everything that can block launch once there is one, from every blocker the domain has. */
+export function blockedOnlyBy(): string {
+  return `With a track, launch is blocked only by ${listed(Object.values(BLOCKER_CASES).map((c) => c.cause), "or")}.`;
+}
+
+/** With tracks and no blocker: what holds, for each blocker that applies to this definition. */
+export function nothingBlocks(def: CampaignDefinition): string {
+  const parts = Object.values(BLOCKER_CASES).flatMap((c) => c.holds(def) ?? []);
+  const sentence = listed(parts, "and");
+  return `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`;
 }

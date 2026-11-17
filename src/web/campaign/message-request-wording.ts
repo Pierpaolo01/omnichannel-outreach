@@ -1,4 +1,4 @@
-import type { MessageRequestTrackView, TrackProgressView } from "../../shared/api.ts";
+import type { MessageRequestTrackView, TrackDefinition, TrackProgressView } from "../../shared/api.ts";
 import { isMessageRequestChannel, SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
 
 /**
@@ -74,16 +74,23 @@ export function messageRequestWarnings(
   counts: { readonly own: number; readonly company: number; readonly shared: { readonly accounts: number; readonly leads: number } },
   tracks: string,
   hasAfter: boolean,
-  sessionsChosen: number,
+  /** Each live track on the channel, by its label, with how many sessions that track chose (the council on 5a30b9f, item 3). */
+  perTrack: readonly { readonly label: string; readonly sessions: number }[],
 ): { title: string; detail: string }[] {
   const out: { title: string; detail: string }[] = [];
   const none = leads - counts.own - counts.company;
   if (none > 0) out.push({ title: `${none} ${none === 1 ? "lead has" : "leads have"} no ${name} account to message`, detail: `They skip ${tracks}${hasAfter ? ", and the tracks after it start sooner" : ""}. A decision maker’s own account from the import counts, else their company’s.` });
   if (counts.shared.accounts > 0) {
-    const each = sessionsChosen <= 1 ? "one first message from each track: the first lead to reach it keeps it, and the others are skipped" : `up to ${sessionsChosen} first messages from each track, one from each session chosen there, each about a different lead`;
+    const firsts = (n: number) => (n <= 1 ? "one first message: the first lead to reach it keeps it, and the others are skipped" : `up to ${n} first messages, one from each session chosen there, each about a different lead`);
+    // Said per track, from each track's own choice: one count for all only when every track chose as many.
+    const chosen = [...new Set(perTrack.map((t) => t.sessions))];
+    const each =
+      chosen.length <= 1
+        ? `${firsts(chosen[0] ?? 0).replace(/^(one first message|up to \d+ first messages)/, `$1 from ${perTrack.length > 1 ? "each track" : "the track"}`)}`
+        : `: ${perTrack.map((t) => `from ${t.label}, ${firsts(t.sessions)}`).join("; ")}`;
     out.push({
       title: `${counts.shared.leads} leads share ${counts.shared.accounts} company ${name} ${counts.shared.accounts === 1 ? "account" : "accounts"}`,
-      detail: `They have no account of their own, so their messages go to their company’s. Each such account can get ${each}.`,
+      detail: `They have no account of their own, so their messages go to their company’s. Each such account can get${each.startsWith(":") ? "" : " "}${each}.`,
     });
   }
   return out;
@@ -111,4 +118,22 @@ export function messageRequestReason(name: string, reason: string): string | nul
       throw new Error(`A reason with no sentence: ${String(unhandled)}`);
     }
   }
+}
+
+/**
+ * Whether another live track of the campaign on this channel chose a session this track did not (the council on 5a30b9f,
+ * item 3): then a lead in both tracks hears from each track's own session.
+ */
+export function anotherTrackChoseOtherSessions(tracks: readonly Pick<TrackDefinition, "id" | "channel" | "removed" | "senders">[], track: Pick<TrackDefinition, "id" | "channel" | "senders">): boolean {
+  const mine = new Set(track.senders ?? []);
+  return tracks.some((t) => t.id !== track.id && !t.removed && t.channel === track.channel && (t.senders ?? []).some((s) => !mine.has(s)));
+}
+
+/**
+ * What the application does for a lead in two tracks of one message-request channel (ADR 0004 13.6; Q46 is with the
+ * principal): each track messages the lead from its own session, so two sessions hold two conversations with that account;
+ * one session holds one. Said as what happens now, with no promise about later.
+ */
+export function twoTracksNote(name: string): string {
+  return `Another ${name} track of this campaign chose a session this one didn’t. A lead in both tracks is messaged by each track from its own session, as two separate conversations with that account. Tracks sending from the same session share one conversation.`;
 }

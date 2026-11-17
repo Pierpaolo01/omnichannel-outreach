@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { MessageRequestTrackView, TrackProgressView } from "../../shared/api.ts";
-import { messageRequestLimits, messageRequestTrackLines, messageRequestWarnings } from "./message-request-wording.ts";
+import { anotherTrackChoseOtherSessions, messageRequestLimits, messageRequestTrackLines, messageRequestWarnings, twoTracksNote } from "./message-request-wording.ts";
 import { markRepliedWords, channelOfMark, markRepliedControl } from "./reply-mark-wording.ts";
 import { MESSAGE_REQUEST_STEP_KIND_AT, stepTitle, trackLabel } from "../../shared/track-label.ts";
 import { messageRequestStepKind, type CampaignDefinition, type TrackDefinition } from "../../domain/sequence/definition.ts";
@@ -73,22 +73,47 @@ describe("Before launch says an Instagram session in Instagram's words (found in
 describe("leads sharing a company's account, on Before launch and in the inspector (verifier on f2824d4, item 4)", () => {
   const counts = (accounts: number, leads: number) => ({ own: 1, company: leads, shared: { accounts, leads } });
   test("how many leads share how many accounts, and that each account may hear from up to as many of the track's sessions as are chosen", () => {
-    expect(messageRequestWarnings("Instagram", 8, counts(2, 7), "the Instagram track", false, 3)).toEqual([
+    expect(messageRequestWarnings("Instagram", 8, counts(2, 7), "the Instagram track", false, [{ label: "Instagram track", sessions: 3 }])).toEqual([
       {
         title: "7 leads share 2 company Instagram accounts",
-        detail: "They have no account of their own, so their messages go to their company’s. Each such account can get up to 3 first messages from each track, one from each session chosen there, each about a different lead.",
+        detail: "They have no account of their own, so their messages go to their company’s. Each such account can get up to 3 first messages from the track, one from each session chosen there, each about a different lead.",
       },
     ]);
-    expect(messageRequestWarnings("Instagram", 6, counts(1, 5), "the Instagram track", false, 1)[0]).toEqual({
+    expect(messageRequestWarnings("Instagram", 6, counts(1, 5), "the Instagram track", false, [{ label: "Instagram track", sessions: 1 }])[0]).toEqual({
       title: "5 leads share 1 company Instagram account",
-      detail: "They have no account of their own, so their messages go to their company’s. Each such account can get one first message from each track: the first lead to reach it keeps it, and the others are skipped.",
+      detail: "They have no account of their own, so their messages go to their company’s. Each such account can get one first message from the track: the first lead to reach it keeps it, and the others are skipped.",
     });
-    expect(messageRequestWarnings("Instagram", 2, counts(0, 0), "the Instagram track", false, 2)).toEqual([{ title: "1 lead has no Instagram account to message", detail: expect.any(String) as string }]);
+    expect(messageRequestWarnings("Instagram", 2, counts(0, 0), "the Instagram track", false, [{ label: "Instagram track", sessions: 2 }])).toEqual([{ title: "1 lead has no Instagram account to message", detail: expect.any(String) as string }]);
+  });
+
+  test("several tracks: one count when each chose as many sessions, else each track's own (the council on 5a30b9f, item 3)", () => {
+    const same = messageRequestWarnings("Instagram", 8, counts(2, 7), "the Instagram tracks", false, [{ label: "Instagram track 1", sessions: 2 }, { label: "Instagram track 2", sessions: 2 }]);
+    expect(same[0]?.detail).toContain("up to 2 first messages from each track, one from each session chosen there");
+    const different = messageRequestWarnings("Instagram", 8, counts(2, 7), "the Instagram tracks", false, [{ label: "Instagram track 1", sessions: 3 }, { label: "Instagram track 2", sessions: 1 }]);
+    expect(different[0]?.detail).toBe(
+      "They have no account of their own, so their messages go to their company’s. Each such account can get: from Instagram track 1, up to 3 first messages, one from each session chosen there, each about a different lead; from Instagram track 2, one first message: the first lead to reach it keeps it, and the others are skipped.",
+    );
   });
 
   test("the inspector says the same limit for the same number of chosen sessions", () => {
     expect(messageRequestLimits("Instagram", 3)[2]).toContain("up to 3 first messages from this track, one from each session you chose, each about a different lead");
     expect(messageRequestLimits("Instagram", 1)[2]).toContain("one first message from this track: the first lead to reach it keeps it, and the others are skipped here");
     expect(messageRequestLimits("Instagram", 0)[2]).toContain("one first message from this track");
+  });
+});
+
+describe("two Instagram tracks of one campaign, in the inspector (the council on 5a30b9f, item 3)", () => {
+  const t = (id: string, senders: string[], removed = false) => ({ id, channel: "instagram" as const, removed, senders });
+  test("said when another live track chose a session this one did not, never otherwise", () => {
+    expect(anotherTrackChoseOtherSessions([t("a", ["s1"]), t("b", ["s2"])], t("a", ["s1"]))).toBe(true);
+    expect(anotherTrackChoseOtherSessions([t("a", ["s1", "s2"]), t("b", ["s2"])], t("a", ["s1", "s2"]))).toBe(false);
+    expect(anotherTrackChoseOtherSessions([t("a", ["s1"]), t("b", ["s1"])], t("a", ["s1"]))).toBe(false);
+    expect(anotherTrackChoseOtherSessions([t("a", ["s1"]), t("b", ["s2"], true)], t("a", ["s1"]))).toBe(false);
+    expect(anotherTrackChoseOtherSessions([t("a", ["s1"])], t("a", ["s1"]))).toBe(false);
+  });
+  test("what the application does now: each track from its own session, two conversations; one session, one conversation", () => {
+    expect(twoTracksNote("Instagram")).toBe(
+      "Another Instagram track of this campaign chose a session this one didn’t. A lead in both tracks is messaged by each track from its own session, as two separate conversations with that account. Tracks sending from the same session share one conversation.",
+    );
   });
 });

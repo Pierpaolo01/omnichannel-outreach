@@ -1,4 +1,4 @@
-import { isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
+import { isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
 import { messageRequestWarnings } from "./message-request-wording.ts";
 import type { TrackChannelApi } from "../../shared/api.ts";
 import { useId, useRef, useState, type ReactNode } from "react";
@@ -10,7 +10,7 @@ import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
 import { campaignPath, longDate } from "../pages/CampaignPage.tsx";
 import { fieldLabel, sendsOnItsOwn, trackName, trackTitle } from "./model.ts";
-import { describeBlocker } from "./blocker-wording.ts";
+import { blockedOnlyBy, describeBlocker, nothingBlocks } from "./blocker-wording.ts";
 import { CANNOT_SEND, ConflictNotice } from "./SequenceTab.tsx";
 import type { SequenceEditor } from "./useSequence.ts";
 import { withheldExplanation } from "./withheld.ts";
@@ -20,12 +20,6 @@ import { withheldExplanation } from "./withheld.ts";
  * fields, the projected daily load, and the copy rendered for one real lead at a time.
  */
 /** "email and SMS track", "email, SMS and LinkedIn track": the sending channels the definition has tracks on, for one sentence. */
-function senderTracksPhrase(def: CampaignDefinition): string {
-  const has = (c: string) => def.tracks.some((t) => !t.removed && t.channel === c);
-  const words = ["email", "SMS", ...SOCIAL_CHANNEL_LIST.filter(has).map((c) => SOCIAL_CHANNELS[c].name)];
-  return `${words.slice(0, -1).join(", ")} and ${words.at(-1)} track`;
-}
-
 export function BeforeLaunchTab({ campaignId, editor }: { campaignId: string; editor: SequenceEditor }) {
   const version = editor.view.definitionVersion;
   const { result, retry } = useApi<BeforeLaunchView>(`/api/campaigns/${encodeURIComponent(campaignId)}/before-launch?v=${version}${editor.launched ? "&launched" : ""}`);
@@ -184,7 +178,7 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
           <span>
             <b className="font-semibold">{nothingToLaunch ? "No track yet." : "Nothing blocks launch."}</b>
             <span className="block text-ink-2">
-              {nothingToLaunch ? "With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, or no connected sender." : `Every message has copy, every merge field has a fallback where a lead lacks it, and every ${senderTracksPhrase(editor.view.definition)} has a sender.`}
+              {nothingToLaunch ? blockedOnlyBy() : nothingBlocks(editor.view.definition)}
             </span>
           </span>
         </div>
@@ -240,7 +234,8 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
   }
   for (const c of MESSAGE_REQUEST_CHANNELS) {
     if (!live.some((t) => t.channel === c)) continue;
-    items.push(...messageRequestWarnings(SOCIAL_CHANNELS[c].name, facts.coverage.leads, facts.coverage.social[c], tracksOn(c), after(c), Math.max(0, ...live.filter((t) => t.channel === c).map((t) => (t.senders ?? []).length))));
+    const perTrack = live.filter((t) => t.channel === c).map((t) => ({ label: trackLabel(editor.view.definition, t).label, sessions: (t.senders ?? []).length }));
+    items.push(...messageRequestWarnings(SOCIAL_CHANNELS[c].name, facts.coverage.leads, facts.coverage.social[c], tracksOn(c), after(c), perTrack));
   }
   if (live.some((t) => t.channel === "linkedin") && noProfile > 0) {
     items.push({ title: `${noProfile} ${noProfile === 1 ? "lead has" : "leads have"} no LinkedIn profile`, detail: `They skip ${tracksOn("linkedin")}${after("linkedin") ? ", and the tracks after it start sooner" : ""}. Only a decision maker’s member profile from the import counts: company leads and company pages are never invited.` });
