@@ -1254,16 +1254,41 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   /**
-   * The windows of every live track on the account's channel whose pool includes it (ADR 0003 4.1's default gap). On a
-   * message-request channel, the tracks that chose this session, a removed one too, since a lead that started it still runs
-   * it (the review bot on 0922582); the pacing only, as a session no track serves still sends at the minute's gap.
+   * The windows of the tracks that pace this account (ADR 0003 4.1's default gap): the tracks with leads running on it (the
+   * council on 5a30b9f, item 2). On a message-request channel, the live tracks that chose the session; on LinkedIn, the live
+   * LinkedIn tracks of a campaign whose pool holds it; on either, also every track a running lead fixed to this account has
+   * started and not finished, a removed or unticked one included, and only while it has. Email and SMS keep their rule: the
+   * live tracks of a campaign whose pool holds it.
    */
   private windowsServedBy(accountId: string, channel: SendChannel): WindowRule[][] {
-    const definitions = this.sql("SELECT * FROM campaigns WHERE definition IS NOT NULL")
+    const campaigns = this.sql("SELECT * FROM campaigns WHERE definition IS NOT NULL")
       .all()
-      .map((c) => this.definitionOf(c));
-    if (isMessageRequestChannel(channel)) return definitions.flatMap((d) => d.tracks.filter((t) => t.channel === channel && (t.senders ?? []).includes(accountId)).map((t) => [...t.window]));
-    return definitions.filter((d) => poolOf(d, channel).includes(accountId)).flatMap((d) => d.tracks.filter((t) => !t.removed && t.channel === channel).map((t) => [...t.window]));
+      .map((c) => ({ id: str(c, "id"), def: this.definitionOf(c) }));
+    if (channel !== "linkedin" && !isMessageRequestChannel(channel)) {
+      return campaigns.filter(({ def }) => poolOf(def, channel).includes(accountId)).flatMap(({ def }) => def.tracks.filter((t) => !t.removed && t.channel === channel).map((t) => [...t.window]));
+    }
+    // The tracks running leads are fixed to this account on: started, not finished, their lead not ended.
+    const fixed = new Set(
+      (channel === "linkedin"
+        ? this.sql(
+            `SELECT s.campaign_id, t.track_id FROM (SELECT id, campaign_id FROM enrollments WHERE linkedin_sender = :acc AND ended IS NULL
+               UNION ALL SELECT id, campaign_id FROM test_runs WHERE linkedin_sender = :acc AND ended IS NULL) s
+             JOIN track_progress t ON t.subject_id = s.id AND t.started_at IS NOT NULL AND t.finished_at IS NULL`,
+          ).all({ acc: accountId })
+        : this.sql(
+            `SELECT s.campaign_id, j.key AS track_id FROM (SELECT id, campaign_id, social_senders FROM enrollments WHERE social_senders IS NOT NULL AND ended IS NULL
+               UNION ALL SELECT id, campaign_id, social_senders FROM test_runs WHERE social_senders IS NOT NULL AND ended IS NULL) s, json_each(s.social_senders) j
+             JOIN track_progress t ON t.subject_id = s.id AND t.track_id = j.key AND t.started_at IS NOT NULL AND t.finished_at IS NULL
+             WHERE j.value = :acc`,
+          ).all({ acc: accountId })
+      ).map((r) => `${str(r, "campaign_id")}|${str(r, "track_id")}`),
+    );
+    return campaigns.flatMap(({ id, def }) =>
+      def.tracks
+        .filter((t) => t.channel === channel)
+        .filter((t) => fixed.has(`${id}|${t.id}`) || (!t.removed && (channel === "linkedin" ? poolOf(def, channel).includes(accountId) : (t.senders ?? []).includes(accountId))))
+        .map((t) => [...t.window]),
+    );
   }
 
   /** Parsed definitions, by campaign and definition version: a version is never rewritten. */
