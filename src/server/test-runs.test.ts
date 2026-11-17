@@ -79,7 +79,7 @@ describe("test contacts (ADR 0003 'Ticket 21', the boundary)", () => {
     expect((await w.tab()).contacts).toMatchObject({ email: null, mobile: null });
     const ok = await w.h.request<TestRunTab>("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: "+44 7700 900456" });
     expect(ok.status).toBe(200);
-    expect(ok.body.contacts).toEqual({ email: OWN_EMAIL, mobile: "+44 7700 900456", emailIsALead: false, mobileIsALead: false });
+    expect(ok.body.contacts).toEqual({ email: OWN_EMAIL, mobile: "+44 7700 900456", emailIsALead: false, mobileIsALead: false, linkedin: null, linkedinIsALead: false });
   });
 
   test("a lead's routes do not know a test run: its read, its controls and a bulk stop answer as for no lead (merge of ticket 18)", async () => {
