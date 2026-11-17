@@ -8,8 +8,9 @@ import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, mar
 import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, waitSpan, wallOfLead, windowOpensAt, type Freeze, type LeadClock } from "./clock.ts";
 import { render } from "./copy.ts";
 import { holdsConversations, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import { isMessageRequestChannel, type MessageRequestChannel, type SocialChannel } from "../social-channels.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
-import type { Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, LeadDetail, LinkedinSkipCause, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
+import type { Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, LeadDetail, LinkedinSkipCause, SocialSkipCause, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Running, status and reach.
@@ -92,9 +93,28 @@ export function goodProfile(details: readonly LeadDetail[]): LeadDetail | null {
   return [...details].filter((d) => d.channel === "linkedin" && !d.bad).sort((a, b) => b.order - a.order)[0] ?? null;
 }
 
+/**
+ * A message-request channel's destination (ADR 0004 13.4): the decision maker's own usable account, else the company's. The
+ * store gives the own account the newer order, so the newest one not marked bad is that rule.
+ */
+export function goodAccount(details: readonly LeadDetail[], channel: MessageRequestChannel): LeadDetail | null {
+  return [...details].filter((d) => d.channel === channel && !d.bad).sort((a, b) => b.order - a.order)[0] ?? null;
+}
+
 /** The detail a track on `channel` starts with: the newest good one the lead may be sent to on it. */
 export function destinationFor(details: readonly LeadDetail[], channel: TrackChannel): LeadDetail | null {
-  return channel === "email" ? goodEmail(details) : channel === "sms" ? goodMobile(details) : channel === "linkedin" ? goodProfile(details) : null;
+  switch (channel) {
+    case "email":
+      return goodEmail(details);
+    case "sms":
+      return goodMobile(details);
+    case "linkedin":
+      return goodProfile(details);
+    case "call":
+      return null;
+    default:
+      return goodAccount(details, channel);
+  }
 }
 
 /** Whether the user has a good number to dial for the lead: its own, or the company main line (ADR 0001 "Usable channels"). */
@@ -121,7 +141,7 @@ export const smsConversationLost = (state: SubjectState): boolean => conversatio
  * live SMS track of its branch has finished, one of them skipped for a taken conversation, and none of them texted it.
  * While an SMS track of the branch is still to run, SMS still reaches the lead: a free number may join the pool first.
  */
-export function conversationLost(state: SubjectState, channel: "sms" | "linkedin"): boolean {
+export function conversationLost(state: SubjectState, channel: ConversationChannel): boolean {
   const sms = liveTracksFor(state).filter((t) => t.channel === channel);
   const progress = sms.map((t) => progressOf(state, t.id));
   if (progress.some((p) => !p || p.finishedAt === null)) return false;
@@ -217,7 +237,15 @@ export function finishTrack(state: SubjectState, trackId: string, reason: Finish
   if (!progress || progress.finishedAt !== null) return state;
   // A LinkedIn track skipped as a missing channel records why, as the facts stand at its finish (ticket 24b): a read never
   // works it out again from today's import, marks or decision makers.
-  const cause = reason === "skipped_missing_channel" && channelOf(state, trackId) === "linkedin" ? { skipCause: linkedinSkipCauseOf(state, progress.destinationDetailId) } : {};
+  const channel = channelOf(state, trackId);
+  const cause =
+    reason !== "skipped_missing_channel"
+      ? {}
+      : channel === "linkedin"
+        ? { skipCause: linkedinSkipCauseOf(state, progress.destinationDetailId) }
+        : isMessageRequestChannel(channel)
+          ? { skipCause: accountSkipCauseOf(state, channel, progress.destinationDetailId) }
+          : {};
   const finished = withTrack(state, trackId, (t) => ({ ...t, finishedAt: at, finishedWall: atWall, finishReason: reason, ...cause }));
   const closed = { ...finished, callTasks: finished.callTasks.map((t) => (t.trackId === trackId && t.open ? { ...t, open: false, closedWall: atWall } : t)) };
   return quiesce(closed, trackId);
@@ -784,7 +812,8 @@ function recordSent(
   return advanceTrack(s, track, point.at, point.atWall);
 }
 
-const failedReasonOf = (channel: TrackChannel | undefined): string => (channel === "sms" ? "invalid number" : channel === "linkedin" ? "profile unreachable" : "invalid address");
+const failedReasonOf = (channel: TrackChannel | undefined): string =>
+  channel === "sms" ? "invalid number" : channel === "linkedin" ? "profile unreachable" : isMessageRequestChannel(channel) ? "account unreachable" : "invalid address";
 
 function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["rejectReason"], now: number): SubjectState {
   const progress = progressOf(state, attempt.trackId);
@@ -811,6 +840,15 @@ function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["
     const failed = state.results.some((r) => r.stepId === attempt.stepId)
       ? state
       : { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: "not connected", at, atWall, attemptId: attempt.id }] };
+    return checkEndings(finishTrack(failed, attempt.trackId, "failed_bad_destination", at, atWall), now);
+  }
+  // A message the platform does not let this session send to this account (ADR 0004 13.3, question Q44): requests turned
+  // off, or a sender that cannot start a conversation there. The track fails, the account stays good (it is still theirs).
+  if (reason === "not_allowed") {
+    if (!progress || progress.finishedAt !== null) return state;
+    const failed = state.results.some((r) => r.stepId === attempt.stepId)
+      ? state
+      : { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: "not allowed", at, atWall, attemptId: attempt.id }] };
     return checkEndings(finishTrack(failed, attempt.trackId, "failed_bad_destination", at, atWall), now);
   }
   // 402 and 429 wait at the account; an unexplained provider skip holds the track (5.4).
@@ -914,7 +952,7 @@ export function renderStep(state: SubjectState, trackId: string, stepId: string)
   if (!step) return null;
   // A text has no subject; an email renders only a subject it starts (a continuing one has none).
   const channel = channelOf(state, trackId);
-  const subject = render(channel === "sms" || channel === "linkedin" ? "" : ownSubject(step), state.lead.mergeData);
+  const subject = render(channel === "email" ? ownSubject(step) : "", state.lead.mergeData);
   const body = render(step.body, state.lead.mergeData);
   return subject.ok && body.ok ? { subject: subject.text, body: body.text } : null;
 }
@@ -934,8 +972,18 @@ export function lacksThread(state: SubjectState, trackId: string, stepId: string
 
 /** The subject's fixed sender on a channel (1.3). */
 export function senderOf(state: SubjectState, channel: TrackChannel): string | null {
-  if (channel === "linkedin") return linkedinSessionOf(state);
-  return channel === "sms" ? state.subject.smsSender : channel === "email" ? state.subject.emailSender : null;
+  switch (channel) {
+    case "linkedin":
+      return linkedinSessionOf(state);
+    case "sms":
+      return state.subject.smsSender;
+    case "email":
+      return state.subject.emailSender;
+    case "call":
+      return null;
+    default:
+      return messageSessionOf(state, channel);
+  }
 }
 
 /**
@@ -1010,7 +1058,7 @@ export function claimRefusal(state: SubjectState, item: { readonly trackId: stri
 }
 
 /** The numbers an SMS track may text from: the subject's fixed sender, else its pool as the definition holds it now. */
-function usableNumbers(state: SubjectState, channel: "sms" | "linkedin"): readonly string[] {
+function usableNumbers(state: SubjectState, channel: ConversationChannel): readonly string[] {
   const fixed = senderOf(state, channel);
   return fixed !== null ? [fixed] : poolOf(state.campaign.definition, channel);
 }
@@ -1507,6 +1555,29 @@ export function linkedinSessionOf(state: SubjectState): string | null {
 }
 
 /**
+ * The session a subject's message-request track goes from (ADR 0004 13.5): the session of its own conversation with one of
+ * its accounts on the channel, else the one stored at its first handover there. Fixed once, never reassigned. Null before.
+ */
+export function messageSessionOf(state: SubjectState, channel: MessageRequestChannel): string | null {
+  const accounts = new Set(state.lead.details.filter((d) => d.channel === channel).map((d) => d.key));
+  for (const p of state.tracks) {
+    if (channelOf(state, p.trackId) !== channel) continue;
+    const key = recipientOf(state, p.trackId);
+    if (key !== null) accounts.add(key);
+  }
+  const stored = state.subject.socialSenders?.[channel] ?? null;
+  if (!rules.pairsByChannel) return state.smsBindings.find((b) => b.owner === state.subject.id)?.sender ?? stored;
+  return pairsOn(state, channel).find((b) => b.owner === state.subject.id && accounts.has(b.recipient))?.sender ?? stored;
+}
+
+/** The subject with its sender on a social channel fixed, if it had none (ADR 0004 6, 13.5): the one write of it. */
+export function withSocialSender(state: SubjectState, channel: SocialChannel, session: string): SubjectState {
+  if (channel === "linkedin") return { ...state, subject: { ...state.subject, linkedinSender: state.subject.linkedinSender ?? session } };
+  if (state.subject.socialSenders?.[channel] !== undefined) return state;
+  return { ...state, subject: { ...state.subject, socialSenders: { ...state.subject.socialSenders, [channel]: session } } };
+}
+
+/**
  * A running edit of a LinkedIn track's acceptance wait (ADR 0004 3.2; council on 194fc44, item 3): every track still waiting
  * for acceptance has its deadline re-resolved from its invite's send point with the wait in force, in the zone it was
  * resolved in. A new deadline already passed is the lead's present instant, so it expires at the next evaluation, once, and
@@ -1614,6 +1685,22 @@ export function inviteOpenOn(state: SubjectState, trackId: string): boolean {
 
 /** Whether any LinkedIn track of the subject has an invite still open on LinkedIn (`inviteOpenOn`). */
 export const anyInviteOpen = (state: SubjectState): boolean => state.tracks.some((t) => inviteOpenOn(state, t.trackId));
+
+/**
+ * Why a message-request track is skipped as a missing channel, from the facts at its finish (ADR 0004 13.4): an account it
+ * started with that is no longer theirs (replaced by another, or emptied by a re-import); every account it could use marked
+ * bad; an address that is not an account; or no address in either file.
+ */
+export function accountSkipCauseOf(state: SubjectState, channel: MessageRequestChannel, startedWith: string | null): SocialSkipCause {
+  const imported = state.lead.importedAccounts?.[channel];
+  const cells = imported ? [imported.person, imported.company].filter((c): c is NonNullable<typeof c> => c !== null) : [];
+  if (startedWith !== null) {
+    const ownerCell = startedWith.startsWith(`${channel}:p:`) ? imported?.person : imported?.company;
+    return ownerCell === "account" ? "replaced" : "removed_by_import";
+  }
+  if (state.lead.details.some((d) => d.channel === channel && d.bad)) return "marked_bad";
+  return cells.includes("not_account") ? "not_a_member_profile" : "no_profile";
+}
 
 /**
  * Why a LinkedIn track is skipped as a missing channel, from the facts at its finish (ticket 24b): a profile it started with

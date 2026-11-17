@@ -8,6 +8,7 @@
  * stores a port's bare id does not typecheck. The port is asked about a stored reply by `portReplyId`, the inverse.
  * Migration 19 rewrote the bare ids stored before this rule, so a stored reply has exactly one form.
  */
+import type { SocialChannel } from "../social-channels.ts";
 
 export type ReplyChannel = "email" | "sms";
 
@@ -26,7 +27,7 @@ export function storedReplyId(channel: ReplyChannel, eventId: string): StoredRep
  * The id of a reply the user marked (ADR 0004 section 7): there is no provider event, so it is the control's request id,
  * prefixed by its channel, which no port's id can be.
  */
-export function markedReplyId(channel: "linkedin", requestId: string): StoredReplyId {
+export function markedReplyId(channel: SocialChannel, requestId: string): StoredReplyId {
   return `${channel}:mark:${requestId}` as StoredReplyId;
 }
 

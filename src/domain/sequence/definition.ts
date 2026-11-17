@@ -6,17 +6,18 @@
  * lead enters when it declines on a call, with no call.
  */
 import { isTimeZone, type WindowRule } from "./clock.ts";
+import { isMessageRequestChannel, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel } from "../social-channels.ts";
 
-export type TrackChannel = "email" | "sms" | "call" | "linkedin";
+export type TrackChannel = "email" | "sms" | "call" | SocialChannel;
 /**
  * The channels whose sends are a conversation between one sender account and one destination (ADR 0003 4.5 as generalised
  * by ADR 0004, question Q41): an SMS number and a mobile, a LinkedIn session and a profile. A reply there cannot say which
  * campaign it answers, so the pair belongs to the first subject known to have reached it. The one test of it.
  */
-export type ConversationChannel = "sms" | "linkedin";
-export const holdsConversations = (channel: TrackChannel | undefined): channel is ConversationChannel => channel === "sms" || channel === "linkedin";
+export type ConversationChannel = "sms" | SocialChannel;
+export const holdsConversations = (channel: TrackChannel | undefined): channel is ConversationChannel => channel === "sms" || channel === "linkedin" || isMessageRequestChannel(channel);
 /** Every channel of conversations, for tests that every one has its words. */
-export const CONVERSATION_CHANNELS: readonly ConversationChannel[] = ["sms", "linkedin"];
+export const CONVERSATION_CHANNELS: readonly ConversationChannel[] = ["sms", "linkedin", "instagram"];
 
 /** The channels a sender account serves (a phone track needs none): email, SMS and the social channels (ADR 0004). */
 export type SendChannel = Exclude<TrackChannel, "call">;
@@ -76,6 +77,8 @@ export interface CampaignDefinition {
   readonly callScript?: string;
   /** LinkedIn sender sessions LinkedIn tracks may use (ADR 0004 1.1). Absent before ticket 24: none. */
   readonly linkedinPool?: readonly string[];
+  /** Instagram sender sessions Instagram tracks may use (ADR 0004 13.5). Absent before ticket 25: none. */
+  readonly instagramPool?: readonly string[];
   readonly tracks: readonly TrackDefinition[];
 }
 
@@ -122,10 +125,16 @@ export function emptyDefinition(timezone: string): CampaignDefinition {
   return { timezone, callSkipLimitDays: 2, emailPool: [], smsPool: [], tracks: [] };
 }
 
+/** The definition's field that holds each sending channel's pool (ADR 0004 13.2): one entry per channel. */
+export const POOL_FIELD = { email: "emailPool", sms: "smsPool", linkedin: "linkedinPool", instagram: "instagramPool" } as const satisfies { readonly [C in SendChannel]: keyof CampaignDefinition };
+
 /** The sender accounts a track on `channel` may use. */
 export function poolOf(def: CampaignDefinition, channel: TrackChannel): readonly string[] {
-  return channel === "email" ? def.emailPool : channel === "sms" ? (def.smsPool ?? []) : channel === "linkedin" ? (def.linkedinPool ?? []) : [];
+  return channel === "call" ? [] : (def[POOL_FIELD[channel]] ?? []);
 }
+
+/** Every pool of the definition, by channel: the one list a validator or a comparison of pools walks. */
+export const allPools = (def: CampaignDefinition): readonly (readonly string[])[] => (Object.keys(POOL_FIELD) as SendChannel[]).map((c) => poolOf(def, c));
 
 /**
  * A LinkedIn step's kind, by its position among the track's live steps (ADR 0004 3.1): the first is the connection invite
@@ -139,9 +148,26 @@ export function linkedinStepKind(track: Pick<TrackDefinition, "channel" | "steps
   return index < 0 ? null : index === 0 ? "invite" : index === 1 ? "first_message" : "follow_up";
 }
 
-/** The kind of action a step's handover asks of a social port, and the allowance it counts on (ADR 0004 2.1, 6). */
+/**
+ * A message-request step's kind, by its position among the track's live steps (ADR 0004 13.3): the first is the message
+ * request, the rest follow-ups. Null for a step of another channel or one not live. Every reader asks this one function.
+ */
+export type MessageRequestStepKind = "message_request" | "follow_up";
+export function messageRequestStepKind(track: Pick<TrackDefinition, "channel" | "steps">, stepId: string): MessageRequestStepKind | null {
+  if (!isMessageRequestChannel(track.channel)) return null;
+  const index = track.steps.filter((s) => !s.removed).findIndex((s) => s.id === stepId);
+  return index < 0 ? null : index === 0 ? "message_request" : "follow_up";
+}
+
+/** A social step's kind on any social channel: LinkedIn's or a message-request channel's. Null for email, SMS and calls. */
+export type SocialStepKind = LinkedinStepKind | MessageRequestStepKind;
+export function socialStepKind(track: Pick<TrackDefinition, "channel" | "steps">, stepId: string): SocialStepKind | null {
+  return linkedinStepKind(track, stepId) ?? messageRequestStepKind(track, stepId);
+}
+
+/** The kind of action a step's handover asks of a social port, and the allowance it counts on (ADR 0004 2.1, 6, 13.7). */
 export type SocialAction = "invite" | "message";
-export const socialActionOf = (kind: LinkedinStepKind | null): SocialAction | null => (kind === null ? null : kind === "invite" ? "invite" : "message");
+export const socialActionOf = (kind: SocialStepKind | null): SocialAction | null => (kind === null ? null : kind === "invite" ? "invite" : "message");
 
 export const liveTracks = (def: CampaignDefinition, branch: Branch = "main"): TrackDefinition[] =>
   def.tracks.filter((t) => !t.removed && t.branch === branch);
@@ -180,9 +206,7 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
   const add = (kind: string, text: string, about: { readonly trackId?: string; readonly stepId?: string } = {}) => problems.push({ kind, text, ...about });
   if (!isTimeZone(def.timezone)) add("timezone", `The campaign's time zone "${def.timezone}" is not an IANA time zone such as Europe/London.`);
   if (!isWholeDays(def.callSkipLimitDays) || def.callSkipLimitDays === 0) add("campaign_skip_limit", "The call skip limit is a whole number of days, at least 1.");
-  const smsPool = def.smsPool ?? [];
-  const linkedinPool = def.linkedinPool ?? [];
-  if (new Set(def.emailPool).size !== def.emailPool.length || new Set(smsPool).size !== smsPool.length || new Set(linkedinPool).size !== linkedinPool.length) add("sender_twice", "A sender account is listed twice.");
+  if (allPools(def).some((pool) => new Set(pool).size !== pool.length)) add("sender_twice", "A sender account is listed twice.");
 
   const trackIds = new Set<string>();
   const stepIds = new Set<string>();
@@ -199,7 +223,7 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
   // Tracks are named within their branch: "the email track", "Win-back email track 2".
   const label = (track: TrackDefinition) => {
     const same = live.filter((t) => t.channel === track.channel && t.branch === track.branch);
-    const channel = track.channel === "sms" ? "SMS" : track.channel === "call" ? "phone" : track.channel === "linkedin" ? "LinkedIn" : track.channel;
+    const channel = track.channel === "sms" ? "SMS" : track.channel === "call" ? "phone" : track.channel === "email" ? "email" : SOCIAL_CHANNELS[track.channel].name;
     const named = track.branch === "win_back" ? `win-back ${channel}` : channel;
     return same.length === 1 ? `the ${named} track` : `${named[0]?.toUpperCase() ?? ""}${named.slice(1)} track ${same.indexOf(track) + 1}`;
   };
@@ -251,6 +275,11 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
       if (liveSteps(track).length < 2) add("linkedin_steps", `${name} needs a connection invite and at least one message after it.`, { trackId: track.id });
       if (liveSteps(track).some((st) => st.subject.trim() !== "")) add("linkedin_subject", `${name}'s invite and messages have no subject.`, { trackId: track.id });
     } else if (track.acceptWaitDays !== undefined) add("accept_wait_not_linkedin", "Only a LinkedIn track waits for an invite to be accepted.", { trackId: track.id });
+    // A message-request track (ADR 0004 13.3): messages only, the first a message request, none with a subject.
+    if (isMessageRequestChannel(track.channel)) {
+      if (liveSteps(track).length < 1) add("message_request_steps", `${name} needs at least one message.`, { trackId: track.id });
+      if (liveSteps(track).some((st) => st.subject.trim() !== "")) add("message_request_subject", `${name}'s messages have no subject.`, { trackId: track.id });
+    }
     const steps = liveSteps(track);
     // A phone track is one call with no follow-ups (spec "Phone tracks"); the call has no copy.
     if (track.channel === "call" && steps.length !== 1) add("call_steps", `${name} is one call with no follow-ups: give it exactly one step.`, { trackId: track.id });

@@ -5,7 +5,7 @@
  * effect.
  */
 import { skipDeadlineOf, skipLimitOf } from "./calls.ts";
-import type { CampaignDefinition, StepDefinition, TrackDefinition } from "./definition.ts";
+import { allPools, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
 import { alignPending, inFlight, liveTracksFor, progressOf, remainingSteps, withdrawClaims, awaitingAcceptance } from "./progress.ts";
 import type { SubjectState } from "./state.ts";
 
@@ -137,7 +137,8 @@ export function changesBetween(previous: CampaignDefinition, next: CampaignDefin
   if (previous.timezone !== next.timezone) add("timezone");
   // The pools follow the connected senders: a change rides along with Apply, so it is listed (council on 93bed86, item 12).
   const same = (a: readonly string[] | undefined, b: readonly string[] | undefined) => [...(a ?? [])].sort().join("\n") === [...(b ?? [])].sort().join("\n");
-  if (!same(previous.emailPool, next.emailPool) || !same(previous.smsPool, next.smsPool) || !same(previous.linkedinPool, next.linkedinPool)) add("sender_pool");
+  const poolsBefore = allPools(previous);
+  if (allPools(next).some((pool, i) => !same(poolsBefore[i], pool))) add("sender_pool");
   return out;
 }
 

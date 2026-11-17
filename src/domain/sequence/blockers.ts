@@ -3,7 +3,7 @@
  * "nothing to launch" precondition (Q9). Everything else is a warning.
  */
 import { mergeUses, render, type MergeData } from "./copy.ts";
-import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition, linkedinStepKind } from "./definition.ts";
+import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition, type SendChannel, linkedinStepKind } from "./definition.ts";
 
 export type LaunchBlocker =
   | { readonly kind: "empty_copy"; readonly trackId: string; readonly stepId: string; readonly stepNumber: number; readonly part: "subject" | "body"; readonly message: string }
@@ -19,11 +19,22 @@ export type LaunchBlocker =
 
 export interface SenderAccountView {
   readonly id: string;
-  readonly channel: "email" | "sms" | "linkedin";
+  readonly channel: SendChannel;
   readonly healthy: boolean;
 }
 
 export const NOTHING_TO_LAUNCH = "Add a track to launch.";
+
+/** A step's noun in an empty-copy blocker, per sending channel. */
+const STEP_NOUN = { email: "Email", sms: "Text", linkedin: "LinkedIn step", instagram: "Instagram message" } as const satisfies { readonly [C in SendChannel]: string };
+
+/** Launch blocker 3's sentence per sending channel (ADR 0003 7.2; ADR 0004 1.1, 13.1). */
+const NO_SENDER = {
+  email: "The email track has no connected sender inbox.",
+  sms: "The SMS track has no connected sender number.",
+  linkedin: "The LinkedIn track has no connected LinkedIn session.",
+  instagram: "The Instagram track has no connected Instagram session.",
+} as const satisfies { readonly [C in SendChannel]: string };
 
 export interface LaunchCheck {
   readonly blockers: readonly LaunchBlocker[];
@@ -48,7 +59,7 @@ export function launchCheck(def: CampaignDefinition, leads: readonly MergeData[]
         blockers.push({ kind: "empty_copy", trackId: track.id, stepId: step.id, stepNumber: i + 1, part: "subject", message: `Email ${i + 1} has no subject.` });
       }
       if (step.body.trim() === "") {
-        blockers.push({ kind: "empty_copy", trackId: track.id, stepId: step.id, stepNumber: i + 1, part: "body", message: `${track.channel === "email" ? "Email" : track.channel === "linkedin" ? "LinkedIn step" : "Text"} ${i + 1} has no message.` });
+        blockers.push({ kind: "empty_copy", trackId: track.id, stepId: step.id, stepNumber: i + 1, part: "body", message: `${STEP_NOUN[track.channel as SendChannel]} ${i + 1} has no message.` });
       }
     });
   }
@@ -57,7 +68,7 @@ export function launchCheck(def: CampaignDefinition, leads: readonly MergeData[]
   for (const track of tracks) {
     if (track.channel === "call") continue;
     liveSteps(track).forEach((step, i) => {
-      for (const use of [...mergeUses(track.channel === "sms" || track.channel === "linkedin" ? "" : ownSubject(step)), ...mergeUses(step.body)]) {
+      for (const use of [...mergeUses(track.channel === "email" ? ownSubject(step) : ""), ...mergeUses(step.body)]) {
         if (use.fallback !== null) continue;
         const uses = fieldsWithoutFallback.get(use.field) ?? [];
         if (!uses.some((u) => u.stepId === step.id)) uses.push({ trackId: track.id, stepId: step.id, stepNumber: i + 1 });
@@ -88,7 +99,7 @@ export function launchCheck(def: CampaignDefinition, leads: readonly MergeData[]
         kind: "no_sender",
         trackId: track.id,
         channel: track.channel,
-        message: track.channel === "email" ? "The email track has no connected sender inbox." : track.channel === "linkedin" ? "The LinkedIn track has no connected LinkedIn session." : "The SMS track has no connected sender number.",
+        message: NO_SENDER[track.channel],
       });
     }
   }
