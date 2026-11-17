@@ -21,7 +21,7 @@ import { UnconnectedEmailPort, UnprovisionedSmsPort } from "./engine/ports.ts";
 import { accountView, progressView, stepEnvOf } from "./engine/views.ts";
 import type { StepEnv } from "../domain/sequence/dispatch.ts";
 import { callsView, callTaskView, needsAttentionView, recordCalls, todayView } from "./engine/call-views.ts";
-import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
+import { rulesWith, type Rules } from "./engine/rules.ts";
 import { sealReckoning } from "../domain/sequence/progress.ts";
 import { editImpactView } from "./engine/edit-impact.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
@@ -39,7 +39,7 @@ export interface AppDependencies {
   readonly now: () => string;
   readonly newId: () => string;
   /** The sequence engine. Without one, the app runs an engine with no connected email provider. */
-  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause" | "saveDefinition" | "runTest"> & Partial<Pick<Engine, "transportAvailable">>;
+  readonly engine?: Pick<Engine, "launch" | "logCallOutcome" | "controlLead" | "setCampaignPause" | "saveDefinition" | "runTest"> & Partial<Pick<Engine, "transportAvailable" | "markReplied" | "markInviteWithdrawal">>;
   /** The email provider's own description, for GET /api/email-provider; absent when none is connected. */
   readonly emailProvider?: EmailProviderSource | null;
   /**
@@ -47,6 +47,11 @@ export interface AppDependencies {
    * no SMS provider is provisioned (#28); `test-simulator` only in the test harness's fake.
    */
   readonly smsProvider?: "none" | "test-simulator";
+  /**
+   * The LinkedIn provider behind the engine, for GET /api/linkedin-provider (ADR 0004 1.1): `none` in the running app, since
+   * no LinkedIn session is connected (#28); `test-simulator` only in the test harness's simulated provider.
+   */
+  readonly linkedinProvider?: "none" | "test-simulator";
   /** The engine's rules, as the read models use them; the tests' broken engines replace entries (ADR 0003 9.2). */
   readonly rules?: Partial<Rules>;
   /** The bulk rule's parts; the generated bulk runs' broken apps replace one (ADR 0003 "Ticket 18"). */
@@ -66,7 +71,7 @@ const stepBody = requestObject({
 });
 const trackBody = requestObject({
   id: z.string().trim().min(1).max(100),
-  channel: z.enum(["email", "sms", "call"]),
+  channel: z.enum(["email", "sms", "call", "linkedin"]),
   branch: z.enum(["main", "win_back"]).default("main"),
   window: z.array(windowRule).max(14),
   steps: z.array(stepBody).max(50),
@@ -75,12 +80,16 @@ const trackBody = requestObject({
   declinedPath: z.enum(["stop", "continue", "win_back"]).optional(),
   /** A phone track's own call skip limit in days (ADR 0003, ticket 14c); the validator checks it. */
   callSkipLimitDays: z.number().optional(),
+  /** A LinkedIn track's wait for its invite to be accepted, in days (ADR 0004 3.1); the validator checks it. */
+  acceptWaitDays: z.number().optional(),
 });
 const definitionBody = requestObject({
   timezone: z.string().trim().min(1),
   callSkipLimitDays: z.number().default(2),
   emailPool: z.array(z.string().min(1).max(200)).max(100),
   smsPool: z.array(z.string().min(1).max(200)).max(100).default([]),
+  /** LinkedIn sender sessions (ADR 0004 1.1); absent from a definition saved without LinkedIn tracks. */
+  linkedinPool: z.array(z.string().min(1).max(200)).max(100).optional(),
   callScript: z.string().max(20_000).default(""),
   tracks: z.array(trackBody).max(20),
   /** Who wrote the save (ADR 0003 1.1.1): its editing session, its number there, and the revision it last saw. */
@@ -93,7 +102,17 @@ const impactBody = requestObject({ definition: definitionBody.omit({ save: true,
 
 /** A definition as stored: a declined path only when the canvas set one; the phone track's fields travel in the same save (ADR 0003 1.1.1). */
 function definitionFromBody(fields: Omit<z.infer<typeof definitionBody>, "save" | "impact">): CampaignDefinition {
-  return { ...fields, tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, ...t }) => ({ ...t, ...(declinedPath ? { declinedPath } : {}), ...(callSkipLimitDays !== undefined ? { callSkipLimitDays } : {}) })) };
+  const { linkedinPool, ...rest } = fields;
+  return {
+    ...rest,
+    ...(linkedinPool !== undefined ? { linkedinPool } : {}),
+    tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, acceptWaitDays, ...t }) => ({
+      ...t,
+      ...(declinedPath ? { declinedPath } : {}),
+      ...(callSkipLimitDays !== undefined ? { callSkipLimitDays } : {}),
+      ...(acceptWaitDays !== undefined ? { acceptWaitDays } : {}),
+    })),
+  };
 }
 
 /** The user's zone: the machine's, which a campaign's default zone starts from (ADR 0003 1.1). */
@@ -124,7 +143,18 @@ const leadControlBody = requestObject({
     .optional(),
 });
 // Ticket 21: the user's own test contacts, Run test and Stop test (ADR 0003 "Ticket 21").
-const testContactsBody = requestObject({ email: z.string().max(320), mobile: z.string().max(40) });
+const markRepliedBody = requestObject({
+  requestId: controlRequestId,
+  channel: z.literal("linkedin", { message: "Only a LinkedIn reply is marked by hand: email and SMS replies are detected." }),
+  expect: z.strictObject({ status: z.enum(OUTREACH_STATUSES) }, { message: "Send the status the confirmation showed." }).optional(),
+});
+const inviteWithdrawalBody = requestObject({ requestId: controlRequestId, trackId: z.string().min(1).max(100), answer: z.enum(["withdrawn", "kept"]) });
+const allowancesBody = requestObject({
+  invitesPerDay: z.number().int().min(0).max(10_000),
+  messagesPerDay: z.number().int().min(0).max(10_000),
+  notesPerMonth: z.number().int().min(0).max(100_000),
+});
+const testContactsBody = requestObject({ email: z.string().max(320), mobile: z.string().max(40), linkedin: z.string().max(300).optional() });
 const runTestBody = requestObject({
   requestId: controlRequestId,
   renderAs: z.string().trim().min(1, "Choose the lead the test's copy is written for.").max(200),
@@ -197,8 +227,8 @@ const launchBody = requestObject({ definitionVersion: z.number().int().optional(
 const checkBody = requestObject({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
-export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", rules: givenRules, bulkRules, measureRules }: AppDependencies): Hono {
-  const rules: Rules = { ...DEFAULT_RULES, ...givenRules };
+export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", linkedinProvider = "none", rules: givenRules, bulkRules, measureRules }: AppDependencies): Hono {
+  const rules: Rules = rulesWith(givenRules);
   const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), smsPort: new UnprovisionedSmsPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
   /**
@@ -610,7 +640,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // Work handed over and not settled may still be sent (ticket 17a's provider limitation): the screens say so.
   // When each step goes is read with what dispatch knows beyond the lead (ADR 0003 "Reads that say when"): the port's
   // transport, and the dispatch gate while sending is interrupted.
-  const transport = (channel: "email" | "sms", threading: "new_subject" | "continue_thread") => engine.transportAvailable?.(channel, threading) ?? true;
+  const transport = (channel: "email" | "sms" | "linkedin", threading: "new_subject" | "continue_thread") => engine.transportAvailable?.(channel, threading) ?? true;
   /**
    * A read with what dispatch knows, computed once with a probe in place of the later days' call room, and again with the
    * room only when some step asked for it (council and verifier on cc9bf55, items 6 and 12): the other leads' open calls are
@@ -691,6 +721,53 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return c.json({ effect: answer.effect, enrollment: await enrollmentRead(id), replayed: answer.replayed });
   });
 
+  // The user marks a social reply by hand (ADR 0004 section 7): no social reply is detected.
+  app.post("/enrollments/:id/replies", async (c) => {
+    const body = markRepliedBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const id = c.req.param("id");
+    if (!(await store.engine.subject(id, Date.parse(now()))) || (await isTestRun(id))) return notFound(c, "enrollment");
+    if (!engine.markReplied) return controlRefused(c, "Marking a reply needs the engine.");
+    const answer = await engine.markReplied(id, body.data.requestId, body.data.expect ?? null);
+    if (!answer.ok) return controlRefused(c, answer.reason);
+    return c.json({ enrollment: await enrollmentRead(id), replayed: answer.replayed });
+  });
+
+  // A test run's LinkedIn reply, marked by the user on their own test profile (council on 194fc44, item 13): the same
+  // transition, request-id binding and confirmation as a lead's; it ends only that test run.
+  app.post("/test-runs/:id/replies", async (c) => {
+    const body = markRepliedBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const run = await store.engine.testRun(c.req.param("id"));
+    if (!run) return notFound(c, "test run");
+    if (!engine.markReplied) return controlRefused(c, "Marking a reply needs the engine.");
+    const answer = await engine.markReplied(run.id, body.data.requestId, body.data.expect ?? null);
+    if (!answer.ok) return controlRefused(c, answer.reason);
+    const tab = await testTab(run.campaignId);
+    return tab ? c.json<TestRunTab & { readonly replayed: boolean }>({ ...tab, replayed: answer.replayed }) : notFound(c, "campaign");
+  });
+
+  // The user settles an invite withdrawal the session keeps answering unknown (ADR 0004 3.3).
+  app.post("/enrollments/:id/invite-withdrawal", async (c) => {
+    const body = inviteWithdrawalBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const id = c.req.param("id");
+    if (!(await store.engine.subject(id, Date.parse(now()))) || (await isTestRun(id))) return notFound(c, "enrollment");
+    if (!engine.markInviteWithdrawal) return controlRefused(c, "Marking a withdrawal needs the engine.");
+    const answer = await engine.markInviteWithdrawal(id, body.data.trackId, body.data.answer, body.data.requestId);
+    if (!answer.ok) return controlRefused(c, answer.reason);
+    return c.json({ enrollment: await enrollmentRead(id), replayed: answer.replayed });
+  });
+
+  // A social sender account's allowances, the user's settings (ADR 0004 1.2): no default.
+  app.put("/sender-accounts/:id/allowances", async (c) => {
+    const body = allowancesBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const set = await store.engine.setAllowances(c.req.param("id"), body.data, Date.parse(now()));
+    if (set === "not_social") return notFound(c, "LinkedIn sender account");
+    return c.json(await store.engine.allowances(c.req.param("id")));
+  });
+
   // -------------------------------------------------------------------------------------------
   // Calls (ticket 14). The user dials on their own phone; nothing here dials.
 
@@ -761,7 +838,8 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.put("/campaigns/:id/test-contacts", async (c) => {
     const body = testContactsBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
-    const parsed = parseTestContacts(body.data);
+    const { linkedin, ...rest } = body.data;
+    const parsed = parseTestContacts(linkedin === undefined ? rest : { ...rest, linkedin });
     if (!parsed.ok) return c.json<TestContactsRefusal>({ error: { code: "invalid_test_contact", message: parsed.message, field: parsed.field } }, 400);
     const saved = await store.engine.saveTestContacts(c.req.param("id"), parsed.contacts);
     if (!saved.ok) return "missing" in saved ? notFound(c, "campaign") : c.json<TestContactsRefusal>({ error: { code: "test_contact_is_a_lead", message: saved.message, field: saved.field } }, 409);
@@ -794,6 +872,15 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.get("/needs-attention", async (c) => c.json(await needsAttentionView(store, Date.parse(now()), rules, (channel, threading) => engine.transportAvailable?.(channel, threading) ?? true)));
 
   // No SMS provider is provisioned or chosen (#28): the running app reports none, honestly.
+  // No LinkedIn session is connected in the running app (ADR 0004 1.1): nothing presents LinkedIn as a working integration.
+  app.get("/linkedin-provider", (c) =>
+    c.json(
+      linkedinProvider === "none"
+        ? { provider: "none", message: "No LinkedIn session is connected, so LinkedIn tracks cannot launch." }
+        : { provider: "test-simulator", message: "Simulated LinkedIn (not a session): tests only." },
+    ),
+  );
+
   app.get("/sms-provider", async (c) => {
     if (smsProvider === "none") return c.json<SmsProviderStatus>({ provider: "none", message: "No SMS provider is connected, so SMS tracks cannot launch.", numbers: [] });
     const at = Date.parse(now());

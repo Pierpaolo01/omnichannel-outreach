@@ -55,7 +55,7 @@ export const emailTrackOf = (def: CampaignDefinition): TrackDefinition | undefin
   def.tracks.find((t) => !t.removed && t.channel === "email" && t.branch === "main");
 
 /** What one step of a track on this channel is called: Email 1, Text 1, Call 1. */
-export const STEP_NOUN = { email: "Email", sms: "Text", call: "Call" } as const;
+export const STEP_NOUN = { email: "Email", sms: "Text", call: "Call", linkedin: "LinkedIn step" } as const;
 
 /**
  * A track's name in messages, from its own channel and never its position among all tracks: "the

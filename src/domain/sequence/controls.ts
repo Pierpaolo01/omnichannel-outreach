@@ -8,7 +8,8 @@
 import { leadNow, wallOfLead } from "./clock.ts";
 import type { TrackDefinition } from "./definition.ts";
 import type { OutreachStatus } from "../outreach-status.ts";
-import { advanceTrack, channelReaches, deriveStatus, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
+import { markedReplyId } from "./reply-identity.ts";
+import { advanceTrack, applyReply, channelReaches, deriveStatus, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
 import { isUncertain } from "./attempt.ts";
 import type { SubjectState } from "./state.ts";
 
@@ -92,7 +93,7 @@ export function withProvider(state: SubjectState, stepId: string): boolean {
   return state.work.some((w) => w.stepId === stepId && isUncertain(w));
 }
 
-const PROVIDER_NAME = { email: "email provider", sms: "SMS provider", call: "call list" } as const;
+const PROVIDER_NAME = { email: "email provider", sms: "SMS provider", call: "call list", linkedin: "LinkedIn session" } as const;
 
 /** Skip the current step (ADR 0003 "Ticket 17a", "Skip step"): exactly one step, never sent. */
 function skip(state: SubjectState, now: number): ControlResult {
@@ -287,4 +288,46 @@ export function judgeCampaignControl(
   rules: { readonly campaignPrecondition: typeof campaignPrecondition },
 ): string | null {
   return campaignRefusal(row, pause) ?? rules.campaignPrecondition(row, expected);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The user's reply mark (ADR 0004 section 7): the app detects no social reply, so the user marks it.
+
+export const NOTHING_SENT_ON_LINKEDIN = "Nothing has been sent to them on LinkedIn in this campaign, so there is no LinkedIn reply to mark.";
+
+/**
+ * Why marking a LinkedIn reply is refused, or null (ADR 0004 section 7, question Q39): a lead's campaign must be launched;
+ * a lead that already replied, or ended interested on a call, is not stopped again (ADR 0003 2.4's reply row); and some
+ * LinkedIn work of the subject must have been handed over in this campaign, since nothing else could be answered there.
+ */
+export function markRepliedRefusal(state: SubjectState): string | null {
+  const { subject, campaign } = state;
+  if (subject.kind === "enrollment" && campaign.launchedAt === null) return NOT_LAUNCHED;
+  if (subject.ended === "replied") return "They are already marked replied in this campaign.";
+  if (subject.ended === "interested_on_call") return "They were interested on a call: outreach to them has ended in this campaign.";
+  // Something must have reached the person on LinkedIn (council on 194fc44, item 7): work known sent, or handed over and not
+  // yet settled. A refused invite (an unreachable profile), a withdrawn claim or a final "not sent" reached nobody.
+  const reached = (w: (typeof state.work)[number]) => w.kind != null && w.firstHandedWall !== null && (w.settled === null || w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null);
+  // A connection that existed before is not outreach (council on b21af02, item 5): only this subject's own work counts.
+  if (!state.work.some(reached)) return NOTHING_SENT_ON_LINKEDIN;
+  return null;
+}
+
+/**
+ * The mark's confirmation (ADR 0004 section 7; council on 194fc44, item 7), checked as the other controls' is, after the
+ * mark's own rule and in the transaction of its request id: the status the read showed, against the lead as that read
+ * showed it (`confirmed`). Null when it holds or none was sent.
+ */
+export function markPrecondition(confirmed: SubjectState, expected: { readonly status: OutreachStatus } | null): string | null {
+  return expected === null || deriveStatus(confirmed) === expected.status ? null : CHANGED_SINCE_CONFIRMED;
+}
+
+/**
+ * The mark (ADR 0004 section 7): a reply on LinkedIn at the mark's instant, stored under the control's request id, which
+ * stops this subject in this campaign only and quiesces it, by the engine's own reply rule (`applyReply`).
+ */
+export function markReplied(state: SubjectState, requestId: string, now: number): ControlResult {
+  const why = markRepliedRefusal(state);
+  if (why !== null) return refuse(why);
+  return accept(applyReply(state, { channel: "linkedin", atWall: now, providerRef: markedReplyId("linkedin", requestId) }, now));
 }

@@ -55,7 +55,9 @@ export function callCounts(outcome: CallOutcome): { readonly made: boolean; read
 
 const outcomeOf = (value: string): CallOutcome | null => CALL_OUTCOMES.find((o) => o === value) ?? null;
 const statusOf = (value: string): OutreachStatus | null => (isOutreachStatus(value) ? value : null);
-const channelOfReply = (value: string | null): MessageChannel | null => (value === "email" || value === "sms" ? value : null);
+const channelOfReply = (value: string | null): ReplyChannel | null => (value === "email" || value === "sms" || value === "linkedin" ? value : null);
+/** A reply's channel: detected on email and SMS, marked by the user on LinkedIn (ADR 0004 section 7). */
+type ReplyChannel = MessageChannel | "linkedin";
 
 /**
  * A figure and its test share, from one pass over the same rows (the principal's decision of 15 November 2026: test runs
@@ -86,15 +88,15 @@ const tallyCalls = (facts: MeasureFacts, part: keyof ReturnType<typeof callCount
  * (council on 384630e, item 2): a figure that never goes down when a replied lead is resumed or moved to win-back. Every
  * reply is stored on its subject whatever its status (`applyReply`), so a lead ended interested that later replied counts too.
  */
-function firstReplies(facts: MeasureFacts): Map<string, { channel: MessageChannel; test: boolean }> {
-  const first = new Map<string, { channel: MessageChannel; test: boolean }>();
+function firstReplies(facts: MeasureFacts): Map<string, { channel: ReplyChannel; test: boolean }> {
+  const first = new Map<string, { channel: ReplyChannel; test: boolean }>();
   for (const r of facts.replies) {
     const channel = channelOfReply(r.channel);
     if (channel !== null && !first.has(r.subjectId)) first.set(r.subjectId, { channel, test: r.test });
   }
   return first;
 }
-const repliedSubjects = (facts: MeasureFacts, channel: MessageChannel | null) =>
+const repliedSubjects = (facts: MeasureFacts, channel: ReplyChannel | null) =>
   [...firstReplies(facts)].filter(([, r]) => channel === null || r.channel === channel).map(([subjectId, r]) => ({ subjectId, test: r.test }));
 
 /** The messages the provider reported sent: an attempt in state `sent`, with its provider send time (Activity's "sent"). */
@@ -117,6 +119,8 @@ export interface MeasureRules {
   sent(facts: MeasureFacts, channel: MessageChannel): Tally;
   failedOrBounced(facts: MeasureFacts, channel: MessageChannel): Tally;
   replies(facts: MeasureFacts, channel: MessageChannel): Tally;
+  /** LinkedIn (ADR 0004 section 8): invites sent and accepted, messages sent, failures and replies marked. */
+  linkedin(facts: MeasureFacts): { readonly invitesSent: Tally; readonly invitesAccepted: Tally; readonly messagesSent: Tally; readonly failed: Tally; readonly replies: Tally };
   callsMade(facts: MeasureFacts): Tally;
   callsConnected(facts: MeasureFacts): Tally;
   callsInterested(facts: MeasureFacts): Tally;
@@ -150,6 +154,17 @@ export const MEASURE_RULES: MeasureRules = {
 
   replies: (facts, channel) => each(repliedSubjects(facts, channel)),
 
+  linkedin(facts) {
+    const sent = sentAttempts(facts).filter((a) => a.channel === "linkedin");
+    return {
+      invitesSent: each(sent.filter((a) => a.action === "invite")),
+      invitesAccepted: tally(facts.acceptances ?? [], (a) => `${a.subjectId}\u0000${a.trackId}`),
+      messagesSent: each(sent.filter((a) => a.action === "message")),
+      failed: tally(facts.failures.filter((f) => f.channel === "linkedin"), (m) => `${m.subjectId}\u0000${m.stepId}`),
+      replies: each(repliedSubjects(facts, "linkedin")),
+    };
+  },
+
   callsMade: (facts) => tallyCalls(facts, "made"),
   callsConnected: (facts) => tallyCalls(facts, "connected"),
   callsInterested: (facts) => tallyCalls(facts, "interested"),
@@ -164,7 +179,8 @@ export const MEASURE_RULES: MeasureRules = {
 
   /** The subjects that replied, out of the subjects reached by email or SMS (a message sent, or a reply). */
   replyRate(facts) {
-    const replied = repliedSubjects(facts, null);
+    // Email and SMS replies only: the rate says "you emailed or texted"; a reply marked on LinkedIn is LinkedIn's own figure.
+    const replied = [...repliedSubjects(facts, "email"), ...repliedSubjects(facts, "sms")];
     const reached = [...replied, ...sentAttempts(facts).filter((a) => messageChannel(a.channel) !== null)];
     return rate(each(replied), tally(reached, (r) => r.subjectId));
   },
@@ -177,8 +193,8 @@ export const MEASURE_RULES: MeasureRules = {
  * recorded activity, so a figure whose track a draft deleted is still shown (review bot on b8a8361).
  */
 function channelsOf(facts: MeasureFacts): CampaignMeasures["channels"] {
-  const order: readonly TrackChannel[] = ["email", "sms", "call"];
-  const recorded = new Set<TrackChannel>([...facts.attempts, ...facts.failures, ...facts.bounces, ...facts.replies].flatMap((r) => messageChannel(r.channel) ?? []));
+  const order: readonly TrackChannel[] = ["email", "sms", "linkedin", "call"];
+  const recorded = new Set<TrackChannel>([...facts.attempts, ...facts.failures, ...facts.bounces, ...facts.replies].flatMap((r) => (r.channel === "linkedin" ? ["linkedin" as const] : (messageChannel(r.channel) ?? []))));
   if (facts.calls.length > 0) recorded.add("call");
   return order.filter((c) => recorded.has(c) || facts.definition.tracks.some((t) => t.channel === c));
 }
@@ -197,6 +213,7 @@ export function measuresOf(facts: MeasureFacts, overrides: Partial<MeasureRules>
   const interested = rules.callsInterested(facts);
   const declined = rules.callsDeclined(facts);
   const pending = rules.callbacksPending(facts);
+  const li = rules.linkedin(facts);
   return {
     launched: facts.launched,
     leads: facts.enrollments.length,
@@ -204,6 +221,14 @@ export function measuresOf(facts: MeasureFacts, overrides: Partial<MeasureRules>
     channels: channelsOf(facts),
     email: messages("email"),
     sms: messages("sms"),
+    linkedin: {
+      invitesSent: li.invitesSent.all,
+      invitesAccepted: li.invitesAccepted.all,
+      messagesSent: li.messagesSent.all,
+      failed: li.failed.all,
+      replies: li.replies.all,
+      fromTests: { invitesSent: li.invitesSent.test, invitesAccepted: li.invitesAccepted.test, messagesSent: li.messagesSent.test, failed: li.failed.test, replies: li.replies.test },
+    },
     calls: {
       made: made.all,
       connected: connected.all,

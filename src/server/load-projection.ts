@@ -24,7 +24,7 @@ import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, startOfLocalDay, w
 import { windowOf, type ReadyItem } from "../domain/sequence/dispatch.ts";
 import { callableOnDay, callRoom, callWindow, goodNumbers } from "../domain/sequence/calls.ts";
 import { liveSteps, liveTracks, poolOf, winBackEntry, type CampaignDefinition, type TrackChannel } from "../domain/sequence/definition.ts";
-import { channelReaches, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../domain/sequence/progress.ts";
+import { channelReaches, settledEvaluation, settledReadiness, stillSettled, type ConversationVersions, type SettledEvaluation } from "../domain/sequence/progress.ts";
 import type { AccountState, Attempt, CallDay, SmsBinding, SubjectState } from "../domain/sequence/state.ts";
 import { DEFAULT_RULES, type Rules } from "./engine/rules.ts";
 
@@ -682,7 +682,8 @@ export function projectLoad(input: ProjectionInput): Projection {
       for (const id of [...dirty]) {
         const s = stateOf(id);
         const known = evalUntil.get(id);
-        const conversations = String(bindingsVersion);
+        // The projection's world keeps one version for every pair: any change of its bindings moves it.
+        const conversations: ConversationVersions = () => String(bindingsVersion);
         // The one settling rule the worker uses (`settledEvaluation`, `stillSettled`); the oracle's broken projection keeps
         // a settled evaluation across a change of conversations ("a dirty watcher keeps its cached evaluation").
         if (known?.state === s && (input.keepSettledAcrossConversations ? t < known.until : stillSettled(known, t, conversations))) continue;
@@ -708,7 +709,8 @@ export function projectLoad(input: ProjectionInput): Projection {
         const known = ready.get(id);
         // The worker's readiness rule (`settledReadiness`, `stillSettled`): kept until the next due instant, and, while an
         // SMS track waits, until the conversations change.
-        const conversations = String(bindingsVersion);
+        // The projection's world keeps one version for every pair: any change of its bindings moves it.
+        const conversations: ConversationVersions = () => String(bindingsVersion);
         if (known?.state === s && (input.keepSettledAcrossConversations ? t < known.until : stillSettled(known, t, conversations))) continue;
         const loaded = load(id, t);
         const items = rules.readyItems(loaded, t);

@@ -1,4 +1,4 @@
-import { applyReply, candidatesFor, finishTrack, progressOf } from "../../src/domain/sequence/progress.ts";
+import { applyReply, candidatesFor, finishTrack, progressOf, rules as progressRules } from "../../src/domain/sequence/progress.ts";
 import { leadNow, wallOfLead } from "../../src/domain/sequence/clock.ts";
 import type { StoredReplyId } from "../../src/domain/sequence/reply-identity.ts";
 import type { SubjectState, TrackProgress } from "../../src/domain/sequence/state.ts";
@@ -73,7 +73,7 @@ function pretendTaken(s: SubjectState, which: (accountId: string, s: SubjectStat
   const fake = [...smsMobiles(s)].flatMap(([trackId, recipient]) =>
     (s.campaign.definition.smsPool ?? [])
       .filter((n) => which(n, s, trackId) && !s.smsBindings.some((b) => b.sender === n && b.recipient === recipient))
-      .map((n) => ({ sender: n, recipient, owner: PRETEND, ownerCampaignId: null, ownerCampaignName: null, ownerIsTest: false, ownerEnded: false, ownerSent: true, ownerAnswered: false })),
+      .map((n) => ({ sender: n, recipient, owner: PRETEND, ownerCampaignId: null, ownerCampaignName: null, ownerIsTest: false, ownerEnded: false, ownerSent: true, ownerAnswered: false, channel: "sms" as const })),
   );
   return fake.length === 0 ? s : { ...s, smsBindings: [...s.smsBindings, ...fake] };
 }
@@ -107,7 +107,7 @@ const RULES: Record<string, Partial<Rules>> = {
       const out = R.claim(s, item, acc, input);
       const claimed = out.attempts.find((x) => x.id === input.attemptId);
       if (!claimed || acc.channel !== "sms" || out.smsBindings.some((b) => b.sender === acc.id && b.recipient === claimed.destination)) return out;
-      return { ...out, smsBindings: [...out.smsBindings, { sender: acc.id, recipient: claimed.destination, owner: s.subject.id, ownerCampaignId: s.campaign.id, ownerCampaignName: null, ownerIsTest: s.subject.kind === "test_run", ownerEnded: false, ownerSent: false, ownerAnswered: false }] };
+      return { ...out, smsBindings: [...out.smsBindings, { sender: acc.id, recipient: claimed.destination, owner: s.subject.id, ownerCampaignId: s.campaign.id, ownerCampaignName: null, ownerIsTest: s.subject.kind === "test_run", ownerEnded: false, ownerSent: false, ownerAnswered: false, channel: "sms" as const }] };
     },
   },
   "ending check too late": {
@@ -151,7 +151,7 @@ const RULES: Record<string, Partial<Rules>> = {
   // Point 10: a first text refused or never sent keeps its conversation, as if a text had gone.
   "a binding with nothing sent counts as taken": {
     releaseUnsent: (s) => s,
-    evaluate: (s, now, options) => ({ ...R.evaluate({ ...s, smsBindings: s.smsBindings.map((b) => ({ ...b, ownerSent: true, ownerAnswered: false })) }, now, options), smsBindings: s.smsBindings }),
+    evaluate: (s, now, options) => ({ ...R.evaluate({ ...s, smsBindings: s.smsBindings.map((b) => ({ ...b, ownerSent: true, ownerAnswered: false, channel: "sms" as const })) }, now, options), smsBindings: s.smsBindings }),
   },
 
   // The worker's readiness cache ("nothing is ready until") kept across a change of conversations: a lead held on an
@@ -239,6 +239,27 @@ const RULES: Record<string, Partial<Rules>> = {
   // Verifier F1: each ordering rule of 4.3, across both channels.
   "first messages before follow-ups": priority((a, b) => R.claimOrder({ ...a, touched: !a.touched }, { ...b, touched: !b.touched })),
   "newest due first": priority((a, b) => (a.touched !== b.touched || a.dueWall === b.dueWall ? R.claimOrder(a, b) : b.dueWall - a.dueWall)),
+  // Review bot on b21af02: the LinkedIn session taken from any pair the subject owns, whatever its channel (a module seam,
+  // `PATCHES` below).
+  "a binding lookup ignores the channel": {},
+  // The re-check of 8c85b2f, item 1: a cache remembers only its own pairs' destinations (`PATCHES` below).
+  "a change to another subject's pair on the same destination does not invalidate a waiting subject": {},
+};
+
+/** Swaps outside the engine's rules (a module seam), applied for a replay and undone after it. */
+const PATCHES: Record<string, () => () => void> = {
+  "a change to another subject's pair on the same destination does not invalidate a waiting subject": () => {
+    progressRules.conversationKeysOwnOnly = true;
+    return () => {
+      progressRules.conversationKeysOwnOnly = false;
+    };
+  },
+  "a binding lookup ignores the channel": () => {
+    progressRules.pairsByChannel = false;
+    return () => {
+      progressRules.pairsByChannel = true;
+    };
+  },
 };
 
 /** The invariant each mutation must break, and the seed offset known to show it (refreshed by the CI search). */
@@ -274,12 +295,15 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "a skipped track finishes a day late": { invariant: "7", seed: 0 },
   "first messages before follow-ups": { invariant: "12", seed: 3 },
   "newest due first": { invariant: "12", seed: 3 },
+  "a binding lookup ignores the channel": { invariant: "L16", seed: 3 },
+  "a change to another subject's pair on the same destination does not invalidate a waiting subject": { invariant: "29", seed: 50 },
 };
 
-export const TRACK_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number }> = Object.fromEntries(
+export const TRACK_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly patch?: () => () => void }> = Object.fromEntries(
   Object.entries(EXPECTED).map(([name, e]) => {
     const rules = RULES[name];
     if (!rules) throw new Error(`no mutation named ${name}`);
-    return [name, { rules, ...e }];
+    const patch = PATCHES[name];
+    return [name, { rules, ...e, ...(patch ? { patch } : {}) }];
   }),
 );

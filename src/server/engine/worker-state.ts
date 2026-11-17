@@ -68,7 +68,7 @@ export async function interruptionNotice(store: Pick<EngineStore, "meta">): Prom
  * no worker has run on yet (no heartbeat) is not interrupted: nothing is due on it that a worker missed.
  */
 export interface FailedRead {
-  readonly channel: "email" | "sms";
+  readonly channel: "email" | "sms" | "linkedin";
   readonly part: "accounts" | "observation" | "call";
   readonly at: number;
 }
@@ -76,7 +76,7 @@ export interface FailedRead {
 const emptyEvidence: ProviderEvidence = { contactAt: null, freshForMs: 0, failedAt: null, failedPart: null };
 
 /** The providers' evidence as the worker last saved it; a value that cannot be parsed is no evidence. */
-export function parseEvidence(raw: string | null): Record<"email" | "sms", ProviderEvidence> {
+export function parseEvidence(raw: string | null): Record<"email" | "sms" | "linkedin", ProviderEvidence> {
   const one = (v: unknown): ProviderEvidence => {
     if (typeof v !== "object" || v === null) return emptyEvidence;
     const o = v as Record<string, unknown>;
@@ -86,13 +86,13 @@ export function parseEvidence(raw: string | null): Record<"email" | "sms", Provi
   };
   try {
     const v = raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
-    return { email: one(v?.["email"]), sms: one(v?.["sms"]) };
+    return { email: one(v?.["email"]), sms: one(v?.["sms"]), linkedin: one(v?.["linkedin"]) };
   } catch {
-    return { email: emptyEvidence, sms: emptyEvidence };
+    return { email: emptyEvidence, sms: emptyEvidence, linkedin: emptyEvidence };
   }
 }
 
-export async function providerEvidence(store: Pick<EngineStore, "meta">): Promise<Record<"email" | "sms", ProviderEvidence>> {
+export async function providerEvidence(store: Pick<EngineStore, "meta">): Promise<Record<"email" | "sms" | "linkedin", ProviderEvidence>> {
   return parseEvidence(await store.meta(PROVIDERS_KEY));
 }
 
@@ -107,7 +107,7 @@ export async function sendingInterrupted(
   // From evidence, not timing (council G): a tick that threw and none ended since; a provider read that failed since the
   // heartbeat; otherwise the worker has not been running (stopped, asleep, or a tick that never ends).
   const evidence = await providerEvidence(store);
-  const failures = (["email", "sms"] as const).flatMap((channel) => {
+  const failures = (["email", "sms", "linkedin"] as const).flatMap((channel) => {
     const e = evidence[channel];
     return e.failedAt !== null && e.failedPart !== null && e.failedAt > heartbeat ? [{ channel, part: e.failedPart, at: e.failedAt }] : [];
   });

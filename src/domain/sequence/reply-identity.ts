@@ -22,6 +22,14 @@ export function storedReplyId(channel: ReplyChannel, eventId: string): StoredRep
   return (channel === "sms" ? `${SMS_PREFIX}${eventId}` : eventId) as StoredReplyId;
 }
 
+/**
+ * The id of a reply the user marked (ADR 0004 section 7): there is no provider event, so it is the control's request id,
+ * prefixed by its channel, which no port's id can be.
+ */
+export function markedReplyId(channel: "linkedin", requestId: string): StoredReplyId {
+  return `${channel}:mark:${requestId}` as StoredReplyId;
+}
+
 /** The id the port knows a stored reply by: the inverse of `storedReplyId`. */
 export function portReplyId(channel: ReplyChannel, id: StoredReplyId): string {
   return channel === "sms" && id.startsWith(SMS_PREFIX) ? id.slice(SMS_PREFIX.length) : id;

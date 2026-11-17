@@ -6,9 +6,14 @@
  */
 import { ENGINE_PARAMS, isLive, isUncertain } from "./attempt.ts";
 import { leadNow, localDayNumber, windowOpen } from "./clock.ts";
-import { poolOf } from "./definition.ts";
+import { holdsConversations, linkedinStepKind, poolOf, socialActionOf, type SocialAction } from "./definition.ts";
 import {
+  rules as gateRules,
+  invitePendingUntil,
+  inviteClaimable,
+  inviteSessions,
   applyToAttempt,
+  awaitingAcceptance,
   callbackHold,
   campaignLets,
   candidatesFor,
@@ -65,6 +70,9 @@ export function heldReason(state: SubjectState, trackId: string, now: number): H
   // A conversation taken on every number the track may use is not a hold: evaluation skips the track (4.5, Q7 answered).
   // One whose owner's first text is not known sent or not sent yet holds it, until that work settles (point 10).
   if (conversationUnsettled(state, trackId, now)) return "sms_conversation_unsettled";
+  // An invite already pending on LinkedIn that this application did not send: held until a check finds it gone, checked
+  // again each settling period while a claim could be made (Q42). The hold lasts between checks, as outside the window.
+  if (invitePendingUntil(state, trackId) !== null) return "invite_pending_elsewhere";
   return null;
 }
 
@@ -81,6 +89,9 @@ export function readyItems(state: SubjectState, now: number): ReadyItem[] {
     if (state.results.some((r) => r.stepId === stepId)) return [];
     if (state.attempts.some((a) => a.stepId === stepId && isLive(a))) return [];
     if (heldReason(state, p.trackId, now)) return [];
+    // An invite is claimed only once every session it may use has answered its connection check within a settling period,
+    // and one of them is clear (council on b21af02, item 4; review bot on e261ffa).
+    if (channelOf(state, p.trackId) === "linkedin" && actionOfStep(state, p.trackId, stepId) === "invite" && !inviteClaimable(state, p.trackId, now)) return [];
     return [{ subjectId: state.subject.id, trackId: p.trackId, stepId, touched: state.subject.touched, dueWall: p.dueWall }];
   });
 }
@@ -115,7 +126,9 @@ export type StepWait =
   | "sender_waiting"
   | "call_capacity"
   | "on_call_list"
-  | "call_hours_closed";
+  | "call_hours_closed"
+  /** A LinkedIn message waiting for its invite to be accepted (ADR 0004 section 9); the read states the day the wait ends. */
+  | "awaiting_acceptance";
 
 /**
  * When the track's pending step goes, as every read says it: ready (its time has come and nothing of its own holds it; it
@@ -129,7 +142,7 @@ export type StepWhen =
   | { readonly kind: "call_day"; readonly at: number; readonly day: number }
   | { readonly kind: "listed_for"; readonly day: number }
   /** `channel` names the step's channel where the reason depends on it (no transport). */
-  | { readonly kind: "waits"; readonly why: StepWait; readonly channel?: "email" | "sms" };
+  | { readonly kind: "waits"; readonly why: StepWait; readonly channel?: "email" | "sms" | "linkedin"; readonly until?: number };
 
 /**
  * A held track's reason as the read gives it (5.4), one case per hold `heldReason` can return, so a hold a later change
@@ -142,6 +155,7 @@ export function holdWait(hold: HoldReason): StepWait {
     case "provider_skipped":
     case "no_thread":
     case "sms_conversation_unsettled":
+    case "invite_pending_elsewhere":
       return hold;
     default: {
       const unhandled: never = hold;
@@ -156,7 +170,7 @@ export function holdWait(hold: HoldReason): StepWait {
  * is interrupted (`waitingOn`, as the gate asks). Both default to what a subject alone shows: available, not held.
  */
 export interface StepEnv {
-  readonly transportAvailable?: (channel: "email" | "sms", threading: "new_subject" | "continue_thread") => boolean;
+  readonly transportAvailable?: (channel: "email" | "sms" | "linkedin", threading: "new_subject" | "continue_thread") => boolean;
   readonly waitingOnProvider?: (state: SubjectState, trackId: string) => boolean;
   /**
    * Whether the user's list has room for one more call on a later user day, from the calls the engine knows are carried into
@@ -181,18 +195,22 @@ export interface StepEnv {
  */
 export function stepWhen(state: SubjectState, trackId: string, now: number, env: StepEnv = {}): StepWhen | null {
   const p = progressOf(state, trackId);
-  if (!p || p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.dueAt === null) return null;
+  const awaiting = p !== undefined && p.nextStepId !== null && awaitingAcceptance(state, trackId);
+  if (!p || p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || (p.dueAt === null && !awaiting)) return null;
   const waits = (why: StepWait): StepWhen => ({ kind: "waits", why });
   const { subject, campaign } = state;
+  // Every hold first, with no time: a frozen clock has no end date (ADR 0003 "Reads that say when"; review bot on 194fc44).
   if (subject.ended !== null) return waits("ended");
   if (!campaignLets(state)) return waits(campaign.pausedSince !== null ? "campaign_paused" : "campaign_not_launched");
   if (subject.leadPaused) return waits("lead_paused");
   if (callbackHold(state)) return waits("callback");
   if (!runs(state)) return waits("ended");
+  // Waiting for acceptance (ADR 0004 9): the day the wait ends is the engine's own deadline on the lead's running clock now.
+  if (awaiting) return p.acceptBy != null ? { kind: "waits", why: "awaiting_acceptance", until: now + (p.acceptBy - leadNow(state.subject.clock, now)) } : waits("awaiting_acceptance");
   const stepId = p.nextStepId;
   const channel = channelOf(state, trackId);
   if (channel === "call") return callWhen(state, trackId, stepId, now, env);
-  if (channel !== "email" && channel !== "sms") return null;
+  if (channel !== "email" && channel !== "sms" && channel !== "linkedin") return null;
   // 1. A held track first (5.4): work the provider has not confirmed holds the track with a live attempt too.
   const hold = trackHold(state, trackId);
   if (hold) return waits(holdWait(hold));
@@ -204,7 +222,7 @@ export function stepWhen(state: SubjectState, trackId: string, now: number, env:
   // 2. Time alone: the wait's end and the window, nothing about senders but what the engine knows rules every one out.
   const opens = sendableFrom(state, trackId, now);
   if (opens === null) return waits("no_window");
-  if (opens > now) return leadWait(state, trackId, stepId) ?? noSenderKnown(state, trackId) ?? { kind: "at", at: opens };
+  if (opens > now) return leadWait(state, trackId, stepId) ?? noSenderKnown(state, trackId, now) ?? { kind: "at", at: opens };
   // 3. Its time has come. Every hold keeps its own reason (review bot on cc9bf55), then the per-step checks.
   if (!live) {
     const held = heldReason(state, trackId, now);
@@ -231,7 +249,7 @@ function unclaimedWhen(state: SubjectState, trackId: string, stepId: string, now
   const refusal = claimRefusal(state, { trackId, stepId }, now);
   if (refusal !== null) return { kind: "waits", why: refusalWait(refusal) };
   const destination = destinationOf(state, trackId);
-  const candidates = candidatesOf(state, trackId);
+  const candidates = candidatesOf(state, trackId, now);
   // Predicate 18 on every sender it may use: whichever the claim takes, the handover waits.
   if (candidates.length > 0 && candidates.every((a) => replyPending(state, a.id, destination))) return { kind: "waits", why: "reply_pending" };
   if (chooseAccount(state, now, stepId)) return { kind: "ready" };
@@ -240,16 +258,59 @@ function unclaimedWhen(state: SubjectState, trackId: string, stepId: string, now
 }
 
 /** The candidate accounts of the track's channel, as `chooseAccount` reads them. */
-function candidatesOf(state: SubjectState, trackId: string): AccountState[] {
+function candidatesOf(state: SubjectState, trackId: string, now: number): AccountState[] {
   const channel = channelOf(state, trackId);
-  return candidatesFor(state, trackId).map((id) => state.accounts[id]).filter((a): a is AccountState => a !== undefined && a.channel === channel);
+  const action = actionOfPending(state, trackId);
+  const p = progressOf(state, trackId);
+  const inherited = p?.nextStepId ? (inheritedWork(state, p.nextStepId)?.accountId ?? null) : null;
+  return sessionsFor(state, trackId, action, now, inherited)
+    .map((id) => state.accounts[id])
+    .filter((a): a is AccountState => a !== undefined && a.channel === channel)
+    .map((a) => forAction(a, action));
+}
+
+/**
+ * The accounts a step may be claimed on: its track's candidates, and for an invite only the sessions whose connection check
+ * answered clear (review bot on e261ffa), with the account an inherited claim already holds.
+ */
+function sessionsFor(state: SubjectState, trackId: string, action: SocialAction | null, now: number, inherited: string | null): string[] {
+  const ids = candidatesFor(state, trackId);
+  if (action !== "invite") return ids;
+  const clear = inviteSessions(state, trackId, ids, now);
+  return inherited !== null && ids.includes(inherited) && !clear.includes(inherited) ? [...clear, inherited] : clear;
+}
+
+/** The social action of a track's pending step (ADR 0004 6), or null for email and SMS. */
+function actionOfPending(state: SubjectState, trackId: string): SocialAction | null {
+  const p = progressOf(state, trackId);
+  return p?.nextStepId ? actionOfStep(state, trackId, p.nextStepId) : null;
+}
+
+/** The social action a step's handover asks for: the allowance it counts on (ADR 0004 2.1, 6). Null for email and SMS. */
+export function actionOfStep(state: SubjectState, trackId: string, stepId: string): SocialAction | null {
+  const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
+  return track ? socialActionOf(linkedinStepKind(track, stepId)) : null;
+}
+
+/**
+ * A social account as one kind of action sees it (ADR 0004 6): its capacity, daily limit and use are that kind's allowance,
+ * so `pickAccount`, `accountHasRoom` and the reads' sender causes judge the kind's room unchanged. Email and SMS accounts,
+ * and a step with no action, are the account itself.
+ */
+export function forAction(account: AccountState, action: SocialAction | null): AccountState {
+  if (action === null || !account.kinds) return account;
+  const bucket = account.kinds[action];
+  // Reservations are the account's, of every kind; a kind's own reserved count is not kept, so its sent part is its use
+  // less its share of reservations, which `senderWait` reads only as "full by sends alone": never below zero.
+  return { ...account, capacity: bucket.capacity, dailyLimit: bucket.capacity, used: bucket.used, reserved: Math.min(account.reserved, bucket.used) };
 }
 
 /** The address or mobile a step of the track goes to, as the claim writes it. */
 function destinationOf(state: SubjectState, trackId: string): string {
   const p = progressOf(state, trackId);
   const d = state.lead.details.find((x) => x.id === state.lead.resolved[p?.destinationDetailId ?? ""]?.liveId);
-  return (channelOf(state, trackId) === "sms" ? d?.key : d?.value) ?? "";
+  const channel = channelOf(state, trackId);
+  return (channel === "sms" || channel === "linkedin" ? d?.key : d?.value) ?? "";
 }
 
 /** A claim's step guard on the lead alone: a destination that is not a good address, copy that does not render, no thread. */
@@ -263,8 +324,13 @@ function leadWait(state: SubjectState, trackId: string, stepId: string): { kind:
 }
 
 /** What the engine knows at the read rules out every sender for the step: none connected, or every daily limit zero. */
-function noSenderKnown(state: SubjectState, trackId: string): { kind: "waits"; why: StepWait } | null {
+function noSenderKnown(state: SubjectState, trackId: string, now: number): { kind: "waits"; why: StepWait } | null {
   const channel = channelOf(state, trackId) ?? "email";
+  // A LinkedIn step: every session it may use allows none of its kind of action, the user's setting (ADR 0004 4, item 6).
+  if (channel === "linkedin") {
+    const sessions = candidatesOf(state, trackId, now);
+    return sessions.length > 0 && sessions.every((a) => a.dailyLimit <= 0) ? { kind: "waits", why: "sending_capacity" } : null;
+  }
   if (channel !== "email" && channel !== "sms") return null;
   const fixed = senderOf(state, channel);
   const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];
@@ -307,7 +373,7 @@ function refusalWait(refusal: string): StepWait {
  */
 export function senderWait(state: SubjectState, trackId: string, stepId: string, now: number): StepWait | null {
   const reserved = inheritedWork(state, stepId)?.accountId ?? null;
-  const candidates = candidatesOf(state, trackId);
+  const candidates = candidatesOf(state, trackId, now);
   if (candidates.length === 0) return "sender_unavailable";
   const causes: StepWait[] = [];
   for (const a of candidates) {
@@ -367,8 +433,12 @@ export function inheritedWork(state: SubjectState, stepId: string): ProviderWork
 export function chooseAccount(state: SubjectState, now: number, stepId: string | null = null): AccountState | null {
   const trackId = state.campaign.definition.tracks.find((t) => t.steps.some((st) => st.id === stepId))?.id ?? state.campaign.definition.tracks.find((t) => t.channel === "email")?.id ?? "";
   const channel = channelOf(state, trackId) ?? "email";
-  const candidates = candidatesFor(state, trackId).map((id) => state.accounts[id]).filter((a) => a?.channel === channel);
+  const action = stepId === null ? null : actionOfStep(state, trackId, stepId);
   const inherited = stepId === null ? undefined : inheritedWork(state, stepId);
+  const candidates = sessionsFor(state, trackId, action, now, inherited?.accountId ?? null)
+    .map((id) => state.accounts[id])
+    .filter((a) => a?.channel === channel)
+    .map((a) => (a ? forAction(a, action) : a));
   return pickAccount(candidates, now, inherited?.accountId ?? null);
 }
 
@@ -396,7 +466,9 @@ export function claim(
   const p = progressOf(state, item.trackId);
   if (!p?.destinationDetailId) throw new Error("claim without a destination");
   const destination = state.lead.details.find((d) => d.id === state.lead.resolved[p.destinationDetailId ?? ""]?.liveId);
-  const sms = channelOf(state, item.trackId) === "sms";
+  const channel = channelOf(state, item.trackId);
+  const sms = channel === "sms";
+  const action = actionOfStep(state, item.trackId, item.stepId);
   // Uncertain work on this account is carried on, with its key and reservation; otherwise new work.
   const found = inheritedWork(state, item.stepId);
   const inherited = found?.accountId === account.id ? found : undefined;
@@ -407,8 +479,8 @@ export function claim(
     stepId: item.stepId,
     accountId: account.id,
     destinationDetailId: p.destinationDetailId,
-    // A text goes to the mobile's E.164 form; an email to the address as written.
-    destination: (sms ? destination?.key : destination?.value) ?? "",
+    // A text goes to the mobile's E.164 form, a LinkedIn step to the profile's key; an email to the address as written.
+    destination: (sms || channel === "linkedin" ? destination?.key : destination?.value) ?? "",
     state: "claimed",
     copy: null,
     threading: stepDef(state, item.trackId, item.stepId)?.threading ?? "new_subject",
@@ -429,6 +501,7 @@ export function claim(
     awaitingAnswer: false,
     retry: "none",
     rejectReason: null,
+    ...(action !== null ? { action } : {}),
   };
   const work: ProviderWork = {
     key: attempt.id,
@@ -450,12 +523,17 @@ export function claim(
     withdrawWanted: false,
     withdrawLastWall: null,
     wentWall: null,
+    ...(action !== null ? { kind: action, note: null } : {}),
   };
+  // For a social action, the account as stored (a kind's view is only for choosing): its total use, and its kind's too.
+  const base = action !== null ? (state.accounts[account.id] ?? account) : account;
+  const added = inherited ? 0 : 1;
+  const kinds = base.kinds && action !== null ? { ...base.kinds, [action]: { ...base.kinds[action], used: base.kinds[action].used + added } } : base.kinds;
   return {
     ...state,
     attempts: [...state.attempts, attempt],
     work: inherited ? state.work : [...state.work, work],
-    accounts: { ...state.accounts, [account.id]: { ...account, used: account.used + (inherited ? 0 : 1), inFlight: account.inFlight + (inherited ? 0 : 1) } },
+    accounts: { ...state.accounts, [account.id]: { ...base, used: base.used + added, inFlight: base.inFlight + added, ...(kinds ? { kinds } : {}) } },
   };
 }
 
@@ -504,10 +582,15 @@ export function handoverFailures(state: SubjectState, attempt: Attempt, account:
   const fixed = senderOf(state, channel);
   if (account.channel !== channel || (fixed !== null ? fixed !== account.id : !poolOf(state.campaign.definition, channel).includes(account.id))) failed.push(10);
   // 11. For SMS, the pair is unbound, or bound to this subject.
-  if (channel === "sms" && !pairFree(state, account.id, attempt.destination)) failed.push(11);
+  // 11. For a channel of conversations (SMS, LinkedIn), the pair is unbound, or bound to this subject.
+  if (holdsConversations(channel) && !pairFree(state, account.id, attempt.destination, channel)) failed.push(11);
   if (!presendFresh(attempt, now)) failed.push(14);
   if (!renderStep(state, attempt.trackId, attempt.stepId)) failed.push(5);
   if (lacksThread(state, attempt.trackId, attempt.stepId)) failed.push(17);
+  // 19. A LinkedIn message only once the track is connected (ADR 0004 3.2), checked again in the write that authorizes it.
+  const track = state.campaign.definition.tracks.find((t) => t.id === attempt.trackId);
+  const progress = progressOf(state, attempt.trackId);
+  if (track && progress && gateRules.connectionGate(track, attempt.stepId, progress)) failed.push(19);
   if (now < account.nextSlotAt) failed.push(16);
   return [...new Set(failed)].sort((a, b) => a - b);
 }
@@ -517,7 +600,11 @@ export function handoverFailures(state: SubjectState, attempt: Attempt, account:
  * and records the call before it is made.
  */
 export function handOver(state: SubjectState, attempt: Attempt, account: AccountState, now: number): SubjectState {
-  const copy = renderStep(state, attempt.trackId, attempt.stepId);
+  const rendered = renderStep(state, attempt.trackId, attempt.stepId);
+  const base = attempt.action !== undefined ? (state.accounts[account.id] ?? account) : account;
+  // An invite's note goes while the sender's note allowance lasts, decided here once and stored (ADR 0004 section 4).
+  const note = noteFor(state, attempt, base);
+  const copy = rendered && note === "withheld" ? { ...rendered, body: "" } : rendered;
   const handed: Attempt = {
     ...attempt,
     state: "handed",
@@ -532,16 +619,39 @@ export function handOver(state: SubjectState, attempt: Attempt, account: Account
   // The work is called: by its first attempt, or by an inheritor, which carries it on and attends
   // it again, so it is no longer unresolved (no attempt is called once unresolved, invariant 5).
   // The sender is fixed here, and for SMS the conversation taken, in the same write (1.3, 4.5).
-  const sms = channelOf(state, attempt.trackId) === "sms";
-  const binds = sms && !state.smsBindings.some((b) => b.sender === account.id && b.recipient === attempt.destination);
+  const channel = channelOf(state, attempt.trackId);
+  const sms = channel === "sms";
+  const binds = holdsConversations(channel) && !state.smsBindings.some((b) => b.sender === account.id && b.recipient === attempt.destination);
+  const subject =
+    channel === "linkedin"
+      ? { ...state.subject, linkedinSender: state.subject.linkedinSender ?? account.id }
+      : sms
+        ? { ...state.subject, smsSender: state.subject.smsSender ?? account.id }
+        : { ...state.subject, emailSender: state.subject.emailSender ?? account.id };
+  const notes = note === "with" && base.notes ? { notes: { ...base.notes, used: base.notes.used + 1 } } : {};
   return {
     ...state,
-    subject: sms ? { ...state.subject, smsSender: state.subject.smsSender ?? account.id } : { ...state.subject, emailSender: state.subject.emailSender ?? account.id },
-    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerCampaignName: null, ownerIsTest: state.subject.kind === "test_run", ownerEnded: false, ownerSent: false, ownerAnswered: false }] : state.smsBindings,
+    subject,
+    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerCampaignName: null, ownerIsTest: state.subject.kind === "test_run", ownerEnded: false, ownerSent: false, ownerAnswered: false, channel: channel === "linkedin" ? "linkedin" : "sms" }] : state.smsBindings,
     attempts: state.attempts.map((a) => (a.id === attempt.id ? handed : a)),
-    work: state.work.map((w) => (w.key === attempt.idempotencyKey ? { ...w, calls: w.calls + 1, firstHandedWall: w.firstHandedWall ?? now, unresolvedSince: null } : w)),
-    accounts: { ...state.accounts, [account.id]: { ...account, nextSlotAt: now + account.gapMs } },
+    work: state.work.map((w) => (w.key === attempt.idempotencyKey ? { ...w, calls: w.calls + 1, firstHandedWall: w.firstHandedWall ?? now, unresolvedSince: null, ...(note !== null ? { note } : {}) } : w)),
+    accounts: { ...state.accounts, [account.id]: { ...base, nextSlotAt: now + base.gapMs, ...notes } },
   };
+}
+
+/**
+ * Whether an invite carries its note (ADR 0004 section 4): `with` when its rendered note is not empty and the sender's notes
+ * used this month are below its note allowance; `withheld` when the note is not empty and the allowance is used; `none` for
+ * an empty note. Null for any other step. Decided in the handover transaction, once: a retry or a lookup never re-decides it.
+ */
+export function noteFor(state: SubjectState, attempt: Attempt, account: AccountState): "with" | "withheld" | "none" | null {
+  if (actionOfStep(state, attempt.trackId, attempt.stepId) !== "invite") return null;
+  const decided = state.work.find((w) => w.key === attempt.idempotencyKey)?.note ?? null;
+  if (decided !== null) return decided;
+  const rendered = renderStep(state, attempt.trackId, attempt.stepId);
+  if (!rendered || rendered.body.trim() === "") return "none";
+  const notes = account.notes ?? { capacity: 0, used: 0 };
+  return notes.used < notes.capacity ? "with" : "withheld";
 }
 
 /** The same-key retry authorization's conditions (5.6). Empty when the retry may be called now. */

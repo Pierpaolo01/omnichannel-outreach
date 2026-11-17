@@ -716,10 +716,10 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const last = sends.at(-1);
     // A mobile marked bad on a call while its SMS track is open fails the track then (the same rule as an invalid number).
     const bad = t.channel === "sms" ? badAt(mobileOf(s) ?? "") : Infinity;
-    if (last && sends.every((d) => d !== undefined) && knownAt(t.channel, last) < bad) {
+    if (last && sends.every((d) => d !== undefined) && knownAt(t.channel as "email" | "sms", last) < bad) {
       // A last send made while the lead was held finishes the track where its clock stood: the hold's start (3.3).
-      const done = pointOf(s, Math.max(last.at, firstCall(t.channel, s.id, t.steps.at(-1)!.id)?.at ?? 0));
-      const seen = Math.max(done, knownAt(t.channel, last));
+      const done = pointOf(s, Math.max(last.at, firstCall(t.channel as "email" | "sms", s.id, t.steps.at(-1)!.id)?.at ?? 0));
+      const seen = Math.max(done, knownAt(t.channel as "email" | "sms", last));
       // A send the app learned of at the instant the lead stopped was observed first: observation precedes every action in a tick.
       return seen <= end ? { at: done, seen, reason: "completed" } : null;
     }
@@ -1188,7 +1188,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
       // 18, during the run: a due email or text goes within an hour of its window opening while the lead runs (a call never holds them).
       for (const t of def(s).tracks) {
         if (t.channel === "call") continue;
-        const ch = t.channel;
+        const ch = t.channel as "email" | "sms";
         const at = startOf(s, t);
         // Not before a hold that has not ended yet: nothing of it can be due.
         if (at === null || !Number.isFinite(at)) continue;
@@ -1262,7 +1262,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
         const s = subjects.get(id)!;
         for (const t of def(s).tracks) {
           if (t.channel === "call") continue;
-          const ch = t.channel;
+          const ch = t.channel as "email" | "sms";
           const at = startOf(s, t);
           if (at === null || !Number.isFinite(at)) continue;
           for (const [i, step] of t.steps.entries()) {
@@ -1461,7 +1461,7 @@ async function runCallsUnguarded(seed: number, options: CallRunOptions): Promise
     const end = endLimitOf(s);
     const atLaunch = noChannelAt(s) === runStartOf(s) && runStartOf(s) <= now;
     for (const t of tracksOf(s)) {
-      const ch = t.channel;
+      const ch = t.channel as "email" | "sms" | "call";
       const label = trackLabel(def(s), t).label;
       if (atLaunch) {
         // The one entry not read from a stored outcome: no usable channel at launch, said for each main track.

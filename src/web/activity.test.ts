@@ -143,7 +143,7 @@ describe("every track state the server sends after an unworked skip has its own 
       not_started: "Email track 2 has not started.",
     };
     for (const [state, sentence] of Object.entries(table) as [DependentTrackState["state"], string][]) {
-      const a = (state === "waiting" ? { track, state, startsAt: "2026-11-14T01:05:00.000Z" } : { track, state, startsAt: null, owners: [{ name: "Spring clinics", test: false }] }) as { track: typeof track } & DependentTrackState;
+      const a = (state === "waiting" ? { track, state, startsAt: "2026-11-14T01:05:00.000Z" } : { track, state, startsAt: null, owners: [{ name: "Spring clinics", test: false }], channel: "sms" }) as { track: typeof track } & DependentTrackState;
       expect(dependentLine(a, "Europe/London"), state).toBe(sentence);
     }
     // Only waiting and held, states the server read, say it will start.

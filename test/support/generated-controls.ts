@@ -445,7 +445,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   function resolution(s: Subject, t: TrackDefinition, stepId: string): { at: number; seen: number; kind: "sent" | "skipped" } | null {
     const skip = skips.find((x) => x.subjectId === s.id && x.stepId === stepId);
     if (skip) return { at: pointOf(s, skip.at), seen: skip.at, kind: "skipped" };
-    if (t.channel === "call") return null;
+    if (t.channel === "call" || t.channel === "linkedin") return null;
     const d = delivered(t.channel, s, stepId);
     if (!d) return null;
     const call = handovers(t.channel).find((c) => c.key === d.key);
@@ -550,7 +550,7 @@ async function runUnguarded(seed: number, options: ControlRunOptions): Promise<C
   /** Whether a step is with a provider: handed over, not delivered, and not withdrawn on the provider's word. */
   function inFlight(t: TrackDefinition, s: Subject, stepId: string): boolean {
     const ch = t.channel;
-    if (ch === "call") return false;
+    if (ch === "call" || ch === "linkedin") return false;
     // Sent, but not known to the app yet, is still with the provider as far as the app can tell.
     const port = ch === "sms" ? sms : email;
     const known = (d: { key: string; at: number; visibleAt: number }) => upFrom(Math.min(d.visibleAt, port.lookupLog.find((l) => l.key === d.key && l.answer === "sent" && l.at >= d.at)?.at ?? Infinity)) <= h.clock;

@@ -33,6 +33,7 @@ describe("GET /api/campaigns/:id/measures", () => {
       channels: ["email", "sms", "call"],
       email: NO_MESSAGES,
       sms: NO_MESSAGES,
+      linkedin: { invitesSent: 0, invitesAccepted: 0, messagesSent: 0, failed: 0, replies: 0, fromTests: { invitesSent: 0, invitesAccepted: 0, messagesSent: 0, failed: 0, replies: 0 } },
       calls: { ...NO_CALLS, fromTests: NO_CALLS },
       replyRate: { numerator: 0, denominator: 0, percent: null, fromTests: { numerator: 0, denominator: 0 } },
       connectRate: { numerator: 0, denominator: 0, percent: null, fromTests: { numerator: 0, denominator: 0 } },
@@ -261,7 +262,8 @@ describe("the read's cost is bounded (ADR 0003 \"Ticket 22\", what the read cost
     }
   }
 
-  test("nine statements, whatever the activity: the campaign, what may still be sent, then one per kind of fact", async () => {
+  // Ten since ticket 24: the LinkedIn acceptances are one more kind of fact (ADR 0004 section 8).
+  test("ten statements, whatever the activity: the campaign, what may still be sent, then one per kind of fact", async () => {
     const world = await measuresWorld((h) => h.fake.bouncing.add("nia@harbour.example"));
     const read = () => campaignMeasures(world.h.store.engine, world.campaignId);
     const before = await statements(read);
@@ -271,6 +273,6 @@ describe("the read's cost is bounded (ADR 0003 \"Ticket 22\", what the read cost
     await world.h.advanceTo(world.h.clock + 10 * MIN);
     expect(await world.log("Sam Reed", "callback_requested", { callbackAt: new Date(MONDAY_9 + 6 * HOUR).toISOString() })).toBe(200);
     const after = await statements(read);
-    expect([before, after]).toEqual([9, 9]);
+    expect([before, after]).toEqual([10, 10]);
   });
 });

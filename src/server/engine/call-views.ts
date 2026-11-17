@@ -369,7 +369,7 @@ async function noticeView(store: OutreachStore): Promise<InterruptionNoticeView 
 export async function needsAttentionView(store: OutreachStore, now: number, rules: Pick<Rules, "asOfAction" | "evaluate">, transportAvailable: Parameters<typeof needsAttention>[3]): Promise<NeedsAttention> {
   const read = await needsAttention(store.engine, now, rules, transportAvailable);
   // Names only, every lead in one query (council on 7622b8b): the read runs every 20 seconds on Today.
-  const names = await store.leadNames([...read.waitingForCapacity, ...read.noUsableChannel, ...read.heldTracks].map((x) => x.enrollmentId));
+  const names = await store.leadNames([...read.waitingForCapacity, ...read.noUsableChannel, ...read.heldTracks, ...read.inviteWithdrawalsUnknown].map((x) => x.enrollmentId));
   // Every entry is a lead's: the engine's read lists no test run (ADR 0003 "Ticket 21", rule 4). A lead whose name
   // could not be read is named blank rather than dropped, so no entry is hidden.
   const unnamed: AttentionLead = { person: null, company: { id: "", name: "" }, campaign: { id: "", name: "" } };
@@ -377,7 +377,9 @@ export async function needsAttentionView(store: OutreachStore, now: number, rule
   const waitingForCapacity = read.waitingForCapacity.map((w) => ({ ...w, ...lead(w.enrollmentId) }));
   const noUsableChannel = read.noUsableChannel.map((n) => ({ ...n, ...lead(n.enrollmentId) }));
   const heldTracks = read.heldTracks.map((h) => ({ ...h, ...lead(h.enrollmentId) }));
-  return { ...read, waitingForCapacity, noUsableChannel, heldTracks, sendingInterrupted: await sendingInterruptedView(store, now) };
+  // A withdrawal the session cannot answer names its lead, company and campaign like every other entry (council on b21af02, item 11).
+  const inviteWithdrawalsUnknown = read.inviteWithdrawalsUnknown.map((w) => ({ ...w, ...lead(w.enrollmentId) }));
+  return { ...read, waitingForCapacity, noUsableChannel, heldTracks, inviteWithdrawalsUnknown, sendingInterrupted: await sendingInterruptedView(store, now) };
 }
 
 /** How many calls Up next shows on Today. */
@@ -465,7 +467,8 @@ export async function callTaskView(store: OutreachStore, taskId: string, now: nu
   for (const a of s.attempts) {
     if (a.state !== "sent") continue;
     const sentWall = s.work.find((w) => w.key === a.idempotencyKey)?.sentWall ?? a.handedWall ?? a.claimedWall;
-    const channel = s.campaign.definition.tracks.find((t) => t.id === a.trackId)?.channel === "sms" ? "sms" : "email";
+    const own = s.campaign.definition.tracks.find((t) => t.id === a.trackId)?.channel;
+    const channel = own === "sms" ? "sms" : own === "linkedin" ? "linkedin" : "email";
     touches.push({ touch: { kind: channel, at: iso(sentWall), stepId: a.stepId, copy: a.copy }, t: sentWall });
   }
   for (const r of s.replies) touches.push({ touch: { kind: "reply", channel: r.channel, at: iso(r.atWall) }, t: r.atWall });

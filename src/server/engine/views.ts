@@ -1,15 +1,16 @@
 /** Read models for the HTTP interface, built from the engine's stored facts. */
+import { stepNumber } from "../../domain/sequence/definition.ts";
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { carriedInto, isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
 import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
-import { stepWhenView } from "./step-when-view.ts";
+import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
 import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
-import { channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
+import { invitePendingUntil, inviteWithdrawalStuck, channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
-import type { AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
+import type { LinkedinTrackView, AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -88,7 +89,7 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
       .filter((t, i, all) => all.indexOf(t) === i)
       .map((track) => {
         const p = s.tracks.find((x) => x.trackId === track.id);
-        const numberOf = (stepId: string) => track.steps.filter((st) => !st.removed).findIndex((st) => st.id === stepId) + 1;
+        const numberOf = (stepId: string) => stepNumber(track, stepId);
         const task = s.callTasks.find((t) => t.trackId === track.id);
         return {
           trackId: track.id,
@@ -110,6 +111,7 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
           finishReason: p?.finishReason ?? null,
           finishedAt: iso(p?.finishedWall ?? null),
           conversationOwners: conversationOwnersView(s, track.id),
+          linkedin: track.channel === "linkedin" ? linkedinTrackView(s, track.id) : null,
           hold: heldReason(s, track.id, now),
           holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test })),
           // When it goes, by the engine's own decision functions at this instant (ADR 0003 "Reads that say when").
@@ -151,7 +153,7 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
 function nextStepOf(s: SubjectState, trackId: string, numberOf: (stepId: string) => number, now: number, env: StepEnv, read: typeof stepWhen): EnrollmentProgress["tracks"][number]["nextStep"] {
   const p = s.tracks.find((x) => x.trackId === trackId);
   const when = read(s, trackId, now, env);
-  return p?.nextStepId && when ? { stepId: p.nextStepId, number: numberOf(p.nextStepId), when: stepWhenView(when, now, s.callDay.day) } : null;
+  return p?.nextStepId && when ? { stepId: p.nextStepId, number: numberOf(p.nextStepId), when: stepWhenView(when, now, s.callDay.day, channelOfTrack(s, trackId)) } : null;
 }
 
 /** A branch's tracks for the lead: not removed, or already started by it (5.1). */
@@ -182,8 +184,9 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
  * Needs attention as the engine decides it: every list of the HTTP read, with each lead entry by its ids only. The
  * route adds whose lead each is (`needsAttentionView` in call-views.ts, ticket 20b); nothing else is added there.
  */
-export type EngineNeedsAttention = Omit<NeedsAttention, "waitingForCapacity" | "noUsableChannel" | "sendingInterrupted" | "heldTracks"> & {
+export type EngineNeedsAttention = Omit<NeedsAttention, "waitingForCapacity" | "noUsableChannel" | "sendingInterrupted" | "heldTracks" | "inviteWithdrawalsUnknown"> & {
   readonly heldTracks: readonly Omit<NeedsAttention["heldTracks"][number], keyof AttentionLead>[];
+  readonly inviteWithdrawalsUnknown: readonly Omit<NonNullable<NeedsAttention["inviteWithdrawalsUnknown"]>[number], keyof AttentionLead>[];
   readonly waitingForCapacity: readonly Omit<NeedsAttention["waitingForCapacity"][number], keyof AttentionLead>[];
   readonly noUsableChannel: readonly Omit<NeedsAttention["noUsableChannel"][number], keyof AttentionLead>[];
 };
@@ -192,7 +195,7 @@ export async function needsAttention(
   store: EngineStore,
   now: number,
   rules: Pick<Rules, "asOfAction" | "evaluate"> = DEFAULT_RULES,
-  transportAvailable: (channel: "email" | "sms", threading: "new_subject" | "continue_thread") => boolean = () => true,
+  transportAvailable: (channel: "email" | "sms" | "linkedin", threading: "new_subject" | "continue_thread") => boolean = () => true,
 ): Promise<EngineNeedsAttention> {
   const accounts = await store.accounts(now);
   const open = await store.openAttempts();
@@ -229,14 +232,14 @@ export async function needsAttention(
   // Ticket 20a (council B): while sending is interrupted, which providers the gate holds due sends on, by its own function.
   const interrupted = await sendingInterrupted(store, now);
   const evidence = interrupted ? await providerEvidence(store) : null;
-  const providerWaits = new Map<"email" | "sms", number>();
+  const providerWaits = new Map<"email" | "sms" | "linkedin", number>();
   // Leads only (ADR 0003 "Ticket 21", rule 4): a running test's waits show on its Test run tab, never as a lead's.
   for (const id of await store.runningLeadIds()) {
     const stored = await store.subject(id, now);
     if (!stored) continue;
     for (const p of stored.tracks) {
       const reason = heldReason(stored, p.trackId, now);
-      if (reason) heldTracks.push({ enrollmentId: id, trackId: p.trackId, reason, owners: unsettledOwnersOf(stored, p.trackId, now).map((o) => ({ name: o.name, test: o.test })) });
+      if (reason) heldTracks.push({ enrollmentId: id, trackId: p.trackId, channel: stored.campaign.definition.tracks.find((t) => t.id === p.trackId)?.channel ?? "email", reason, owners: unsettledOwnersOf(stored, p.trackId, now).map((o) => ({ name: o.name, test: o.test })) });
     }
     // Ticket 20a: as of the read, each due step the claim's step guard accepts now that waits for a transport the
     // provider cannot use yet, or for an account full for its reset day (not for a pacing slot or an in-flight place).
@@ -296,7 +299,12 @@ export async function needsAttention(
     }
   }
   overdueCallbacks.sort((a, b) => Date.parse(a.callbackAt) - Date.parse(b.callbackAt) || (a.taskId < b.taskId ? -1 : 1));
+  // Leads only, whatever their state: a withdrawal is asked of the session for an ended lead too.
+  const inviteWithdrawalsUnknown = (await store.invitesToWithdraw())
+    .filter((w) => inviteWithdrawalStuck(w.progress) && !w.subjectId.startsWith("test-"))
+    .map((w) => ({ enrollmentId: w.subjectId, trackId: w.trackId, unknownAnswers: w.progress.inviteWithdrawalUnknowns ?? 0 }));
   return {
+    inviteWithdrawalsUnknown,
     overdueCallbacks,
     stalledInboxes: stalledAccounts(accounts, open, now),
     heldTracks,
@@ -319,4 +327,26 @@ export async function needsAttention(
 async function senderProblems(store: EngineStore, accounts: readonly AccountState[]): Promise<NeedsAttention["senderProblems"][number][]> {
   const labels = await store.accountLabels();
   return accounts.filter((a) => !a.healthy).map((a) => ({ accountId: a.id, channel: a.channel, label: labels[a.id] ?? a.id, problem: a.problem ?? "unhealthy" }));
+}
+
+const earliest = (ts: readonly number[]): number | null => (ts.length === 0 ? null : Math.min(...ts));
+
+/** A LinkedIn track's stored facts as the read gives them (ADR 0004 section 9): nothing computed beside the engine's own. */
+export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTrackView {
+  const p = s.tracks.find((x) => x.trackId === trackId);
+  const invite = s.work.find((w) => w.trackId === trackId && w.kind === "invite" && w.firstHandedWall !== null && w.settled !== "rejected");
+  const sent = invite !== undefined && (invite.settled === "sent" || invite.settled === "user_sent" || invite.sentWall !== null);
+  const withdrawal = p?.inviteWithdrawal ?? null;
+  return {
+    note: invite?.note ?? null,
+    connection: p?.connection ?? null,
+    connectedAt: iso(p?.connectedWall ?? null),
+    acceptedAt: iso(p?.acceptedWall ?? null),
+    acceptedAfterFinish: p?.acceptedWall != null && p.finishedWall != null && (p.connection ?? null) === null,
+    withdrawal,
+    withdrawalStuck: p ? inviteWithdrawalStuck(p) : false,
+    inviteOpen: sent && p?.acceptedWall == null && (p?.connection ?? null) === null && withdrawal !== "withdrawn" && withdrawal !== "accepted_first",
+    // While the track holds as pending elsewhere (every session it may use pending): the earliest any of them saw it.
+    pendingElsewhereSince: iso(invitePendingUntil(s, trackId) === null ? null : earliest(Object.values(p?.connectionChecks ?? {}).flatMap((c) => (c.pendingSince === null ? [] : [c.pendingSince])))),
+  };
 }

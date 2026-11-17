@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { REPLY_WORDS } from "./controls/wording.ts";
 import type { ActivityEntry, ActivityNote, ActivityView, DependentTrackState, NoteAnswer } from "../shared/api.ts";
 import { ApiRequestError, postJson } from "./api.ts";
 import { useLiveRead } from "./controls/useLiveRead.ts";
@@ -108,8 +109,8 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
     return {
       icon: "reply",
       tone: HAND,
-      title: entry.channel === "email" ? "Replied by email" : "Replied by text",
-      body: entry.channel === "email" ? "Automation stopped in this campaign. Read and answer the reply in Instantly." : "Automation stopped in this campaign. Answer the reply on your phone.",
+      title: REPLY_WORDS[entry.channel].title,
+      body: `Automation stopped in this campaign. ${REPLY_WORDS[entry.channel].activity}`,
       track: null,
     };
   if (entry.kind === "ended")
@@ -176,7 +177,7 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
       return { icon: "bad", tone: CRIT, title: `${noun} ${entry.stepNumber} failed`, body: `${entry.to}: ${REASON[entry.reason] ?? entry.reason}`, track };
     case "skipped": {
       // A taken conversation names the campaign that keeps it (question Q7 answered), through the one wording function.
-      const body = entry.reason === "sms_conversation_taken" ? `${conversationTaken(entry.owners ?? []).replace(/^t/, "T")}, so a reply couldn’t show which campaign it answers.` : (REASON[entry.reason] ?? entry.reason);
+      const body = entry.reason === "sms_conversation_taken" ? `${conversationTaken(entry.owners ?? [], entry.channel).replace(/^t/, "T")}, so a reply couldn’t show which campaign it answers.` : (REASON[entry.reason] ?? entry.reason);
       return { icon: "system", tone: PLAIN, title: entry.stepNumber === null ? `${entry.track.label} skipped` : `${noun} ${entry.stepNumber} skipped`, body, track: entry.stepNumber === null ? null : track };
     }
     case "bounced":
@@ -264,7 +265,7 @@ export function dependentLine(a: { readonly track: { readonly label: string } } 
     case "skipped_no_channel":
       return `${name} was skipped: there is nothing to reach them on for it.`;
     case "skipped_conversation_taken":
-      return `${name} was skipped: ${conversationTaken(a.owners)}.`;
+      return `${name} was skipped: ${conversationTaken(a.owners, a.channel)}.`;
     case "skipped":
       return `${name} was skipped.`;
     case "stopped":

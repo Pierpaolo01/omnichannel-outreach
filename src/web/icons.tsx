@@ -61,6 +61,14 @@ const paths = {
       <path d="M3.6 5.6L10 10.6l6.4-5" />
     </>
   ),
+  // A social profile (ADR 0004): a person in a frame, not a platform's mark.
+  linkedin: (
+    <>
+      <rect x="3" y="3" width="14" height="14" rx="2.4" />
+      <circle cx="10" cy="8.2" r="2.2" />
+      <path d="M6.2 14.2c.7-1.9 2.1-2.9 3.8-2.9s3.1 1 3.8 2.9" />
+    </>
+  ),
   sms: <path d="M4.5 4.5h11a1.5 1.5 0 0 1 1.5 1.5v6.5a1.5 1.5 0 0 1-1.5 1.5H9l-3.5 2.6V14h-1A1.5 1.5 0 0 1 3 12.5V6a1.5 1.5 0 0 1 1.5-1.5z" />,
   clock: (
     <>

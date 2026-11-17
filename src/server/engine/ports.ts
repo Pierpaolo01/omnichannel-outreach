@@ -4,7 +4,9 @@
  * the running app registers `UnconnectedEmailPort`, which has no sender accounts, so every email
  * track meets launch blocker 3. For SMS no provider is provisioned or chosen (#28): the running app
  * registers `UnprovisionedSmsPort`, so every SMS track meets launch blocker 3. Tests use a fake SMS
- * provider (`test/support/fake-sms-port.ts`), which the running app never registers.
+ * provider (`test/support/fake-sms-port.ts`), which the running app never registers. For LinkedIn no session is connected
+ * (#28; ADR 0004): the running app registers `UnconnectedLinkedInPort`, which lists no session, so every LinkedIn track
+ * meets launch blocker 3; tests use `test/support/fake-linkedin-port.ts`, which the running app never registers.
  */
 import type { CallAnswer } from "../../domain/sequence/attempt.ts";
 import type { RenderedCopy, RejectReason } from "../../domain/sequence/state.ts";
@@ -35,6 +37,11 @@ export interface HandoverRequest {
   readonly subjectId: string;
   readonly trackId: string;
   readonly stepId: string;
+  /**
+   * A social step's action (ADR 0004 2.1): an invite, whose note is `rendered.body` (empty: no note, decided in the handover
+   * transaction), or a message. Absent on email and SMS.
+   */
+  readonly action?: "invite" | "message";
 }
 
 export interface AttemptRef {
@@ -62,7 +69,13 @@ export type ProviderEvent =
    * and the engine attributes it by the conversation's owner (ADR 0003 4.5).
    */
   | { readonly id: string; readonly kind: "reply"; readonly providerRef: string | null; readonly at: number; readonly inbox: string; readonly from: string }
-  | { readonly id: string; readonly kind: "rejected"; readonly key: string; readonly providerRef: string; readonly reason: RejectReason };
+  | { readonly id: string; readonly kind: "rejected"; readonly key: string; readonly providerRef: string; readonly reason: RejectReason }
+  /** A LinkedIn invite accepted, at the platform's time (ADR 0004 3.3): the invite's work by its key. Never a reply. */
+  /**
+   * `at` may be the instant the session observed the acceptance rather than when the person accepted (a logged-in page
+   * shows only a coarse time): an upper bound, which errs on the safe side at the deadline (council on 194fc44, item 8).
+   */
+  | { readonly id: string; readonly kind: "accepted"; readonly key: string; readonly providerRef: string; readonly at: number };
 
 /** A send confirmed by lookup carries the provider's reference, so its thread is known (ruling 1). */
 export type LookupResult = { readonly kind: "sent"; readonly sentAt: number; readonly providerRef: string } | { readonly kind: "queued" } | { readonly kind: "not-sent" } | { readonly kind: "unknown" };
@@ -79,10 +92,23 @@ export interface PresendRequest {
   readonly threadRefs: readonly string[];
   /** The replies the lead's record already holds on this channel, by the reply event's own id (`portReplyId`): not news. */
   readonly knownReplies: readonly string[];
+  /** The subject asking, for the provider's own log only (the re-check of dd3969c, item 5): a port never acts on it. */
+  readonly subjectId?: string;
 }
 
+/** A pre-send check's answer. `connected`: for LinkedIn, the sender is already connected to the profile (ADR 0004 3.3). */
+/**
+ * `pending`: for LinkedIn, an invite from the sender to the profile is already outstanding (council on 194fc44, item 1): one
+ * this application did not send, since a pair this application reached is owned and never claimed by another subject. It is
+ * never sent again.
+ */
+export type PresendResult = { readonly kind: "clear" } | { readonly kind: "reply"; readonly providerRef: string; readonly at: number } | { readonly kind: "unavailable" } | { readonly kind: "connected" } | { readonly kind: "pending" };
+
+/** A LinkedIn invite withdrawal's answer (ADR 0004 3.3): withdrawn, found accepted first (with the platform's time), or unknown. */
+export type InviteWithdrawal = { readonly kind: "withdrawn" } | { readonly kind: "already_accepted"; readonly at: number | null } | { readonly kind: "unknown" };
+
 export interface SendPort {
-  readonly channel: "email" | "sms";
+  readonly channel: "email" | "sms" | "linkedin";
   /** Openers and follow-ups may travel differently (ADR 0002). */
   transportFor(step: { readonly threading: "new_subject" | "continue_thread" }): Transport;
   accounts(): Promise<AccountStatus[]>;
@@ -100,8 +126,10 @@ export interface SendPort {
    * never another form of it, so the pre-send check and the observation name one reply alike (the reply identity rule).
    * A reply's id is unique within the provider account and never reused for another reply.
    */
-  presendCheck(request: PresendRequest): Promise<{ readonly kind: "clear" } | { readonly kind: "reply"; readonly providerRef: string; readonly at: number } | { readonly kind: "unavailable" }>;
+  presendCheck(request: PresendRequest): Promise<PresendResult>;
   handover(request: HandoverRequest): Promise<CallAnswer>;
+  /** A social port's invite withdrawal (ADR 0004 2.1): asked of the invite's work after its acceptance wait ended. */
+  withdrawInvite?(invite: AttemptRef): Promise<InviteWithdrawal>;
   withdraw(attempt: AttemptRef): Promise<"withdrawn" | "too-late" | "unknown">;
   observe(checkpoint: string | null): Promise<{ readonly events: readonly ProviderEvent[]; readonly checkpoint: string }>;
   lookup(attempt: AttemptRef): Promise<LookupResult>;
@@ -163,12 +191,46 @@ export class UnprovisionedSmsPort implements SendPort {
   }
 }
 
+/**
+ * The running app's LinkedIn port (ADR 0004 1.1): no LinkedIn session is connected, and the repository's rules allow no new
+ * account connection (#28). It lists no session, so every LinkedIn track meets launch blocker 3, and it never acts. Nothing
+ * here opens a browser or makes a network call.
+ */
+export class UnconnectedLinkedInPort implements SendPort {
+  readonly channel = "linkedin";
+  transportFor(): Transport {
+    return { retryable: false, notSentIsFinal: false, available: false };
+  }
+  accounts(): Promise<AccountStatus[]> {
+    return Promise.resolve([]);
+  }
+  presendCheck(): Promise<{ kind: "unavailable" }> {
+    return Promise.resolve({ kind: "unavailable" });
+  }
+  handover(): Promise<CallAnswer> {
+    return Promise.resolve({ kind: "unknown" });
+  }
+  withdraw(): Promise<"unknown"> {
+    return Promise.resolve("unknown");
+  }
+  withdrawInvite(): Promise<InviteWithdrawal> {
+    return Promise.resolve({ kind: "unknown" });
+  }
+  observe(checkpoint: string | null): Promise<{ events: ProviderEvent[]; checkpoint: string }> {
+    return Promise.resolve({ events: [], checkpoint: checkpoint ?? "" });
+  }
+  lookup(): Promise<LookupResult> {
+    return Promise.resolve({ kind: "unknown" });
+  }
+}
+
 /** A provider call's result, as the engine classifies it (ticket 20a; review bot on 592d679). */
 export type PortCallResult =
   | { readonly call: "presendCheck"; readonly result: Awaited<ReturnType<SendPort["presendCheck"]>> }
   | { readonly call: "handover"; readonly result: CallAnswer }
   | { readonly call: "withdraw"; readonly result: Awaited<ReturnType<SendPort["withdraw"]>> }
-  | { readonly call: "lookup"; readonly result: LookupResult };
+  | { readonly call: "lookup"; readonly result: LookupResult }
+  | { readonly call: "withdrawInvite"; readonly result: InviteWithdrawal };
 
 /** Whether a call reached the provider and was answered, or failed. Only `answered` is contact. */
 export type CallOutcome = "answered" | "failed";
@@ -189,6 +251,8 @@ export function callOutcome(r: PortCallResult): CallOutcome {
       switch (r.result.kind) {
         case "clear":
         case "reply":
+        case "connected":
+        case "pending":
           return "answered";
         case "unavailable":
           return "failed";
@@ -217,6 +281,16 @@ export function callOutcome(r: PortCallResult): CallOutcome {
           return unreachable(answer);
       }
     }
+    case "withdrawInvite":
+      switch (r.result.kind) {
+        case "withdrawn":
+        case "already_accepted":
+          return "answered";
+        case "unknown":
+          return "failed";
+        default:
+          return unreachable(r.result);
+      }
     case "lookup":
       switch (r.result.kind) {
         case "sent":
@@ -231,4 +305,32 @@ export function callOutcome(r: PortCallResult): CallOutcome {
     default:
       return unreachable(r);
   }
+}
+
+/**
+ * An account's identity is its channel and its id together (the re-check of e261ffa, item 3): the same raw id on two
+ * channels is two accounts. Email accounts are addresses and SMS numbers E.164, which cannot take this prefix, so every
+ * LinkedIn session is known to the app as `linkedin:` and the session's own id, and nothing of another channel can share
+ * its id. The port itself knows only its own ids: `namespacedLinkedinPort` adds the prefix to the accounts it lists and
+ * strips it from every request the engine makes of it.
+ */
+export const LINKEDIN_ACCOUNT_PREFIX = "linkedin:";
+export const linkedinAccountId = (sessionId: string): string => `${LINKEDIN_ACCOUNT_PREFIX}${sessionId}`;
+const sessionIdOf = (accountId: string): string => (accountId.startsWith(LINKEDIN_ACCOUNT_PREFIX) ? accountId.slice(LINKEDIN_ACCOUNT_PREFIX.length) : accountId);
+
+export function namespacedLinkedinPort(port: SendPort): SendPort {
+  const withdrawInvite = port.withdrawInvite?.bind(port);
+  const contact = port.contact?.bind(port);
+  return {
+    channel: port.channel,
+    transportFor: (step) => port.transportFor(step),
+    accounts: async () => (await port.accounts()).map((a) => ({ ...a, id: linkedinAccountId(a.id) })),
+    ...(contact ? { contact } : {}),
+    presendCheck: (request) => port.presendCheck({ ...request, sender: sessionIdOf(request.sender) }),
+    handover: (request) => port.handover({ ...request, sender: sessionIdOf(request.sender) }),
+    ...(withdrawInvite ? { withdrawInvite: (invite: AttemptRef) => withdrawInvite({ ...invite, sender: sessionIdOf(invite.sender) }) } : {}),
+    withdraw: (attempt) => port.withdraw({ ...attempt, sender: sessionIdOf(attempt.sender) }),
+    observe: (checkpoint) => port.observe(checkpoint),
+    lookup: (attempt) => port.lookup({ ...attempt, sender: sessionIdOf(attempt.sender) }),
+  };
 }

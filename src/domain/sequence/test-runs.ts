@@ -8,7 +8,7 @@ export interface RunTestFacts {
   readonly running: boolean;
   readonly contacts: TestContacts;
   /** Whether a person's or company's live detail now has the stored test email, or mobile. */
-  readonly leadHas: { readonly email: boolean; readonly mobile: boolean };
+  readonly leadHas: { readonly email: boolean; readonly mobile: boolean; readonly linkedin?: boolean };
   readonly leads: number;
   /** The lead to render as is an enrollment of this campaign. */
   readonly renderAsOfCampaign: boolean;
@@ -23,6 +23,7 @@ export const TEST_REFUSALS = {
   noContacts: "Add your own email or mobile first.",
   emailIsALead: "Your test email belongs to a lead now. Test contacts must be your own.",
   mobileIsALead: "Your test mobile belongs to a lead now. Test contacts must be your own.",
+  linkedinIsALead: "Your test LinkedIn profile belongs to a lead now. Test contacts must be your own.",
   noLeads: "Import leads first: a test renders its copy for a real lead.",
   renderAs: "That lead is not in this campaign.",
   nothing: "Add a track to test.",
@@ -32,9 +33,10 @@ export const TEST_REFUSALS = {
 export function runTestRefusal(f: RunTestFacts): string | null {
   if (f.running) return TEST_REFUSALS.running;
   if (f.storedVersion !== f.expectedVersion) return TEST_REFUSALS.changed;
-  if (f.contacts.email === null && f.contacts.mobile === null) return TEST_REFUSALS.noContacts;
+  if (f.contacts.email === null && f.contacts.mobile === null && (f.contacts.linkedin ?? null) === null) return TEST_REFUSALS.noContacts;
   if (f.leadHas.email) return TEST_REFUSALS.emailIsALead;
   if (f.leadHas.mobile) return TEST_REFUSALS.mobileIsALead;
+  if (f.leadHas.linkedin === true) return TEST_REFUSALS.linkedinIsALead;
   if (f.nothingToLaunch) return TEST_REFUSALS.nothing;
   if (f.leads === 0) return TEST_REFUSALS.noLeads;
   if (!f.renderAsOfCampaign) return TEST_REFUSALS.renderAs;
@@ -42,4 +44,8 @@ export function runTestRefusal(f: RunTestFacts): string | null {
 }
 
 /** The refusal of a test contact a lead's record has (the boundary): by field. */
-export const CONTACT_IS_A_LEAD = { email: "This email belongs to a lead. Test contacts must be your own.", mobile: "This number belongs to a lead. Test contacts must be your own." } as const;
+export const CONTACT_IS_A_LEAD = {
+  email: "This email belongs to a lead. Test contacts must be your own.",
+  mobile: "This number belongs to a lead. Test contacts must be your own.",
+  linkedin: "This LinkedIn profile belongs to a lead. Test contacts must be your own.",
+} as const;

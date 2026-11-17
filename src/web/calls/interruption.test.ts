@@ -238,7 +238,7 @@ describe("the order of Needs attention (ticket 20b): the prototype's, with the n
       {
         overdueCallbacks: [],
         stalledInboxes: [{ accountId: "inbox-b", holding: ["x"] }],
-        heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e9", trackId: "t1", reason: "unresolved", owners: [] }],
+        heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e9", trackId: "t1", channel: "email", reason: "unresolved", owners: [] }],
         accountWaits: [{ accountId: "inbox-c", reason: "quota", until: null }],
         senderProblems: [{ accountId: "sms-1", channel: "sms", label: "+31 97 0102 3344", problem: "disconnected" }],
         heldCapacity: [{ accountId: "inbox-d", held: 1, capacity: 30, sentToday: 4, work: [] }],
@@ -260,7 +260,7 @@ describe("the order of Needs attention (ticket 20b): the prototype's, with the n
       "wait-inbox-c",
       "stalled-inbox-b",
       "held-inbox-d",
-      "tracks-k1-unresolved",
+      "tracks-k1-unresolved-email",
       "capacity-c1",
       "anomaly-0",
       "no-usable-channel",
@@ -269,7 +269,7 @@ describe("the order of Needs attention (ticket 20b): the prototype's, with the n
 
   test("a track waiting on another campaign's first text whose fate is not known yet says why (question Q7 answered, point 10)", () => {
     const empty = { overdueCallbacks: [], stalledInboxes: [], heldTracks: [], accountWaits: [], senderProblems: [], heldCapacity: [], anomalies: [], waitingForCapacity: [], noUsableChannel: [], waitingOnProvider: [], waitingOnTransport: [], sendingInterrupted: null };
-    const items = attentionItems({ ...empty, heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e1", trackId: "sms", reason: "sms_conversation_unsettled", owners: [{ name: "Spring clinics", test: false }] }] }, { overdueCallbacks: [], userZone: ZONE, date: TODAY, carriedOver: 0, carriedOverLastDay: 0 });
+    const items = attentionItems({ ...empty, heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e1", trackId: "sms", channel: "sms", reason: "sms_conversation_unsettled", owners: [{ name: "Spring clinics", test: false }] }] }, { overdueCallbacks: [], userZone: ZONE, date: TODAY, carriedOver: 0, carriedOverLastDay: 0 });
     // The lead and its campaign named, and linked to its record, where its row offers Skip (verifier on faac357, item 5).
     expect(items.map((i) => [i.title, i.body, i.action?.href])).toEqual([
       ["Pat Oneil is on hold in Clinics, London", "On hold because the first text from campaign Spring clinics to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet. Nothing is dropped.", "/leads/people/p1"],
@@ -298,7 +298,7 @@ describe("a notice states what is known and promises nothing (the re-check of ff
   test("no sentence on Needs attention or the interruption notice says a send will happen", () => {
     const items = read({
       stalledInboxes: [{ accountId: "inbox-b", holding: ["x"] }],
-      heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e9", trackId: "t1", reason: "unresolved", owners: [] }],
+      heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e9", trackId: "t1", channel: "email", reason: "unresolved", owners: [] }],
       accountWaits: [{ accountId: "inbox-c", reason: "quota", until: null }, { accountId: "inbox-e", reason: "rate_limited", until: "2026-11-15T12:00:00Z" }],
       senderProblems: [{ accountId: "sms-1", channel: "sms", label: "+31 97 0102 3344", problem: "disconnected" }],
       heldCapacity: [{ accountId: "inbox-d", held: 1, capacity: 30, sentToday: 4, work: [] }],

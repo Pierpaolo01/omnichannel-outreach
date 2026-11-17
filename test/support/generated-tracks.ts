@@ -1,4 +1,5 @@
 import type { CampaignDefinition, StepDefinition, TrackChannel, TrackDefinition } from "../../src/domain/sequence/definition.ts";
+import { linkedinAccountId } from "../../src/server/engine/ports.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
 import { heldReason } from "../../src/domain/sequence/dispatch.ts";
 import { DEFAULT_RULES, type Rules } from "../../src/server/engine/rules.ts";
@@ -57,6 +58,78 @@ const SETTLING = 15 * MINUTE;
 const DAY = 24 * HOUR;
 const ZONES = ["Europe/London", "America/New_York", "Europe/Paris", "Asia/Kolkata", "Australia/Sydney", ""];
 const ALL_DAY = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+/**
+ * A LinkedIn track beside SMS (review bot on b21af02): in some runs, from a stream of their own, a campaign of its own
+ * fictitious people, number and LinkedIn session texts each person, then starts a LinkedIn track after the text (an invite
+ * and a message; every profile already connected, so the invite is skipped and the message goes at once). The text's pair
+ * exists before the LinkedIn track runs. It runs in an engine of its own, under the run's rules and mutation, because a
+ * campaign in the same engine moves state every campaign shares (the conversations' version the readiness caches key on),
+ * so the modelled runs would change. The record checks L16 on it: every LinkedIn handover from the session to the person's
+ * profile, every text from the number to the person's mobile, and every started LinkedIn track handed over by the drain.
+ */
+const LINKEDIN_SESSION = "li-a";
+const SOCIAL_NUMBER = "+447700900070";
+const SOCIAL_PEOPLE = [
+  { key: "s1", name: "Ines Social", mobile: "+447700900971" },
+  { key: "s2", name: "Theo Social", mobile: "+447700900972" },
+] as const;
+const profileOf = (p: { readonly key: string }) => `https://www.linkedin.com/in/fictional-track-person-${p.key}`;
+
+async function linkedinBesideSms(start: number, options: TrackRunOptions): Promise<{ problems: string[]; features: string[] }> {
+  const problems: string[] = [];
+  const features: string[] = [];
+  const h = new EngineHarness({
+    start,
+    accounts: [],
+    sms: { numbers: [{ id: SOCIAL_NUMBER, capacity: 20, gapMs: MINUTE, k: 2, healthy: true, resetZone: "Europe/London" }] },
+    linkedin: { sessions: [{ id: LINKEDIN_SESSION, gapMs: MINUTE, k: 2, healthy: true, resetZone: "Europe/London" }] },
+    ...(options.rules ? { rules: options.rules } : {}),
+  });
+  await h.tick();
+  const set = await h.request("PUT", `/api/sender-accounts/${linkedinAccountId(LINKEDIN_SESSION)}/allowances`, { invitesPerDay: 50, messagesPerDay: 50, notesPerMonth: 0 });
+  if (set.status !== 200) problems.push(`L16: the session's allowances were refused: ${set.status}`);
+  for (const p of SOCIAL_PEOPLE) h.linkedin.profiles.set(profileOf(p), { connected: true });
+  const all = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
+  const created = await h.createCampaign("Social beside SMS", {
+    businesses: [business({ business_id: "s0", business_name: "Fictional Social Clinic", timezone: "Europe/London", phone_e164: "+442079460909" })],
+    people: SOCIAL_PEOPLE.map((p) => person({ person_id: p.key, business_id: "s0", full_name: p.name, timezone: "Europe/London", dial_phone: p.mobile, dial_phone_type: "mobile", linkedin_url: profileOf(p) })),
+  });
+  await h.defineSequence(created.campaign.id, {
+    timezone: "Europe/London",
+    callSkipLimitDays: 2,
+    emailPool: [],
+    smsPool: [SOCIAL_NUMBER],
+    linkedinPool: [linkedinAccountId(LINKEDIN_SESSION)],
+    tracks: [
+      { id: "st", channel: "sms", branch: "main", window: all, steps: [{ id: "st1", waitDays: 0, subject: "", body: "A text, {{first_name|there}}.", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false },
+      { id: "sl", channel: "linkedin", branch: "main", window: all, steps: [{ id: "sl1", waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }, { id: "sl2", waitDays: 0, subject: "", body: "A message, {{first_name|there}}.", threading: "new_subject", removed: false }], start: { kind: "after", trackId: "st", delayDays: 0 }, removed: false, acceptWaitDays: 1 },
+    ],
+  });
+  if ((await h.launch(created.campaign.id)).status !== 200) problems.push("L16: the campaign beside SMS did not launch");
+  const subjects = new Map<string, (typeof SOCIAL_PEOPLE)[number]>();
+  for (const r of (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${created.campaign.id}`)).body.rows) {
+    const p = SOCIAL_PEOPLE.find((x) => x.name === r.name);
+    const id = r.enrollments.find((e) => e.campaign.id === created.campaign.id)?.id;
+    if (p && id) subjects.set(id, p);
+  }
+  await h.advanceTo(start + 3 * DAY);
+  for (const x of h.linkedin.handoverLog) {
+    const p = subjects.get(x.subjectId);
+    if (!p || x.sender !== LINKEDIN_SESSION || x.destination !== profileOf(p)) problems.push(`L16: ${x.subjectId}'s LinkedIn ${x.action} went from ${x.sender} to ${x.destination}`);
+  }
+  for (const x of h.sms.handoverLog) {
+    const p = subjects.get(x.subjectId);
+    if (!p || x.sender !== SOCIAL_NUMBER || x.destination !== p.mobile) problems.push(`L16: ${x.subjectId}'s text went from ${x.sender} to ${x.destination}`);
+  }
+  for (const id of subjects.keys()) {
+    const st = await h.store.engine.subject(id, h.clock);
+    const t = st?.tracks.find((x) => x.trackId === "sl");
+    if (!st || !t || t.startedAt === null) continue;
+    if (st.smsBindings.some((b) => b.owner === id && b.channel === "sms")) features.push("linkedin-after-its-text");
+    if (st.subject.ended === null && t.finishedAt === null && !h.linkedin.handoverLog.some((x) => x.subjectId === id)) problems.push(`L16: ${id}'s LinkedIn track started after its text and nothing of it was ever handed over`);
+  }
+  return { problems, features };
+}
 
 export interface TrackRunOptions {
   readonly rules?: Partial<Rules>;
@@ -928,6 +1001,12 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   for (const [key, at] of decidedSkips) {
     const joined = campaigns[subjects.get(key.split("/")[0]!)!.campaign]!.joined;
     if (joined && joined.at > at) features.add("a-number-joined-after-a-skip-in-its-campaign");
+  }
+  // L16 (review bot on b21af02): a LinkedIn track after a text on the same person, in an engine of its own (above).
+  if (random(seed ^ 0x24a)() < 0.6) {
+    const beside = await linkedinBesideSms(start, options);
+    for (const p of beside.problems) problem(p);
+    for (const f of beside.features) features.add(f);
   }
   if (sms.refusals.length > 0) features.add("invalid-number");
   if (sms.deliveryLog.some((d) => sms.invalidAfterSend.has(d.destination))) features.add("invalid-after-send");

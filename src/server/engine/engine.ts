@@ -9,9 +9,10 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { runs, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
+import { awaitingAcceptance, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, type ConversationVersions, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
+import type { OutreachStatus } from "../../domain/outreach-status.ts";
 import { judgeCampaignControl, type LeadControl, type LeadExpectation } from "../../domain/sequence/controls.ts";
 import type { ControlView } from "../../shared/api.ts";
 import { effectOf } from "./controls-view.ts";
@@ -27,8 +28,8 @@ export const CONTROL_REQUEST_REUSED = "This request id was already used for anot
 function outcomeBody(input: OutcomeInput): string {
   return JSON.stringify({ outcome: input.outcome, redial: input.redial, callbackAt: input.callbackAt, declinedPath: input.declinedPath, numberId: input.numberId, note: input.note, noteScope: input.noteScope });
 }
-import { callOutcome, UnprovisionedSmsPort, type AttemptRef, type CallOutcome, type PortCallResult, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
-import { DEFAULT_RULES, type Rules } from "./rules.ts";
+import { callOutcome, namespacedLinkedinPort, UnconnectedLinkedInPort, UnprovisionedSmsPort, type AttemptRef, type CallOutcome, type PortCallResult, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
+import { rulesWith, type Rules } from "./rules.ts";
 import { HEARTBEAT_KEY, NOTICE_KEY, parseInstant, PROVIDERS_KEY, TICK_ENDED_KEY, TICK_FAILED_KEY } from "./worker-state.ts";
 import { relevantChannels, waitingOn, type ProviderEvidence } from "../../domain/sequence/providers.ts";
 
@@ -109,6 +110,8 @@ export interface EngineDependencies {
   readonly port: SendPort;
   /** The SMS port (ticket 13); the unprovisioned one when absent, since no SMS provider exists (#28). */
   readonly smsPort?: SendPort;
+  /** The LinkedIn port (ticket 24, ADR 0004); the unconnected one when absent, since no LinkedIn session is connected (#28). */
+  readonly linkedinPort?: SendPort;
   /** Milliseconds since the epoch. */
   readonly now: () => number;
   readonly newId: () => string;
@@ -134,15 +137,23 @@ export interface EngineDependencies {
   readonly ticks?: TickQueue;
 }
 
-type Channel = "email" | "sms";
-const OBSERVE_CHECKPOINT: Record<Channel, string> = { email: "email_observe_checkpoint", sms: "sms_observe_checkpoint" };
-const CHANNELS: readonly Channel[] = ["email", "sms"];
+type Channel = "email" | "sms" | "linkedin";
+const OBSERVE_CHECKPOINT: Record<Channel, string> = { email: "email_observe_checkpoint", sms: "sms_observe_checkpoint", linkedin: "linkedin_observe_checkpoint" };
+const CHANNELS: readonly Channel[] = ["email", "sms", "linkedin"];
 const MAX_PASSES = 50;
 const QUOTA_WAIT = Number.MAX_SAFE_INTEGER;
 /** Ticket 20a: how long a port's last answer stands for "it answers", for a port that does not report its own freshness: four ticks. */
 export const ENGINE_CONTACT_FRESH_MS = 60_000;
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * The conversations' versions a cache reads (ADR 0004, "The conversations' version"): the store's per-destination counters,
+ * read once per pass, so each subject's check of its own destinations is in memory.
+ */
+function versionsOf(versions: ReadonlyMap<string, number>): ConversationVersions {
+  return (destinations) => destinations.map((d) => `${d}:${versions.get(d) ?? 0}`).join("|");
+}
 
 export class Engine {
   private readonly store: EngineStore;
@@ -153,14 +164,14 @@ export class Engine {
   /** While a provider's answer is applied: the instant the rules say it is applied at (`answerInstant`); null otherwise. */
   private applyingAt: number | null = null;
   /** Ticket 20a: each provider's last actual answer, for a port that does not report its own (`SendPort.contact`). */
-  private readonly answeredAt: Record<Channel, number | null> = { email: null, sms: null };
+  private readonly answeredAt: Record<Channel, number | null> = { email: null, sms: null, linkedin: null };
   /** Ticket 20a: which reads of each provider answered in the current round (a tick, or the dispatch gate's own asking). */
-  private round: Record<Channel, { accounts: boolean; observation: boolean }> = { email: { accounts: false, observation: false }, sms: { accounts: false, observation: false } };
+  private round: Record<Channel, { accounts: boolean; observation: boolean }> = { email: { accounts: false, observation: false }, sms: { accounts: false, observation: false }, linkedin: { accounts: false, observation: false } };
 
   /** Ticket 20a (council D): the last call each provider answered while its contact stood, extending it. */
-  private readonly extendedAt: Record<Channel, number | null> = { email: null, sms: null };
+  private readonly extendedAt: Record<Channel, number | null> = { email: null, sms: null, linkedin: null };
   /** Ticket 20a (council G): each provider's last failed read, as evidence. */
-  private readonly failedRead: Record<Channel, { at: number; part: "accounts" | "observation" | "call" } | null> = { email: null, sms: null };
+  private readonly failedRead: Record<Channel, { at: number; part: "accounts" | "observation" | "call" } | null> = { email: null, sms: null, linkedin: null };
   /** Whether the dispatch gate has asked every provider again in this round. */
   private askedThisRound = false;
 
@@ -175,7 +186,7 @@ export class Engine {
   }
 
   /** The contact each self-reporting port last reported, to see it jump (below). */
-  private readonly reportedSeen: Record<Channel, number | null> = { email: null, sms: null };
+  private readonly reportedSeen: Record<Channel, number | null> = { email: null, sms: null, linkedin: null };
 
   /**
    * A port that reports its own contact (the adapter, which answers from a cache between polls) may answer every call
@@ -215,7 +226,7 @@ export class Engine {
       const failed = this.failedRead[c];
       return { contactAt: at, freshForMs, failedAt: failed?.at ?? null, failedPart: failed?.part ?? null };
     };
-    return { email: of("email"), sms: of("sms") };
+    return { email: of("email"), sms: of("sms"), linkedin: of("linkedin") };
   }
 
   private async saveEvidence(): Promise<void> {
@@ -223,7 +234,7 @@ export class Engine {
   }
 
   private newRound(): void {
-    this.round = { email: { accounts: false, observation: false }, sms: { accounts: false, observation: false } };
+    this.round = { email: { accounts: false, observation: false }, sms: { accounts: false, observation: false }, linkedin: { accounts: false, observation: false } };
   }
 
   /** A read answered: the round is contact only once every read the engine relies on has answered in it (`contactFrom`). */
@@ -286,11 +297,12 @@ export class Engine {
 
   constructor(deps: EngineDependencies) {
     this.store = deps.store;
-    this.ports = { email: deps.port, sms: deps.smsPort ?? new UnprovisionedSmsPort() };
+    this.ports = { email: deps.port, sms: deps.smsPort ?? new UnprovisionedSmsPort(), linkedin: namespacedLinkedinPort(deps.linkedinPort ?? new UnconnectedLinkedInPort()) };
     this.clockNow = deps.now;
     this.now = () => this.applyingAt ?? deps.now();
     this.newId = deps.newId;
-    this.rules = { ...DEFAULT_RULES, ...deps.rules };
+    this.rules = rulesWith(deps.rules);
+    if ("releaseRule" in this.store) this.store.releaseRule = this.rules.releaseUnsent;
     this.hooks = deps.hooks ?? {};
     this.waitFor = deps.waitFor ?? waitWithTimer;
     this.locks = deps.locks ?? PROCESS_LOCKS;
@@ -533,8 +545,10 @@ export class Engine {
       // A held reply falls back only after this pass's lookups have had their chance to attach its reference.
       changed = (await this.correlate(false, true)) || changed;
       changed = (await this.withdraw()) || changed;
+      changed = (await this.withdrawInvites()) || changed;
       changed = (await this.evaluateAll()) || changed;
       changed = (await this.placeCallsAll()) || changed;
+      changed = (await this.checkConnections()) || changed;
       changed = (await this.claimAll()) || changed;
       changed = (await this.handOverAll()) || changed;
       if (!changed) break;
@@ -576,6 +590,15 @@ export class Engine {
           .map((p) => ({ wall: now + ((p.dueAt ?? 0) - leadNow(s.subject.clock, now)), window: isCall(p.trackId) ? null : windowOf(s, p.trackId), zone: s.lead.zone }));
         // A track waiting to start after another (ticket 13) starts at its resolved instant; it has no window of its own to wait for then.
         for (const p of s.tracks) if (p.startedAt === null && p.startAt !== null) due.push({ wall: now + (p.startAt - leadNow(s.subject.clock, now)), window: [], zone: s.lead.zone });
+        // A LinkedIn invite's acceptance deadline (ADR 0004 3.3): its expiry finishes the track then, whatever the window.
+        for (const p of s.tracks) {
+          const until = invitePendingUntil(s, p.trackId);
+          if (until !== null) due.push({ wall: until, window: [], zone: s.lead.zone });
+          // A connection check stands for a settling period; an invite still unclaimed then is checked again.
+          // Each session's own answer (review bot on e261ffa).
+          if (p.finishedAt === null) for (const c of Object.values(p.connectionChecks ?? {})) due.push({ wall: c.checkedWall + ENGINE_PARAMS.SETTLING, window: [], zone: s.lead.zone });
+        }
+        for (const p of s.tracks) if (awaitingAcceptance(s, p.trackId) && p.acceptBy != null) due.push({ wall: now + (p.acceptBy - leadNow(s.subject.clock, now)), window: [], zone: s.lead.zone });
         // An open call task can expire at the user's next day (the skip limit, ticket 15).
         cached = { version, due, openCall: s.callTasks.some((t) => t.open && t.kind === "call") };
         this.wakeCache.set(id, cached);
@@ -767,7 +790,7 @@ export class Engine {
       const { events, checkpoint: next } = observed;
       await this.answered(asked, async () => {
         for (const event of events) {
-          changed = (await (channel === "sms" ? this.applySmsEvent(event) : this.applyEvent(event))) || changed;
+          changed = (await (channel === "sms" ? this.applySmsEvent(event) : channel === "linkedin" ? this.applyLinkedinEvent(event) : this.applyEvent(event))) || changed;
           this.hooks.crashPoint?.("after_observe_event", null);
         }
       });
@@ -800,6 +823,59 @@ export class Engine {
       return false;
     }
     return this.applyEvent(event, w);
+  }
+
+  /**
+   * A LinkedIn session's event (ADR 0004 2.3). An acceptance is recorded on the invite's track, never as a reply; a session
+   * never reports a reply (there is no reply detection), so one is an anomaly. Sends, refusals and failures are matched by
+   * their work, as every channel's are.
+   */
+  private async applyLinkedinEvent(event: ProviderEvent): Promise<boolean> {
+    const now = this.now();
+    if (event.kind === "reply") {
+      await this.store.recordAnomaly(null, "a LinkedIn session reported a reply, which the app does not detect", now);
+      return false;
+    }
+    const w = (await this.store.work(event.key)) ?? (await this.store.workByProviderRef(event.providerRef));
+    if (!w) {
+      await this.store.recordAnomaly(null, `a LinkedIn ${event.kind} event the app cannot match`, now);
+      return false;
+    }
+    if (event.kind !== "accepted") return this.applyEvent(event, w);
+    return (await this.update(w.subjectId, now, (s) => {
+      // An acceptance proves the invite went: work not yet recorded sent is recorded sent at the acceptance first (3.3).
+      const work = s.work.find((x) => x.key === w.key);
+      let next = s;
+      if (work && work.settled !== "sent" && work.settled !== "user_sent") next = this.rules.applyToWork(next, w.key, { kind: "sent_observed", providerTime: event.at, providerRef: event.providerRef }, now, { resetDay: this.resetDay(next), point: this.rules.sendPoint }).state;
+      next = this.rules.recordAcceptance(next, w.trackId, event.at, work?.firstHandedWall ?? event.at, now, this.rules.sendPoint);
+      next = this.rules.evaluate(next, now);
+      return same(next, s) ? null : next;
+    })) !== null;
+  }
+
+  /**
+   * The invite withdrawals an acceptance expiry asked for (ADR 0004 3.3): each asked of its session until it answers
+   * withdrawn or accepted first, again one settling period after an unknown answer, whether or not the lead runs.
+   */
+  private async withdrawInvites(): Promise<boolean> {
+    let changed = false;
+    const now = this.now();
+    for (const ask of await this.store.invitesToWithdraw()) {
+      if (!this.rules.inviteWithdrawalDue(ask.progress, now)) continue;
+      const w = await this.store.work(ask.workKey);
+      if (!w) continue;
+      const port = await this.portOf(w.accountId);
+      if (!port.withdrawInvite) continue;
+      if (!this.leaseIsMine(this.clockNow())) return changed;
+      const answer = await this.bounded(() => port.withdrawInvite?.(this.ref(w)) ?? Promise.resolve({ kind: "unknown" as const }), { kind: "unknown" as const }, port.channel, (result) => ({ call: "withdrawInvite", result }));
+      const at = this.now();
+      changed =
+        (await this.update(ask.subjectId, at, (s) => {
+          const next = this.rules.inviteWithdrawalAnswer(s, ask.trackId, answer.kind, at, answer.kind === "already_accepted" ? answer.at : null);
+          return same(next, s) ? null : next;
+        })) !== null || changed;
+    }
+    return changed;
   }
 
   /** Records a reply on each subject it belongs to. */
@@ -1028,7 +1104,7 @@ export class Engine {
     // The user's zone decides the day an unworked call expires at, so it is part of the cache key.
     const settings = JSON.stringify(await this.store.callSettings());
     // Another subject's conversations change without touching this subject's version (question Q7 answered).
-    const conversations = await this.store.conversationsVersion();
+    const conversations = versionsOf(await this.store.conversationVersions());
     for (const [id, subjectVersion] of await this.store.runningSubjectVersions()) {
       const version = `${subjectVersion}|${settings}`;
       const now = this.now();
@@ -1158,9 +1234,53 @@ export class Engine {
         const out = this.rules.judgeControl(this.rules.confirmedAgainst(stored, s), s, action, now, expected, this.rules);
         if (!out.ok) return { write: caughtUp, answer: "refused", reason: out.reason, effect: null };
         // The answer's effect is the read's preview at this instant: the same transition on the same state (verifier B4).
-        return { write: out.state, answer: "accepted", reason: null, effect: JSON.stringify(effectOf(s, action, out.state, now)) };
+        return { write: this.rules.releaseUnsent(out.state), answer: "accepted", reason: null, effect: JSON.stringify(effectOf(s, action, out.state, now)) };
       });
       return this.answerOf(record);
+    });
+  }
+
+  /**
+   * The user marks a lead (or a test run) replied on LinkedIn (ADR 0004 section 7): in one transaction with its request id,
+   * bound to its first answer like every control, judged on the subject as of the action's instant. Accepted, it stops the
+   * subject in this campaign only; the worker then runs, as after any accepted control.
+   */
+  markReplied(subjectId: string, requestId: string, expected: { readonly status: OutreachStatus } | null = null): Promise<{ ok: true; replayed: boolean } | { ok: false; reason: string }> {
+    return this.ticks.run(async () => {
+      const now = this.now();
+      // The expectation is part of the body an id is bound to, as for every control (ticket 17b).
+      const body = JSON.stringify(expected === null ? { action: "mark_replied", channel: "linkedin" } : { action: "mark_replied", channel: "linkedin", expect: expected });
+      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action: "mark_replied", body }, this.rules.requestStanding, (stored) => {
+        const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
+        const marked = this.rules.markReplied(s, requestId, now);
+        const unconfirmed = marked.ok ? this.rules.markPrecondition(this.rules.confirmedAgainst(stored, s), expected) : null;
+        const out = unconfirmed === null ? marked : ({ ok: false, reason: unconfirmed } as const);
+        if (!out.ok) return { write: same(s, stored) ? null : s, answer: "refused", reason: out.reason, effect: null };
+        return { write: this.rules.releaseUnsent(out.state), answer: "accepted", reason: null, effect: JSON.stringify({ channel: "linkedin" }) };
+      });
+      if (record.kind === "reused" || record.kind === "different") return { ok: false as const, reason: CONTROL_REQUEST_REUSED };
+      if (record.answer === "refused") return { ok: false as const, reason: record.reason ?? "Refused." };
+      if (record.kind === "answered") await this.runTick();
+      return { ok: true as const, replayed: record.kind === "replayed" };
+    });
+  }
+
+  /**
+   * The user settles a withdrawal the session cannot answer (ADR 0004 3.3; council on 194fc44, item 5): withdrawn, or still
+   * there. One transaction with its request id, bound to its first answer like every control.
+   */
+  markInviteWithdrawal(subjectId: string, trackId: string, answer: "withdrawn" | "kept", requestId: string): Promise<{ ok: true; replayed: boolean } | { ok: false; reason: string }> {
+    return this.ticks.run(async () => {
+      const now = this.now();
+      const body = JSON.stringify({ action: "invite_withdrawal", trackId, answer });
+      const record = await this.store.controlSubject(subjectId, now, { id: requestId, action: "invite_withdrawal", body }, this.rules.requestStanding, (stored) => {
+        const next = markInviteWithdrawal(stored, trackId, answer, now);
+        return next === null ? { write: null, answer: "refused", reason: "No withdrawal of an invite is waiting for an answer on this track.", effect: null } : { write: this.rules.releaseUnsent(next), answer: "accepted", reason: null, effect: JSON.stringify({ answer }) };
+      });
+      if (record.kind === "reused" || record.kind === "different") return { ok: false as const, reason: CONTROL_REQUEST_REUSED };
+      if (record.answer === "refused") return { ok: false as const, reason: record.reason ?? "Refused." };
+      if (record.kind === "answered") await this.runTick();
+      return { ok: true as const, replayed: record.kind === "replayed" };
     });
   }
 
@@ -1219,11 +1339,43 @@ export class Engine {
   // -------------------------------------------------------------------------------------------
   // Claims (4.2) in priority order (4.3).
 
+  /**
+   * The connection check of every LinkedIn invite due (ADR 0004 3.3; council on b21af02, item 4): asked of a session the
+   * track may use, outside every allowance, before any invite is claimed. One port read per invite per settling period.
+   */
+  private async checkConnections(): Promise<boolean> {
+    let changed = false;
+    const now = this.now();
+    for (const id of await this.store.runningLeadIdsAndTests()) {
+      const s = await this.store.subject(id, now);
+      if (!s) continue;
+      for (const p of s.tracks) {
+        // Every session due a check, in the pool's order (review bot on e261ffa): the first that is already connected becomes
+        // the sender, and no later session is asked; the others' answers are kept per session.
+        for (const session of this.rules.connectionChecksDue(s, p.trackId, now)) {
+          const destination = s.lead.details.find((d) => d.id === s.lead.resolved[p.destinationDetailId ?? ""]?.liveId)?.key ?? "";
+          if (!this.leaseIsMine(this.clockNow())) return changed;
+          const port = this.ports.linkedin;
+          const asked = await this.bounded(() => port.presendCheck({ sender: session, destination, threadRefs: [], knownReplies: [], subjectId: id }), { kind: "unavailable" as const }, "linkedin", (result) => ({ call: "presendCheck", result }));
+          if (asked.kind === "unavailable" || asked.kind === "reply") continue;
+          const answer = asked.kind === "connected" ? "connected" : asked.kind === "pending" && this.rules.outstandingInviteStops() ? "pending" : "clear";
+          const written = await this.update(id, now, (st) => {
+            if (!this.rules.connectionChecksDue(st, p.trackId, now).includes(session)) return null;
+            return this.rules.connectionChecked(st, p.trackId, session, destination, answer, now);
+          });
+          changed = written !== null || changed;
+          if (answer === "connected" && written !== null) break;
+        }
+      }
+    }
+    return changed;
+  }
+
   private async claimAll(): Promise<boolean> {
     const now = this.now();
     const ready: { item: ReadyItem; snapshot: SubjectState }[] = [];
     // A hold on an unsettled conversation changes with another subject's conversations, not this one's version.
-    const conversations = await this.store.conversationsVersion();
+    const conversations = versionsOf(await this.store.conversationVersions());
     for (const [id, version] of await this.store.runningSubjectVersions()) {
       const known = this.nothingReady.get(id);
       if (known?.key === version && this.rules.readinessHolds(known, now, conversations)) continue;
@@ -1251,7 +1403,7 @@ export class Engine {
       if (this.rules.claimRefusal(snapshot, item, now) !== null) continue;
       const track = snapshot.campaign.definition.tracks.find((t) => t.id === item.trackId);
       const step = track?.steps.find((s) => s.id === item.stepId);
-      const transport = this.ports[track?.channel === "sms" ? "sms" : "email"].transportFor({ threading: step?.threading ?? "new_subject" });
+      const transport = this.ports[track?.channel === "sms" ? "sms" : track?.channel === "linkedin" ? "linkedin" : "email"].transportFor({ threading: step?.threading ?? "new_subject" });
       // A step the port cannot send yet is not claimed: it waits, and nothing is sent for it.
       if (transport.available === false) continue;
       const allowed = this.dispatchAllowed(this.rules.dispatchInstant(this.tickStarted, this.now()), () => Promise.resolve(relevantChannels(snapshot, item.trackId)));
@@ -1336,12 +1488,35 @@ export class Engine {
     const subject = await this.store.subject(a.subjectId, now);
     const threadRefs = (subject?.work ?? []).flatMap((w) => (w.providerRef === null ? [] : [w.providerRef]));
     const port = await this.portOf(a.accountId);
-    const channel = port === this.ports.sms ? "sms" : "email";
+    const channel = port === this.ports.sms ? "sms" : port === this.ports.linkedin ? "linkedin" : "email";
     // The replies the lead's record holds are not news (a restart after an auto-reply): the port reports any other reply,
     // in any of the lead's threads (ticket 17a; review bot on ca8baee, item 1; ADR 0002's correlation rules). The port is
     // asked by its own ids, and its answer is recorded by the stored one: the reply identity rule (ADR 0003 "Ticket 17a").
     const knownReplies = (subject?.replies ?? []).filter((r) => r.channel === channel).map((r) => r.providerRef);
-    const asked = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, threadRefs, knownReplies: knownReplies.map((id) => this.rules.portReplyId(channel, id)) }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result }));
+    const asked = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, subjectId: a.subjectId, threadRefs, knownReplies: channel === "linkedin" ? [] : knownReplies.map((id) => this.rules.portReplyId(channel, id)) }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result }));
+    // A LinkedIn session's check reads the connection, never a reply (ADR 0004 2.3, 3.3). Connected at an invite's slot: the
+    // invite is skipped in the handover's own write, with no call, when every predicate but the check and the slot holds.
+    if (channel === "linkedin") {
+      if (asked.kind === "unavailable") return false;
+      const invite = subject !== null && this.rules.actionOfStep(subject, a.trackId, a.stepId) === "invite";
+      const pendingStops = asked.kind === "pending" && this.rules.outstandingInviteStops();
+      if ((asked.kind === "connected" || pendingStops) && invite) {
+        await this.update(a.subjectId, now, (s) => {
+          const current = s.attempts.find((x) => x.id === a.id);
+          const account = current ? s.accounts[current.accountId] : undefined;
+          if (!current || current.state !== "claimed" || !account) return null;
+          const failed = this.rules.handoverFailures(s, current, account, now).filter((f) => f !== 14 && f !== 16);
+          if (failed.length > 0) return this.rules.applyToAttempt(s, current.id, { kind: "guard_failed" }, now).state;
+          return asked.kind === "connected" ? this.rules.inviteAlreadyConnected(s, current.id, now) : invitePendingElsewhere(s, current.id, now);
+        });
+        return false;
+      }
+      if (pendingStops) return false;
+      await this.update(a.subjectId, now, (s) => ({ ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: false } : x)) }));
+      this.hooks.crashPoint?.("after_presend", a.id);
+      return true;
+    }
+    if (asked.kind === "connected" || asked.kind === "pending") return false;
     const result = this.rules.presendAnswer(asked, channel, knownReplies);
     if (result.kind === "unavailable") return false;
     await this.update(a.subjectId, now, (s) => {
@@ -1375,6 +1550,7 @@ export class Engine {
       subjectId: a.subjectId,
       trackId: a.trackId,
       stepId: a.stepId,
+      ...(a.action ? { action: a.action } : {}),
     };
   }
 

@@ -19,6 +19,9 @@ import {
 import { compareReadyNow, focusOf, isListed, logCallOutcome, placeCall, readyCalls, reasonOf } from "../../domain/sequence/calls.ts";
 import { applyBadDestination, applyReply, applyToAttempt, applyToWork, asOfAction, enterMain, evaluate, releaseUnsentBindings, replyMatches, sameConversations, smsReplyOwner, stillSettled, withdrawalDue } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
+import { connectionChecksDue, connectionChecked, inviteAlreadyConnected, inviteExpired, inviteWithdrawalAnswer, inviteWithdrawalDue, recordAcceptance } from "../../domain/sequence/progress.ts";
+import { actionOfStep } from "../../domain/sequence/dispatch.ts";
+import { markPrecondition, markReplied } from "../../domain/sequence/controls.ts";
 import { reconcileEdit, stillRunnable } from "../../domain/sequence/reconcile.ts";
 import { launchCheck } from "../../domain/sequence/blockers.ts";
 import { applyControl, campaignPaused, campaignPrecondition, campaignResumed, controlPrecondition, judgeControl } from "../../domain/sequence/controls.ts";
@@ -35,6 +38,29 @@ export type PresendAnswer = { readonly kind: "clear" } | { readonly kind: "unava
 
 export interface Rules {
   readonly evaluate: typeof evaluate;
+  /** LinkedIn (ADR 0004 section 3): an acceptance the session reports, recorded and, before the deadline, connecting the track. */
+  readonly recordAcceptance: typeof recordAcceptance;
+  /** The acceptance expiry with the fallback off (3.3; ticket 27 attaches here). `evaluate` reads it through its option. */
+  readonly inviteExpired: typeof inviteExpired;
+  /** The pre-send check found the sender already connected: the invite skipped, the track connected (3.3). */
+  readonly inviteAlreadyConnected: typeof inviteAlreadyConnected;
+  /** The connection check's answer, applied (ADR 0004 section 6): the first place an existing connection is found. */
+  readonly connectionChecked: typeof connectionChecked;
+  /** Whether a track's invite is due a connection check now, and from which session (ADR 0004 section 6). */
+  readonly connectionChecksDue: typeof connectionChecksDue;
+  readonly inviteWithdrawalDue: typeof inviteWithdrawalDue;
+  readonly inviteWithdrawalAnswer: typeof inviteWithdrawalAnswer;
+  /** The social action a step asks for (ADR 0004 2.1, 6): what the pre-send check's "connected" means for it. */
+  readonly actionOfStep: typeof actionOfStep;
+  /**
+   * Whether the pre-send check's `pending` (an invite outstanding on LinkedIn) stops the handover (council on 194fc44, item
+   * 1): a second layer under the connection gate and the pair's ownership. A rule, so the generated runs can prove each.
+   */
+  readonly outstandingInviteStops: () => boolean;
+  /** The user's LinkedIn reply mark (ADR 0004 section 7). */
+  readonly markReplied: typeof markReplied;
+  /** The mark's confirmation, checked after its own rule (council on 194fc44, item 7). */
+  readonly markPrecondition: typeof markPrecondition;
   readonly enterMain: typeof enterMain;
   readonly applyToAttempt: typeof applyToAttempt;
   readonly applyToWork: typeof applyToWork;
@@ -148,7 +174,30 @@ export interface Rules {
   readonly stopTestOnEdit: (state: SubjectState, now: number) => SubjectState;
 }
 
+/**
+ * The rules an engine or a read runs by: the defaults with `given` in place, and `evaluate` reading the acceptance expiry
+ * through the rules (ADR 0004 3.5), so a swapped `inviteExpired` (ticket 27's attach point, and a mutation) is the one every
+ * evaluation applies. Every place that merges rules calls this.
+ */
+export function rulesWith(given: Partial<Rules> = {}): Rules {
+  const rules: Rules = { ...DEFAULT_RULES, ...given };
+  if (rules.inviteExpired === DEFAULT_RULES.inviteExpired) return rules;
+  const evaluateAt = rules.evaluate;
+  return { ...rules, evaluate: (state, now, options) => evaluateAt(state, now, { inviteExpired: rules.inviteExpired, ...options }) };
+}
+
 export const DEFAULT_RULES: Rules = {
+  recordAcceptance,
+  inviteExpired,
+  inviteAlreadyConnected,
+  connectionChecked,
+  connectionChecksDue,
+  inviteWithdrawalDue,
+  inviteWithdrawalAnswer,
+  actionOfStep,
+  outstandingInviteStops: () => true,
+  markReplied,
+  markPrecondition,
   evaluate,
   enterMain,
   applyToAttempt,

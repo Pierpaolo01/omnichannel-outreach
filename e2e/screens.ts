@@ -75,7 +75,7 @@ export async function logWithMouse(page: Page, outcome: string, note = ""): Prom
 
 const NEEDS_ATTENTION = {
   stalledInboxes: [],
-  heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e1", trackId: "sms", reason: "provider_skipped", owners: [] }],
+  heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e1", trackId: "sms", channel: "email", reason: "provider_skipped", owners: [] }],
   accountWaits: [{ accountId: "outreach@northlight-mail.example", reason: "rate_limited", until: "2026-11-09T11:30:00.000Z" }],
   senderProblems: [
     { accountId: "sms-1", channel: "sms", label: "+44 7700 900999", problem: "disconnected" },
@@ -216,7 +216,7 @@ export function galleryLead(id: string, campaignId: string, status: OutreachStat
     sender: null,
     smsSender: null,
     zone: "Europe/London",
-    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, when: { kind: "at", at: "2026-11-11T09:00:00.000Z" } }, callTask: null, steps: [] }],
+    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, when: { kind: "at", at: "2026-11-11T09:00:00.000Z" } }, callTask: null, steps: [] }],
     branch: status === "in_win_back" ? "win_back" : "main",
     winBackEnteredAt: null,
     declined: null,
@@ -377,7 +377,7 @@ async function readyForm(page: Page): Promise<void> {
 
 /** An import whose rows include the ones that changed nothing and a number a colleague holds. */
 function importWithUnmatchedRows(): { campaign: { id: string; name: string; defaultTimezone: null; createdAt: string }; imports: ImportRecord[] } {
-  const reach = { email: false, sms: false, call: true };
+  const reach = { email: false, sms: false, call: true, linkedin: false };
   const person = (name: string, title: string, outcome: "new" | "already_enrolled" | "updated", id: string): Extract<SummaryEntry, { channels: unknown }> => ({
     outcome,
     lead: { kind: "person", personId: id },

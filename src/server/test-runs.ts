@@ -198,6 +198,8 @@ function trackEndedBecause(reason: FinishReason): string {
       return "unworked";
     case "dropped_for_win_back":
       return "win_back";
+    case "invite_not_accepted":
+      return "invite_not_accepted";
     case "closed_on_interest":
       return "interested";
     case "completed":

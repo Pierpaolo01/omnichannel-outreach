@@ -1,6 +1,7 @@
 import { emailKey } from "./contact-details.ts";
 import { parsePhoneNumberFromString } from "libphonenumber-js/min";
 import { displayPhone } from "./phone.ts";
+import { linkedinProfileKey } from "./linkedin-profile.ts";
 
 /**
  * The user's own test contacts (CONTEXT.md "Test contact"; ADR 0003 "Ticket 21"): an email and a mobile, each optional.
@@ -16,11 +17,13 @@ export interface TestContact {
 export interface TestContacts {
   readonly email: TestContact | null;
   readonly mobile: TestContact | null;
+  /** The user's own test LinkedIn profile (ADR 0004 section 8), keyed by `linkedinProfileKey`. Absent: none. */
+  readonly linkedin?: TestContact | null;
 }
 
-export type TestContactsInput = { readonly email: string; readonly mobile: string };
+export type TestContactsInput = { readonly email: string; readonly mobile: string; readonly linkedin?: string };
 
-export type ParsedTestContacts = { readonly ok: true; readonly contacts: TestContacts } | { readonly ok: false; readonly field: "email" | "mobile"; readonly message: string };
+export type ParsedTestContacts = { readonly ok: true; readonly contacts: TestContacts } | { readonly ok: false; readonly field: "email" | "mobile" | "linkedin"; readonly message: string };
 
 /** Reads what the user typed: blank is none; an email must be an address; a mobile must be an international number. */
 export function parseTestContacts(input: TestContactsInput): ParsedTestContacts {
@@ -38,7 +41,11 @@ export function parseTestContacts(input: TestContactsInput): ParsedTestContacts 
     if (!parsed?.isPossible()) return { ok: false, field: "mobile", message: "Write your mobile in international form, starting with + and the country code." };
     mobile = { value: displayPhone(parsed.number), key: parsed.number };
   }
-  return { ok: true, contacts: { email, mobile } };
+  const linkedinText = (input.linkedin ?? "").trim();
+  if (linkedinText === "") return { ok: true, contacts: { email, mobile } };
+  const key = linkedinProfileKey(linkedinText);
+  if (key === null) return { ok: false, field: "linkedin", message: "Give your LinkedIn profile's address, such as https://www.linkedin.com/in/your-name." };
+  return { ok: true, contacts: { email, mobile, linkedin: { value: key, key } } };
 }
 
 /**

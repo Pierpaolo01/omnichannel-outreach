@@ -6,7 +6,7 @@
  */
 import type { CampaignDefinition, TrackDefinition } from "../domain/sequence/definition.ts";
 
-const WORD = { email: "Email", sms: "SMS", call: "Phone" } as const;
+const WORD = { email: "Email", sms: "SMS", call: "Phone", linkedin: "LinkedIn" } as const;
 
 export interface TrackLabel {
   readonly label: string;
@@ -19,7 +19,7 @@ export interface TrackLabel {
 export function trackLabel(def: CampaignDefinition, track: Pick<TrackDefinition, "id" | "channel">): TrackLabel {
   const branch = def.tracks.find((t) => t.id === track.id)?.branch ?? "main";
   const same = def.tracks.filter((t) => t.channel === track.channel && t.branch === branch && (!t.removed || t.id === track.id));
-  const word = branch === "win_back" ? `Win-back ${WORD[track.channel] === "SMS" ? "SMS" : WORD[track.channel].toLowerCase()}` : WORD[track.channel];
+  const word = branch === "win_back" ? `Win-back ${WORD[track.channel] === "SMS" || WORD[track.channel] === "LinkedIn" ? WORD[track.channel] : WORD[track.channel].toLowerCase()}` : WORD[track.channel];
   if (same.length <= 1) return { label: `${word} track`, several: false, branch };
   return { label: `${word} track ${same.findIndex((t) => t.id === track.id) + 1}`, several: true, branch };
 }
@@ -28,8 +28,8 @@ export function trackLabel(def: CampaignDefinition, track: Pick<TrackDefinition,
  * What one step of a track is called in a title (council on 4fd9ca4, item 5): "Email" or "Text" in the main sequence,
  * "Win-back email" or "Win-back text" in the win-back branch, so a step of the branch never reads as the main sequence's.
  */
-export function stepNoun(track: Pick<TrackLabel, "branch">, channel: "email" | "sms"): string {
-  const noun = channel === "sms" ? "Text" : "Email";
+export function stepNoun(track: Pick<TrackLabel, "branch">, channel: "email" | "sms" | "linkedin"): string {
+  const noun = channel === "sms" ? "Text" : channel === "linkedin" ? "LinkedIn step" : "Email";
   switch (track.branch) {
     case "main":
       return noun;

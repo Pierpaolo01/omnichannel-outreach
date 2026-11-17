@@ -14,13 +14,14 @@ import { sequentialIds } from "./domain.ts";
 import { csvOf, type ExportRows } from "./export-builder.ts";
 import { FakeEmailPort, type FakeAccount, type FakeMode } from "./fake-email-port.ts";
 import { FakeSmsPort, type FakeNumber, type FakeSmsMode } from "./fake-sms-port.ts";
+import { FakeLinkedInPort, type FakeSession } from "./fake-linkedin-port.ts";
 import { HEARTBEAT_KEY } from "../../src/server/engine/worker-state.ts";
 
 /** The values a failed call resolves with when `failuresResolve` is set, as the Instantly adapter's do (review bot on 592d679). */
 const FAILURE_VALUES: Readonly<Record<string, unknown>> = { presendCheck: { kind: "unavailable" }, lookup: { kind: "unknown" }, withdraw: "unknown", handover: { kind: "unknown" } };
 
 /** The port calls an outage refuses, and the ones a held answer delays (ticket 20a). */
-const PORT_CALLS = new Set(["accounts", "presendCheck", "handover", "withdraw", "observe", "lookup"]);
+const PORT_CALLS = new Set(["accounts", "presendCheck", "handover", "withdraw", "withdrawInvite", "observe", "lookup"]);
 
 /**
  * The real HTTP app and SQLite store with the engine over a fake email provider, on a clock the
@@ -50,6 +51,8 @@ export interface EngineHarnessOptions {
   readonly appIdPrefix?: string;
   /** A fake SMS provider's numbers (ticket 13). Without them the engine has the unprovisioned SMS port. */
   readonly sms?: { readonly numbers: readonly FakeNumber[]; readonly modes?: readonly FakeSmsMode[] };
+  /** A simulated LinkedIn provider's sessions (ticket 24, ADR 0004). Without them the engine has the unconnected LinkedIn port. */
+  readonly linkedin?: { readonly sessions: readonly FakeSession[] };
 }
 
 /** A provider the harness can drive: it acts on its own at instants the harness advances to. */
@@ -79,6 +82,8 @@ export class EngineHarness {
   readonly provider: Provider;
   /** The fake SMS provider, when the harness has one. */
   readonly smsProvider: FakeSmsPort | null;
+  /** The simulated LinkedIn provider, when the harness has one. */
+  readonly linkedinProvider: FakeLinkedInPort | null;
   engine: Engine;
   readonly crashes: string[] = [];
   /** Engine ticks run so far. */
@@ -114,14 +119,16 @@ export class EngineHarness {
       typeof options.port === "function" ? options.port(this.store, () => this.clock)
       : options.port ?? new FakeEmailPort({ now: () => this.clock, random: options.random ?? (() => 0.5), accounts: options.accounts, modes: options.modes ?? ["honest"] });
     this.smsProvider = options.sms ? new FakeSmsPort({ now: () => this.clock, random: options.random ?? (() => 0.5), numbers: options.sms.numbers, modes: options.sms.modes ?? ["honest"] }) : null;
+    this.linkedinProvider = options.linkedin ? new FakeLinkedInPort({ now: () => this.clock, sessions: options.linkedin.sessions }) : null;
     this.engine = this.newEngine();
     this.app = createApp({
       store: this.store,
       now: () => new Date(this.clock).toISOString(),
       newId: sequentialIds(options.appIdPrefix),
-      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input), controlLead: (id, action, requestId, expected) => this.engine.controlLead(id, action, requestId, expected), setCampaignPause: (id, pause, requestId, expected) => this.engine.setCampaignPause(id, pause, requestId, expected), transportAvailable: (channel, threading) => this.engine.transportAvailable(channel, threading), saveDefinition: (id, definition, editedAt, save, options) => this.engine.saveDefinition(id, definition, editedAt, save, options), runTest: (id, requestId, renderAs, version) => this.engine.runTest(id, requestId, renderAs, version) },
+      engine: { launch: (id, expected) => this.engine.launch(id, expected), logCallOutcome: (id, input) => this.engine.logCallOutcome(id, input), controlLead: (id, action, requestId, expected) => this.engine.controlLead(id, action, requestId, expected), setCampaignPause: (id, pause, requestId, expected) => this.engine.setCampaignPause(id, pause, requestId, expected), transportAvailable: (channel, threading) => this.engine.transportAvailable(channel, threading), saveDefinition: (id, definition, editedAt, save, options) => this.engine.saveDefinition(id, definition, editedAt, save, options), runTest: (id, requestId, renderAs, version) => this.engine.runTest(id, requestId, renderAs, version), markReplied: (id, requestId, expected) => this.engine.markReplied(id, requestId, expected), markInviteWithdrawal: (id, trackId, answer, requestId) => this.engine.markInviteWithdrawal(id, trackId, answer, requestId) },
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
+      linkedinProvider: this.linkedinProvider ? "test-simulator" : "none",
       ...(options.rules ? { rules: options.rules } : {}),
       ...(options.bulkRules ? { bulkRules: options.bulkRules } : {}),
       ...(options.measureRules ? { measureRules: options.measureRules } : {}),
@@ -153,6 +160,13 @@ export class EngineHarness {
   private advanceProviders(): void {
     this.provider.advance();
     this.smsProvider?.advance();
+    this.linkedinProvider?.advance();
+  }
+
+  /** The simulated LinkedIn provider. */
+  get linkedin(): FakeLinkedInPort {
+    if (!this.linkedinProvider) throw new Error("this harness has no LinkedIn provider");
+    return this.linkedinProvider;
   }
 
   /** The generated test's fake provider. */
@@ -319,6 +333,7 @@ export class EngineHarness {
       store: this.store.engine,
       port: this.gated(this.provider),
       ...(this.smsProvider ? { smsPort: this.gated(this.smsProvider) } : {}),
+      ...(this.linkedinProvider ? { linkedinPort: this.gated(this.linkedinProvider) } : {}),
       now: () => this.clock,
       newId: this.engineIds,
       ...(this.options.rules ? { rules: this.options.rules } : {}),
@@ -424,7 +439,7 @@ export class EngineHarness {
   async otherWorker(): Promise<void> {
     this.advanceProviders();
     // Another process: its ticks do not queue behind this one's.
-    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
+    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), ...(this.linkedinProvider ? { linkedinPort: this.linkedinProvider } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
   }
 
   /**
@@ -432,7 +447,7 @@ export class EngineHarness {
    * tick, so a test can save from inside a hook, between a claim and its handover.
    */
   async otherProcessSave(campaignId: string, definition: CampaignDefinition): Promise<string> {
-    const other = new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) });
+    const other = new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), ...(this.linkedinProvider ? { linkedinPort: this.linkedinProvider } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) });
     return (await other.saveDefinition(campaignId, definition, new Date(this.clock).toISOString(), null, { tick: false })).outcome;
   }
 
@@ -448,7 +463,7 @@ export class EngineHarness {
     const dump = () =>
       new Map(tables.map((t) => [t, new Set(db.prepare(`SELECT * FROM ${t}`).all().map((r) => JSON.stringify({ ...r, version: undefined })))]));
     const before = dump();
-    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.gated(this.provider), ...(this.smsProvider ? { smsPort: this.gated(this.smsProvider) } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
+    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.gated(this.provider), ...(this.smsProvider ? { smsPort: this.gated(this.smsProvider) } : {}), ...(this.linkedinProvider ? { linkedinPort: this.gated(this.linkedinProvider) } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
     const after = dump();
     return tables.flatMap((t) => {
       const a = before.get(t)!;
@@ -499,7 +514,7 @@ export class EngineHarness {
     this.halt = false;
     await this.tick();
     for (let guard = 0; guard < 100_000 && this.clock < target && !this.stopped && !this.halted(); guard++) {
-      const wakes = [await this.engine.nextWakeAt(), this.provider.nextActivityAt(), this.smsProvider?.nextActivityAt() ?? null, this.providersDownUntil, target].filter((t): t is number => t !== null && t > this.clock);
+      const wakes = [await this.engine.nextWakeAt(), this.provider.nextActivityAt(), this.smsProvider?.nextActivityAt() ?? null, this.linkedinProvider?.nextActivityAt() ?? null, this.providersDownUntil, target].filter((t): t is number => t !== null && t > this.clock);
       this.clock = Math.min(...wakes);
       await this.tick();
       await onInstant?.();

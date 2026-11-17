@@ -166,7 +166,7 @@ describe("every track state has a preview sentence and a record sentence (counci
       stopped_after_start: ["Email track 2 stops.", "Email track 2 stopped: their outreach in this campaign stopped."],
     };
     for (const [state, [preview, record]] of Object.entries(table) as [DeclineTrackView["state"], [string, string]][]) {
-      const a = (state === "waiting" ? { track, state, startsAt: "2026-11-14T01:05:00.000Z" } : { track, state, startsAt: null, owners: [{ name: "Spring clinics", test: false }] }) as DeclineTrackView;
+      const a = (state === "waiting" ? { track, state, startsAt: "2026-11-14T01:05:00.000Z" } : { track, state, startsAt: null, owners: [{ name: "Spring clinics", test: false }], channel: "sms" }) as DeclineTrackView;
       expect(declineTrackLine(a, "preview", "Europe/London"), state).toBe(preview);
       expect(declineTrackLine(a, "record", "Europe/London"), state).toBe(record);
     }

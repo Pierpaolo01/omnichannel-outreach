@@ -45,7 +45,7 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
     const def = state.campaign.definition;
     const companyLead = kind === "company";
     const bounces = await store.engine.bouncesOf(enrollment.id);
-    const channelOfTrack = (trackId: string): "email" | "sms" | "call" => def.tracks.find((t) => t.id === trackId)?.channel ?? "email";
+    const channelOfTrack = (trackId: string): "email" | "sms" | "call" | "linkedin" => def.tracks.find((t) => t.id === trackId)?.channel ?? "email";
     const labelOf = (trackId: string) => trackLabel(def, def.tracks.find((t) => t.id === trackId) ?? { id: trackId, channel: channelOfTrack(trackId) });
     // A text goes to a mobile's E.164 form; it is shown grouped for reading.
     const shown = (channel: "email" | "sms", destination: string) => (channel === "sms" ? displayPhone(destination) : destination);

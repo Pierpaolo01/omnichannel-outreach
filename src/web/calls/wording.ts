@@ -5,12 +5,12 @@
  */
 import type { PausedCampaignCalls, CallbackListingView, CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule, HoldReasonApi, ConversationOwnerView } from "../../shared/api.ts";
 import { clockTime, localClock } from "../time.ts";
-import { WIN_BACK_HAS_NO_TRACKS } from "../../domain/sequence/definition.ts";
+import { WIN_BACK_HAS_NO_TRACKS, type TrackChannel } from "../../domain/sequence/definition.ts";
 import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
 import { dayLabel, zonedInstants, type CallbackChoice } from "./callbackTime.ts";
 import { capacityItems, heldTrackItems, noUsableChannelItem, providerWaitItems, sendingInterruptedItem } from "./interruption.ts";
-import { conversationTaken, ownersPhrase } from "../campaign/sms-wording.ts";
+import { conversationTaken, conversationUnsettled } from "../campaign/sms-wording.ts";
 
 /** The outcome buttons, as the approved prototype labels them. */
 export const OUTCOME_LABEL = {
@@ -326,13 +326,15 @@ function trackFinishedLine(who: string, finish: FinishReasonApi | null): string 
       return `${who} moved to this campaign’s win-back branch, which makes no calls, so this call left the list.`;
     case "skipped_unworked":
       return `${who}’s call wasn’t made within its skip limit, so it was skipped and left the list.`;
-    // Never a phone track's finish: only an SMS track is skipped for a taken conversation.
+    // Never a phone track's finish: only an SMS track is skipped for a taken conversation, and only a LinkedIn track waits
+    // for an invite to be accepted (ADR 0004).
     case "skipped_conversation_taken":
     case "completed":
     case "skipped":
     case "skipped_by_user":
     case "failed_bad_destination":
     case "closed_on_interest":
+    case "invite_not_accepted":
       return `${who}’s phone track has finished, so the call left the list.`;
     default: {
       const unhandled: never = finish;
@@ -357,15 +359,18 @@ const SENDER_PROBLEM: Readonly<Record<string, string>> = {
  * Why a track is on hold, as a clause (ADR 0003 5.4): the one wording Needs attention, the person record and the Test run
  * tab use. A wait on another campaign's first text names that campaign (`owners`).
  */
-export const holdReasonClause = (reason: HoldReasonApi, owners: readonly ConversationOwnerView[] = []): string =>
-  reason === "sms_conversation_unsettled" ? `the first text from ${ownersPhrase(owners)} to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet` : HOLD_REASON[reason];
+// `channel` is the held track's, required (council on b21af02, item 1): a hold is never worded in another channel's words.
+export const holdReasonClause = (reason: HoldReasonApi, owners: readonly ConversationOwnerView[], channel: TrackChannel): string =>
+  reason === "sms_conversation_unsettled" ? conversationUnsettled(owners, channel) : HOLD_REASON[reason];
 
 const HOLD_REASON: Readonly<Record<HoldReasonApi, string>> = {
   unresolved: "the provider hasn’t confirmed whether a message went",
   render_failed: "a message couldn’t be put together from its copy",
   provider_skipped: "the provider skipped the lead",
   no_thread: "a follow-up has no earlier email to continue",
-  sms_conversation_unsettled: "the first text from another campaign to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet",
+  // Worded with its channel by `holdReasonClause`, never from here.
+  sms_conversation_unsettled: "another campaign’s first contact with them isn’t known to have gone or not yet",
+  invite_pending_elsewhere: "an invite to them is already pending on LinkedIn that this application didn’t send",
 };
 
 export interface AttentionItem {
@@ -432,6 +437,7 @@ export function carriedItem(today: Pick<TodayView, "carriedOver" | "carriedOverL
  */
 export const SAID_ON_TODAY: Record<keyof NeedsAttention, string> = {
   overdueCallbacks: "from Today's own read, which names whose they are (overdueItem)",
+  inviteWithdrawalsUnknown: "not yet: part b of ticket 24 words it (ADR 0004 3.3); the read already lists each one",
   sendingInterrupted: "sendingInterruptedItem, from this read, so it and the provider entries share one instant",
   waitingOnProvider: "providerWaitItems",
   senderProblems: "one entry per account",
@@ -754,7 +760,7 @@ export function declineTrackLine(a: DeclineTrackView, mode: "preview" | "record"
       return preview ? `${name} is skipped: there is nothing to reach them on for it.` : `${name} was skipped: there is nothing to reach them on for it.`;
     case "skipped_conversation_taken":
       // Already skipped when the preview is read, so the past tense in both modes (question Q7 answered).
-      return `${name} was skipped: ${conversationTaken(a.owners)}.`;
+      return `${name} was skipped: ${conversationTaken(a.owners, a.channel)}.`;
     case "skipped":
       return `${name} was skipped.`;
     case "stopped":

@@ -5,6 +5,12 @@
 import type { StepWait, StepWhen } from "../../domain/sequence/dispatch.ts";
 import type { StepWaitApi, StepWhenView } from "../../shared/api.ts";
 import { dateOfDay } from "./call-views.ts";
+import type { SubjectState } from "../../domain/sequence/state.ts";
+
+/** A track's channel in the subject's definition in force (a removed track keeps its channel). */
+export function channelOfTrack(state: SubjectState, trackId: string): "email" | "sms" | "call" | "linkedin" {
+  return state.campaign.definition.tracks.find((t) => t.id === trackId)?.channel ?? "email";
+}
 
 /** Every reason the engine has for a step with no time, in one exhaustive switch. */
 export function stepWaitApi(why: StepWait): StepWaitApi {
@@ -33,6 +39,8 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
     case "call_capacity":
     case "on_call_list":
     case "call_hours_closed":
+    case "awaiting_acceptance":
+    case "invite_pending_elsewhere":
       return why;
     default: {
       const unhandled: never = why;
@@ -41,11 +49,20 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
   }
 }
 
-/** The read of `stepWhen(…, now)`: ready, a later instant, a call's day, or why it waits. `today` is the user's day number. */
-export function stepWhenView(when: StepWhen, now: number, today: number): StepWhenView {
+/**
+ * The read of `stepWhen(…, now)`: ready, a later instant, a call's day, or why it waits. `today` is the user's day number.
+ * A wait carries its track's channel, so every reason is worded in that channel's words (council on b21af02, item 1): a
+ * transport's wait names the transport's channel, which is the track's.
+ */
+export function stepWhenView(when: StepWhen, now: number, today: number, channel: "email" | "sms" | "call" | "linkedin"): StepWhenView {
   switch (when.kind) {
     case "waits":
-      return when.channel ? { kind: "waits", why: stepWaitApi(when.why), channel: when.channel } : { kind: "waits", why: stepWaitApi(when.why) };
+      return {
+        kind: "waits",
+        why: stepWaitApi(when.why),
+        channel: when.channel ?? channel,
+        ...(when.until !== undefined ? { until: new Date(when.until).toISOString() } : {}),
+      };
     case "ready":
       return { kind: "ready" };
     case "at":

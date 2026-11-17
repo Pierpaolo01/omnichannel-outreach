@@ -65,6 +65,7 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
       return `the call${on}`;
     case "email":
     case "sms":
+    case "linkedin":
       return `${lower(stepNoun(step.track, step.channel))} ${step.number} of ${step.of}${on}`;
     default: {
       const unhandled: never = step.channel;
@@ -79,7 +80,7 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
  */
 // `channel` is required, never defaulted: a caller that forgot it would word a text's reason as an email's (the re-check of
 // ff01571: the Test run tab named the email provider for an SMS transport hold).
-export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call" | undefined): string {
+export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call" | "linkedin"): string {
   switch (why) {
     case "campaign_not_launched":
       return "waiting for this campaign to launch";
@@ -98,7 +99,7 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
     case "provider_skipped":
     case "no_thread":
     case "sms_conversation_unsettled":
-      return `held: ${holdReasonClause(why)}`;
+      return `held: ${holdReasonClause(why, [], channel)}`;
     case "no_window":
       return "not going: its sending hours never open";
     case "no_transport":
@@ -128,6 +129,10 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
       return "waiting for room on your call list, on a day with calling hours";
     case "on_call_list":
       return "on your call list";
+    case "awaiting_acceptance":
+      return "waiting for them to accept the LinkedIn invite";
+    case "invite_pending_elsewhere":
+      return "on hold: an invite to them is already pending on LinkedIn that this application didn’t send";
     default: {
       const unhandled: never = why;
       throw new Error(`A reason a step waits with no words: ${String(unhandled)}`);
@@ -148,6 +153,8 @@ export function stepWhenPhrase(when: StepWhenView, userZone: string): string {
     case "at":
       return `earliest ${whenIn(userZone, when.at)}`;
     case "waits":
+      // The day an acceptance wait ends is a fact of the read, said as when the wait ends, never as when a send goes (ADR 0004 9).
+      if (when.why === "awaiting_acceptance" && when.until !== undefined) return `${stepWaitWords(when.why, when.channel)}; the wait ends ${dateIn(userZone, when.until)}`;
       return stepWaitWords(when.why, when.channel);
     // A call goes on the list on a day, never at a time of day (council on 178de98, item 3).
     case "call_day":
@@ -199,7 +206,7 @@ export function nextStepSentence(lead: RecordLead, userZone: string): string {
   const next = (): string => {
     if (!step) return refusalOf(lead, "skip") ?? "";
     if (campaignPaused) return join(`Next: ${stepPhrase(step)}.`, frozen);
-    if (held?.hold) return `Next: ${stepPhrase(step)}, on hold because ${holdReasonClause(held.hold, held.holdOwners)}.`;
+    if (held?.hold) return `Next: ${stepPhrase(step)}, on hold because ${holdReasonClause(held.hold, held.holdOwners, step.channel)}.`;
     return `Next: ${stepPhrase(step)}${due(dueOf(lead, step), userZone)}.`;
   };
   const status: OutreachStatus = lead.status;
@@ -222,8 +229,8 @@ export function nextStepSentence(lead: RecordLead, userZone: string): string {
     }
     case "replied": {
       if (!lead.reply) return "They replied. Over to you.";
-      const how = lead.reply.channel === "email" ? "Replied by email" : "Replied by text";
-      return `${how} on ${whenIn(userZone, lead.reply.at)}. ${lead.reply.channel === "email" ? "Answer in Instantly." : "Answer on your phone."}`;
+      const words = REPLY_WORDS[lead.reply.channel];
+      return `${words.how} on ${whenIn(userZone, lead.reply.at)}. ${words.answer}`;
     }
     case "interested_on_call":
       return "Interested on the call. Over to you.";
@@ -361,3 +368,14 @@ export function campaignConfirmText(action: "pause" | "resume", name: string, re
 
 /** What a campaign's pause or resume did. */
 export const CAMPAIGN_DONE = { pause: "Paused. Its calls left your list and its waits froze.", resume: "Resumed. Each lead continued where it was." } as const;
+
+/**
+ * A reply's channel in words, one entry per channel (council on 194fc44, item 4): every sentence keyed on a reply's channel
+ * reads it here, so a channel added later fails typecheck until it has its words. A LinkedIn reply is the user's own mark.
+ */
+// `activity`: what Activity says after "Automation stopped in this campaign." (council on b21af02, item 1).
+export const REPLY_WORDS: Readonly<Record<"email" | "sms" | "linkedin", { readonly how: string; readonly title: string; readonly answer: string; readonly activity: string }>> = {
+  email: { how: "Replied by email", title: "Replied by email", answer: "Answer in Instantly.", activity: "Read and answer the reply in Instantly." },
+  sms: { how: "Replied by text", title: "Replied by text", answer: "Answer on your phone.", activity: "Answer the reply on your phone." },
+  linkedin: { how: "Marked replied on LinkedIn by you", title: "You marked them replied on LinkedIn", answer: "Carry on the conversation on LinkedIn.", activity: "Carry on the conversation on LinkedIn." },
+};

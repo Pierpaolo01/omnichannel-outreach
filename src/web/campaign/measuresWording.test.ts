@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import type { CampaignMeasures } from "../../shared/api.ts";
 import { groupCountText } from "../status.tsx";
-import { callsLine, connectRateText, measureRows, messagesLine, replyRateText, MEASURE_NOTES } from "./measuresWording.ts";
+import { callsLine, connectRateText, linkedinLine, measureRows, messagesLine, replyRateText, MEASURE_NOTES } from "./measuresWording.ts";
 
 const msg = (sent: number, failedOrBounced: number, replies: number, fromTests = { sent: 0, failedOrBounced: 0, replies: 0 }) => ({ sent, failedOrBounced, replies, fromTests });
 const NO_CALL_TESTS = { made: 0, connected: 0, interested: 0, declined: 0, callbacksPending: 0 };
@@ -13,6 +13,7 @@ const m = (fields: Partial<CampaignMeasures> = {}): CampaignMeasures => ({
   channels: ["email", "sms", "call"],
   email: msg(40, 2, 3),
   sms: msg(12, 1, 1),
+  linkedin: { invitesSent: 0, invitesAccepted: 0, messagesSent: 0, failed: 0, replies: 0, fromTests: { invitesSent: 0, invitesAccepted: 0, messagesSent: 0, failed: 0, replies: 0 } },
   calls: { made: 9, connected: 4, interested: 1, declined: 2, callbacksPending: 1, fromTests: NO_CALL_TESTS },
   replyRate: r(4, 16, 25),
   connectRate: r(4, 9, 44),
@@ -66,6 +67,16 @@ describe("the measures' wording (one function per measure)", () => {
     // Verifier F4 on 41028f2: Skip for now leaves a callback pending.
     expect(MEASURE_NOTES.find((n) => n.startsWith("A callback is pending"))).toBe(
       "A callback is pending until an outcome other than Skip for now is logged on it, also while the lead is paused (it is then off your call list); not once the lead has replied or been stopped.",
+    );
+  });
+});
+
+describe("LinkedIn measures in words (ADR 0004 section 8)", () => {
+  test("invites sent and accepted, messages sent, failures and replies marked; none sent yet before anything went", () => {
+    const zero = { invitesSent: 0, invitesAccepted: 0, messagesSent: 0, failed: 0, replies: 0 };
+    expect(linkedinLine({ ...zero, fromTests: zero })).toBe("None sent yet");
+    expect(linkedinLine({ invitesSent: 5, invitesAccepted: 2, messagesSent: 3, failed: 1, replies: 1, fromTests: { ...zero, invitesSent: 1 } })).toBe(
+      "5 invites sent (1 from test runs) · 2 accepted · 3 messages sent · 1 failed · 1 lead marked replied",
     );
   });
 });

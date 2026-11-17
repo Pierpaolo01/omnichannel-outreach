@@ -22,7 +22,7 @@ export interface BlockerWording {
 
 const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const and = (items: readonly string[]): string => (items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1) ?? ""}`);
-const channelOf = (track: TrackDefinition | undefined): "email" | "sms" | "call" => track?.channel ?? "email";
+const channelOf = (track: TrackDefinition | undefined): TrackDefinition["channel"] => track?.channel ?? "email";
 
 export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition, sms: SmsProviderStatus | null = null): BlockerWording {
   const trackOf = (id: string) => def.tracks.find((t) => t.id === id);
