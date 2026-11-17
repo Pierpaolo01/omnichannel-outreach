@@ -9,7 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { rules as inmailSeams, awaitingAcceptance, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, type ConversationVersions, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
+import { rules as inmailSeams, inmailJudgedSessions, awaitingAcceptance, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, type ConversationVersions, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import type { OutreachStatus } from "../../domain/outreach-status.ts";
@@ -1125,7 +1125,11 @@ export class Engine {
       // refuses it, and the next pass decides again on the state as it is (question Q7 answered). Accounts it never reads.
       // Written over the current accounts and bindings: an evaluation adds or removes no binding, so with the guard
       // above they are the snapshot's; without it, it could never remove one another process released or add one taken.
-      await this.update(id, now, (current) => (this.rules.versionsMatch(snapshot, current) ? { ...next, accounts: current.accounts, smsBindings: current.smsBindings } : null));
+      // An InMail judged at the expiry read its session's standing (ADR 0004 13.5): refused too when that standing moved since
+      // (another lead's commitment of the last credit, a new report), and decided again (review bot on b49a71b).
+      const judged = inmailJudgedSessions(snapshot, next);
+      const standingHeld = (current: SubjectState) => judged.every((session) => JSON.stringify(snapshot.accounts[session]?.inmail ?? null) === JSON.stringify(current.accounts[session]?.inmail ?? null));
+      await this.update(id, now, (current) => (this.rules.versionsMatch(snapshot, current) && standingHeld(current) ? { ...next, accounts: current.accounts, smsBindings: current.smsBindings } : null));
       // Written, or discarded as stale: either way another pass follows, so a discarded change is
       // re-evaluated on fresh state in this tick (2.5).
       changed = true;

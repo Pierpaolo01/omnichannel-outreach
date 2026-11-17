@@ -310,8 +310,10 @@ export const rules = {
         return false;
       case "inmail":
         return connected || (progress.inmail !== "chosen" && (rules.inmailWaitsForExpiry || progress.inmail != null));
+      // After an InMail known sent, a step that reads as the first message is a follow-up the user kept: the replaced first
+      // message itself was skipped at the InMail's send, and an edit that removes it promotes the next one (review bot on b49a71b).
       case "first_message":
-        return !connected && (rules.inmailTakesFirstPlace || progress.inmail !== "sent");
+        return !connected && progress.inmail !== "sent";
       case "follow_up":
         return !connected && progress.inmail !== "sent";
       default: {
@@ -1402,7 +1404,8 @@ export function recordAcceptance(state: SubjectState, trackId: string, providerT
   if (p.inmail === "chosen" && p.finishedAt === null && (p.connection ?? null) === null && rules.acceptanceSkipsInmail) {
     const track = s.campaign.definition.tracks.find((t) => t.id === trackId);
     const im = p.nextStepId;
-    const handed = im !== null && s.work.some((w) => w.stepId === im && w.firstHandedWall !== null);
+    // Work that may have gone (unsettled, or sent) stops the skip; work refused or settled not sent does not (review bot on b49a71b).
+    const handed = im !== null && s.work.some((w) => w.stepId === im && w.firstHandedWall !== null && (w.settled === null || w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null));
     if (!track || im === null || linkedinStepKind(track, im) !== "inmail" || handed) return s;
     const at = point(s.subject.clock, s.freezes, providerTime, handedWall, now);
     const lead = leadNow(s.subject.clock, now);
@@ -1452,6 +1455,22 @@ export function inmailNotSent(state: SubjectState, trackId: string, cause: Inmai
   if (!p || p.finishedAt !== null) return state;
   const wanted = withTrack(withdrawClaims(state, trackId), trackId, (t) => ({ ...t, inmail: cause, inviteWithdrawal: "wanted", inviteWithdrawalLastWall: null }));
   return finishTrack(wanted, trackId, "invite_not_accepted", at, atWall);
+}
+
+/**
+ * The sessions whose InMail standing an evaluation read to make a judgment (ADR 0004 13.5; review bot on b49a71b): every
+ * session of a track whose InMail state the evaluation set. The evaluation's write is refused when any of their standings
+ * changed since its snapshot (another lead's commitment, a new report), so a credit is never committed twice.
+ */
+export function inmailJudgedSessions(before: SubjectState, after: SubjectState): string[] {
+  const sessions = new Set<string>();
+  for (const p of after.tracks) {
+    const was = before.tracks.find((t) => t.trackId === p.trackId);
+    if ((p.inmail ?? null) === (was?.inmail ?? null) || (was?.inmail ?? null) !== null) continue;
+    const session = p.inmailSession ?? linkedinSessionOf(before);
+    if (session !== null) sessions.add(session);
+  }
+  return [...sessions];
 }
 
 /**

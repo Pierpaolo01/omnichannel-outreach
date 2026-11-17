@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { linkedinAccountId } from "./ports.ts";
+import { DEFAULT_RULES } from "./rules.ts";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { FakeSession } from "../../../test/support/fake-linkedin-port.ts";
@@ -214,5 +215,55 @@ describe("a chosen InMail that cannot go yet, and one the user skips (ADR 0004 1
     await h.advanceTo(WEDNESDAY_0 + 12 * H);
     expect(delivered(PAT).map((d) => d.action)).toEqual(["invite"]);
     expect(await track(c.lead("Pat Oneil"))).toMatchObject({ inmail: "skipped_by_user", finishReason: "invite_not_accepted", finishedWall: WEDNESDAY_0 + 2 * H });
+  });
+});
+
+describe("the review bot on b49a71b", () => {
+  test("the replaced first message removed by a running edit after the InMail: the follow-ups still go", async () => {
+    const { h, campaign, delivered } = await world();
+    const c = await campaign([linkedin(FALLBACK)]);
+    await h.advanceTo(WEDNESDAY_0 + H);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "im"]);
+    const edited = definition([linkedin(FALLBACK.map((s) => (s.id === "m1" ? { ...s, removed: true } : s)))]);
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, edited)).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 7 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "im", "m2", "m3"]);
+  });
+
+  test("an InMail refused for a limit, then the invite accepted before its retry: the track connects and the first message goes", { timeout: 60_000 }, async () => {
+    const { h, campaign, delivered, track, results } = await world();
+    const c = await campaign([linkedin(FALLBACK)]);
+    await h.advanceTo(WEDNESDAY_0 - H);
+    // The InMail's first handover is refused for a limit; they accept 30 seconds later, before the retry.
+    h.linkedin.profiles.set(PAT, { rateLimited: 1 });
+    await h.advanceTo(WEDNESDAY_0 + MIN / 2);
+    expect(h.linkedin.refusals.some((r) => r.destination === PAT && r.reason === "rate_limited")).toBe(true);
+    h.linkedin.acceptNow(PAT);
+    await h.advanceTo(WEDNESDAY_0 + 2 * DAY);
+    expect((await track(c.lead("Pat Oneil")))?.connection).toBe("accepted");
+    expect((await results(c.lead("Pat Oneil"))).find((r) => r.stepId === "im")).toMatchObject({ result: "skipped", reason: "accepted" });
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1"]);
+  });
+
+  test("two expiries evaluated concurrently with one credit: one commits it, the other finds none free, and the one InMail goes", async () => {
+    const { h, campaign, track } = await world({ plan: "premium", credits: 1 });
+    const c = await campaign([linkedin(FALLBACK, OFFICE)]);
+    await h.advanceTo(WEDNESDAY_0 - H);
+    const [pat, nia] = [c.lead("Pat Oneil"), c.lead("Nia Cole")];
+    let raced = false;
+    h.hooks = {
+      beforeApplyEvaluation: async (id) => {
+        if (raced || (id !== pat && id !== nia)) return;
+        raced = true;
+        // The other lead's own expiry is evaluated and committed in between (another process's pass).
+        const other = id === pat ? nia : pat;
+        await h.store.engine.update(other, h.clock, (s) => DEFAULT_RULES.evaluate(s, h.clock));
+      },
+    };
+    await h.advanceTo(WEDNESDAY_0 + 12 * H);
+    expect(raced).toBe(true);
+    const states = [(await track(pat))?.inmail, (await track(nia))?.inmail].sort();
+    expect(states).toEqual(["no_credit", "sent"]);
+    expect(h.linkedin.deliveryLog.filter((d) => d.action === "inmail")).toHaveLength(1);
   });
 });

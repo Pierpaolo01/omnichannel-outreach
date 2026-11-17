@@ -638,7 +638,9 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       if (drained && went) {
         const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
         const track = stored.tracks.find((x) => x.id === c.li.id);
-        const first = track?.steps.filter((s) => s.role !== "inmail" && !s.removed)[1]?.id;
+        // The first message by its place among every step ever in the track, removed ones included: an edit that removes it
+        // after the InMail promotes a follow-up, which may then go (review bot on b49a71b).
+        const first = track?.steps.filter((s) => s.role !== "inmail")[1]?.id;
         const at = li.deliveryLog.find((x) => x.subjectId === lead.id && x.action === "inmail")?.at ?? Infinity;
         if (first && li.deliveryLog.some((x) => x.subjectId === lead.id && x.stepId === first && x.at > at)) problem(`L23: ${lead.id}'s first message went after its InMail`);
       }
