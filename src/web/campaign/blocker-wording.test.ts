@@ -95,7 +95,7 @@ describe("a LinkedIn track's blockers (ticket 24b)", () => {
 describe("what blocks launch, from the blockers the domain has (the council on 5a30b9f, item 3)", () => {
   const instagram: TrackDefinition = { id: "ig", channel: "instagram", branch: "main", window: week, start: { kind: "entry" }, removed: false, senders: ["instagram:s1"], steps: [{ id: "ig-1", waitDays: 0, subject: "", body: "Hello.", threading: "new_subject", removed: false }] };
   test("with no track: every blocker, a message-request track with no session chosen included", () => {
-    expect(blockedOnlyBy()).toBe("With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, no connected sender, or an Instagram track with no sender session chosen.");
+    expect(blockedOnlyBy()).toBe("With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, no connected sender, or an Instagram or a Facebook track with no sender session chosen.");
   });
   test("with tracks and nothing blocking: what holds, the chosen sessions only where a message-request track is", () => {
     expect(nothingBlocks(def([track("t1", "email", "Hi", "Hello")]))).toBe("Every message has copy, every merge field has a fallback where a lead lacks it, and every email and SMS track has a sender.");

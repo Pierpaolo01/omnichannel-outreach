@@ -77,6 +77,14 @@ const paths = {
       <path d="M7.2 13c.6-1.3 1.6-2 2.8-2s2.2.7 2.8 2" />
     </>
   ),
+  // A message to a profile or a Page (ADR 0004 14): a person with a small message beside them, not a platform's mark.
+  facebook: (
+    <>
+      <circle cx="7.6" cy="8.4" r="2.5" />
+      <path d="M2.8 16.6c.7-2.7 2.5-4.1 4.8-4.1s4.1 1.4 4.8 4.1" />
+      <path d="M12.6 3h3.9a1.3 1.3 0 0 1 1.3 1.3v2.9a1.3 1.3 0 0 1-1.3 1.3h-2.1l-1.9 1.5V8.5h.1a1.3 1.3 0 0 1-1.3-1.3V4.3A1.3 1.3 0 0 1 12.6 3z" />
+    </>
+  ),
   sms: <path d="M4.5 4.5h11a1.5 1.5 0 0 1 1.5 1.5v6.5a1.5 1.5 0 0 1-1.5 1.5H9l-3.5 2.6V14h-1A1.5 1.5 0 0 1 3 12.5V6a1.5 1.5 0 0 1 1.5-1.5z" />,
   clock: (
     <>

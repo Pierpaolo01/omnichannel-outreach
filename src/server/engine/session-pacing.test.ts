@@ -1,6 +1,8 @@
 import { describe, expect, test } from "vitest";
 import { linkedinAccountId, socialAccountId } from "./ports.ts";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
+import { everyChannelSessions, everyPersonAccountCell } from "../../../test/support/message-request-accounts.ts";
+import { MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import { defaultGap } from "../../domain/sequence/dispatch.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
@@ -20,11 +22,10 @@ const WIDE = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 8, end: 20 }));
 const NARROW = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 9, end: 10 }));
 const IG = ["ig-session-1", "ig-session-2"];
 const LI = ["li-session-1", "li-session-2"];
-const ig = (s: string) => socialAccountId("instagram", s);
 const li = (s: string) => linkedinAccountId(s);
 
 const HARBOUR = business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" });
-const PAT = person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", linkedin_url: "https://www.linkedin.com/in/fictional-pacing-pat", instagram: "https://www.instagram.com/example_pacing_pat" });
+const PAT = person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", linkedin_url: "https://www.linkedin.com/in/fictional-pacing-pat", ...everyPersonAccountCell("pacing.pat") });
 
 const step = (id: string, waitDays: number): StepDefinition => ({ id, waitDays, subject: "", body: "Hello {{first_name|there}}.", threading: "new_subject", removed: false });
 
@@ -33,11 +34,11 @@ async function world() {
     start: MONDAY_9 - H,
     accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
     // No gap of their own: each takes the default from the windows of the tracks it paces (`gapMs: null` in the store).
-    instagram: { sessions: IG.map((id) => ({ id, kind: "business" as const, gapMs: null as unknown as number, k: 1, healthy: true, resetZone: "Europe/London" })) },
+    social: everyChannelSessions(IG.map((id) => ({ id, kind: "business" as const, gapMs: null as unknown as number, k: 1, healthy: true, resetZone: "Europe/London" }))),
     linkedin: { sessions: LI.map((id) => ({ id, gapMs: null as unknown as number, k: 1, healthy: true, resetZone: "Europe/London" })) },
   });
   await h.tick();
-  for (const id of [...IG.map(ig), ...LI.map(li)]) expect((await h.request("PUT", `/api/sender-accounts/${id}/allowances`, { invitesPerDay: 20, messagesPerDay: 20, notesPerMonth: 20 })).status).toBe(200);
+  for (const id of [...MESSAGE_REQUEST_CHANNELS.flatMap((c) => IG.map((s) => socialAccountId(c, s))), ...LI.map(li)]) expect((await h.request("PUT", `/api/sender-accounts/${id}/allowances`, { invitesPerDay: 20, messagesPerDay: 20, notesPerMonth: 20 })).status).toBe(200);
   const { campaign } = await h.createCampaign("Pacing", { businesses: [HARBOUR], people: [PAT] });
   const save = async (def: CampaignDefinition) => {
     const r = await h.request("PUT", `/api/campaigns/${campaign.id}/sequence`, def);
@@ -51,12 +52,13 @@ async function world() {
 
 const base = (tracks: TrackDefinition[], linkedinPool: string[] = []): CampaignDefinition => ({ timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [], ...(linkedinPool.length > 0 ? { linkedinPool } : {}), tracks });
 
-describe("a session's pacing follows the tracks with leads running on it", () => {
-  test("Instagram: a removed track no lead started, with a short window, does not speed the session up", async () => {
+describe.each(MESSAGE_REQUEST_CHANNELS.map((channel) => [SOCIAL_CHANNELS[channel].name, channel] as const))("%s: a session's pacing follows the tracks with leads running on it", (_name, channel: MessageRequestChannel) => {
+  const ig = (s: string) => socialAccountId(channel, s);
+  test("a removed track no lead started, with a short window, does not speed the session up", async () => {
     const { h, campaign, save, account, gapFrom } = await world();
-    const A: TrackDefinition = { id: "a", channel: "instagram", branch: "main", window: WIDE, steps: [step("a1", 0), step("a2", 3)], start: { kind: "entry" }, removed: false, senders: [ig(IG[0]!)] };
+    const A: TrackDefinition = { id: "a", channel, branch: "main", window: WIDE, steps: [step("a1", 0), step("a2", 3)], start: { kind: "entry" }, removed: false, senders: [ig(IG[0]!)] };
     // B starts a month after A: no lead has started it when it is removed.
-    const B: TrackDefinition = { id: "b", channel: "instagram", branch: "main", window: NARROW, steps: [step("b1", 0)], start: { kind: "after", trackId: "a", delayDays: 30 }, removed: false, senders: [ig(IG[0]!)] };
+    const B: TrackDefinition = { id: "b", channel, branch: "main", window: NARROW, steps: [step("b1", 0)], start: { kind: "after", trackId: "a", delayDays: 30 }, removed: false, senders: [ig(IG[0]!)] };
     await save(base([A, B]));
     h.clock = MONDAY_9;
     expect((await h.launch(campaign.id)).status).toBe(200);
@@ -67,23 +69,26 @@ describe("a session's pacing follows the tracks with leads running on it", () =>
     expect((await account(ig(IG[0]!))).gapMs).toBe(await gapFrom(ig(IG[0]!), [WIDE]));
   });
 
-  test("Instagram: a session unticked from every track keeps its pace while a lead it started is still fixed to it, and loses it when that track ends", async () => {
+  test("a session unticked from every track keeps its pace while a lead it started is still fixed to it, and loses it when that track ends", async () => {
     const { h, campaign, save, account, gapFrom } = await world();
-    const A: TrackDefinition = { id: "a", channel: "instagram", branch: "main", window: WIDE, steps: [step("a1", 0), step("a2", 2)], start: { kind: "entry" }, removed: false, senders: [ig(IG[0]!)] };
+    const A: TrackDefinition = { id: "a", channel, branch: "main", window: WIDE, steps: [step("a1", 0), step("a2", 2)], start: { kind: "entry" }, removed: false, senders: [ig(IG[0]!)] };
     await save(base([A]));
     h.clock = MONDAY_9;
     expect((await h.launch(campaign.id)).status).toBe(200);
     await h.advanceTo(MONDAY_9 + H);
-    expect(h.instagram.handoverLog.map((x) => x.sender)).toEqual([IG[0]]);
+    expect(h.social(channel).handoverLog.map((x) => x.sender)).toEqual([IG[0]]);
     // The user unticks it: Pat's track is still fixed to it, with a follow-up to come.
     await save(base([{ ...A, senders: [ig(IG[1]!)] }]));
     expect((await account(ig(IG[0]!))).gapMs).toBe(await gapFrom(ig(IG[0]!), [WIDE]));
     expect((await account(ig(IG[0]!))).gapMs).toBeGreaterThan(MIN);
     // The follow-up goes from it; the track then finishes, and nothing is fixed to the session any more.
     await h.advanceTo(MONDAY_9 + 4 * DAY);
-    expect(h.instagram.handoverLog.map((x) => x.sender)).toEqual([IG[0], IG[0]]);
+    expect(h.social(channel).handoverLog.map((x) => x.sender)).toEqual([IG[0], IG[0]]);
     expect((await account(ig(IG[0]!))).gapMs).toBe(await gapFrom(ig(IG[0]!), []));
   });
+});
+
+describe("a session's pacing follows the tracks with leads running on it", () => {
 
   test("LinkedIn: a session removed from the pool keeps its pace while a lead it invited is still fixed to it", async () => {
     const { h, campaign, save, account, gapFrom } = await world();

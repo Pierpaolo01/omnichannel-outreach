@@ -10,8 +10,15 @@
  * ticket's branch: the digests must be equal. Fictitious data only; nothing leaves the machine.
  *
  *   node --import ./src/server/quiet-sqlite-warning.ts scripts/no-instagram-digest.ts
+ *
+ * With `DIGEST_WITH_INSTAGRAM=1` (ticket 26, ADR 0004 14.8) the same campaign also has an Instagram track on a simulated
+ * session, and the digest adds its handovers and deliveries: nothing changes for Instagram either when Facebook is added.
+ * That form runs on the integration tip of ticket 25 and on later branches alike: it gives the harness its simulated
+ * Instagram provider by both the option the tip reads (`instagram`) and the one later code reads (`social`), and reads the
+ * provider back by whichever the harness has. Without the variable the script is what it was.
  */
 import { createHash } from "node:crypto";
+import type { FakeSocialPort } from "../test/support/fake-social-port.ts";
 import type { CampaignDefinition, StepDefinition } from "../src/domain/sequence/definition.ts";
 import type { CallsView, CallTaskView } from "../src/shared/api.ts";
 import { EngineHarness } from "../test/support/engine-harness.ts";
@@ -19,7 +26,12 @@ import { business, person } from "../test/support/export-builder.ts";
 
 const MIN = 60_000;
 const DAY = 24 * 60 * MIN;
+const withInstagram = process.env["DIGEST_WITH_INSTAGRAM"] === "1";
+const igSessions = [{ id: "ig-digest", kind: "business" as const, gapMs: 4 * MIN, k: 1, healthy: true, resetZone: "Europe/London" }];
+/** The simulated Instagram provider, by the option either harness reads: an object the harness's type does not list. */
+const igOption: object = withInstagram ? { instagram: { sessions: igSessions }, social: { instagram: { sessions: igSessions } } } : {};
 const h = new EngineHarness({
+  ...igOption,
   start: Date.parse("2026-11-02T07:00:00Z"),
   accounts: [{ id: "inbox-a", capacity: 30, gapMs: 2 * MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
   sms: { numbers: [{ id: "+447700900001", capacity: 20, gapMs: 3 * MIN, k: 1, healthy: true, resetZone: "Europe/London" }] },
@@ -28,10 +40,15 @@ const h = new EngineHarness({
 await h.tick();
 await h.request("PUT", "/api/sender-accounts/linkedin:li-digest/allowances", { invitesPerDay: 2, messagesPerDay: 3, notesPerMonth: 2 });
 await h.request("PUT", "/api/call-settings", { dailyCapacity: 2, userZone: "Europe/London" });
+const loose = h as unknown as { social?: (channel: string) => FakeSocialPort; instagram?: FakeSocialPort };
+const ig: FakeSocialPort | null = !withInstagram ? null : typeof loose.social === "function" ? loose.social("instagram") : (loose.instagram ?? null);
+if (withInstagram) await h.request("PUT", "/api/sender-accounts/instagram:ig-digest/allowances", { invitesPerDay: 0, messagesPerDay: 3, notesPerMonth: 0 });
+/** An Instagram cell, only in the Instagram form: without it every row is what it was. */
+const igCell = (name: string): Record<string, string> => (withInstagram ? { instagram: `https://www.instagram.com/example_digest_${name}` } : {});
 const { campaign } = await h.createCampaign("Digest", {
-  businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" })],
+  businesses: [business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101", ...igCell("harbour") })],
   people: [
-    person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile", linkedin_url: "https://www.linkedin.com/in/fictional-digest-pat" }),
+    person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile", linkedin_url: "https://www.linkedin.com/in/fictional-digest-pat", ...igCell("pat") }),
     person({ person_id: "p2", business_id: "b1", full_name: "Nia Cole", email: "nia@harbour.example", direct_phone: "+442079460111", linkedin_url: "https://www.linkedin.com/in/fictional-digest-nia" }),
     person({ person_id: "p3", business_id: "b1", full_name: "Sam Lee", dial_phone: "+447700900103", dial_phone_type: "mobile", timezone: "America/New_York", linkedin_url: "https://www.linkedin.com/in/fictional-digest-sam" }),
     person({ person_id: "p4", business_id: "b1", full_name: "Omar Reed", email: "omar@harbour.example" }),
@@ -52,6 +69,7 @@ const definition: CampaignDefinition = {
     { id: "s", channel: "sms", branch: "main", window: weekdays, steps: [text("t1", 0), text("t2", 1)], start: { kind: "after", trackId: "e", delayDays: 1 }, removed: false },
     { id: "c", channel: "call", branch: "main", window: weekdays, steps: [{ id: "c1", waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false },
     { id: "l", channel: "linkedin", branch: "main", window: weekdays, steps: [text("i1", 0), text("l1", 0), text("l2", 2)], start: { kind: "entry" }, removed: false, acceptWaitDays: 3 },
+    ...(withInstagram ? [{ id: "ig", channel: "instagram" as const, branch: "main" as const, window: weekdays, steps: [text("m1", 0), text("m2", 2)], start: { kind: "after" as const, trackId: "e", delayDays: 0 }, removed: false, senders: ["instagram:ig-digest"] }] : []),
   ],
 };
 // Pat accepts a day later, Nia never (the invite is withdrawn after three days), Sam was already connected.
@@ -90,10 +108,12 @@ const record = {
   linkedinWithdrawals: strip(h.linkedin.withdrawalLog),
   callLists: lists,
   outcomes,
+  ...(ig ? { instagramHandovers: strip(ig.handoverLog), instagramDeliveries: strip(ig.deliveryLog) } : {}),
 };
 const text_ = JSON.stringify(record);
 console.info(
   `email handovers ${h.fake.handoverLog.length}, deliveries ${h.fake.deliveryLog.length}; SMS handovers ${h.sms.handoverLog.length}, deliveries ${h.sms.deliveryLog.length}; ` +
-    `LinkedIn handovers ${h.linkedin.handoverLog.length}, deliveries ${h.linkedin.deliveryLog.length}, acceptances ${h.linkedin.acceptanceLog.length}, withdrawals ${h.linkedin.withdrawalLog.length}; call lists ${lists.length} (one a day), outcomes logged ${outcomes.length}`,
+    `LinkedIn handovers ${h.linkedin.handoverLog.length}, deliveries ${h.linkedin.deliveryLog.length}, acceptances ${h.linkedin.acceptanceLog.length}, withdrawals ${h.linkedin.withdrawalLog.length}; call lists ${lists.length} (one a day), outcomes logged ${outcomes.length}` +
+    (ig ? `; Instagram handovers ${ig.handoverLog.length}, deliveries ${ig.deliveryLog.length}` : ""),
 );
 console.info(`digest ${createHash("sha256").update(text_).digest("hex")}`);

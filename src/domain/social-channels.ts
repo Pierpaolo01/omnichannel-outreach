@@ -1,17 +1,17 @@
 /**
- * The social channels (ADR 0004): LinkedIn, and the message-request channels of section 13, Instagram now and Facebook
- * with ticket 26. What differs between channels is written once here, in exhaustive mappings: a new channel is a compile
- * error until it has its entry.
+ * The social channels (ADR 0004): LinkedIn, and the message-request channels of section 13, Instagram (ticket 25) and
+ * Facebook (ticket 26, section 14). What differs between channels is written once here, in exhaustive mappings: a new
+ * channel is a compile error until it has its entry.
  */
 import { linkedinProfileKey } from "./linkedin-profile.ts";
-import { instagramAccountKey } from "./social-account.ts";
+import { facebookAccountKey, instagramAccountKey } from "./social-account.ts";
 
 /**
  * A social channel whose track is messages only: a text-only first message, which reaches someone who does not follow the
- * sender as a message request, then follow-ups after their waits (ADR 0004 13.1). Facebook joins this union in ticket 26.
+ * sender as a message request, then follow-ups after their waits (ADR 0004 13.1, 14).
  */
-export type MessageRequestChannel = "instagram";
-export const MESSAGE_REQUEST_CHANNELS: readonly MessageRequestChannel[] = ["instagram"];
+export type MessageRequestChannel = "instagram" | "facebook";
+export const MESSAGE_REQUEST_CHANNELS: readonly MessageRequestChannel[] = ["instagram", "facebook"];
 export const isMessageRequestChannel = (channel: string | undefined | null): channel is MessageRequestChannel => (MESSAGE_REQUEST_CHANNELS as readonly string[]).includes(channel ?? "");
 
 /** Every channel driven through the user's logged-in browser sessions (ADR 0004 1.1). */
@@ -46,6 +46,7 @@ export const capitalANameOf = (channel: SocialChannel): string => {
 export const SOCIAL_CHANNELS: { readonly [C in SocialChannel]: SocialChannelFacts } = {
   linkedin: { name: "LinkedIn", aName: "a LinkedIn", accountKey: linkedinProfileKey, accountPrefix: "linkedin:", addressNoun: "profile", exampleAddress: "https://www.linkedin.com/in/your-name" },
   instagram: { name: "Instagram", aName: "an Instagram", accountKey: instagramAccountKey, accountPrefix: "instagram:", addressNoun: "account", exampleAddress: "https://www.instagram.com/your.name" },
+  facebook: { name: "Facebook", aName: "a Facebook", accountKey: facebookAccountKey, accountPrefix: "facebook:", addressNoun: "profile", exampleAddress: "https://www.facebook.com/your.name" },
 };
 
 /**
@@ -54,10 +55,21 @@ export const SOCIAL_CHANNELS: { readonly [C in SocialChannel]: SocialChannelFact
  */
 export const MESSAGE_REQUEST_COLUMNS: { readonly [C in MessageRequestChannel]: { readonly people: string; readonly businesses: string } } = {
   instagram: { people: "instagram", businesses: "instagram" },
+  facebook: { people: "facebook", businesses: "facebook" },
 };
 
 /** The kind a session reports of itself (ADR 0004 13.5): a personal profile, or a business account (a Page, on Facebook). */
 export type SocialSenderKind = "personal" | "business";
+
+/**
+ * What each kind of session is called on a message-request channel (ADR 0004 13.5, 14.2): with its article, and as the
+ * user's own in "from your …". A business sender is a business account on Instagram and a Page on Facebook. The kind is shown
+ * wherever a session is named; the engine assumes nothing from it (Q45).
+ */
+export const MESSAGE_REQUEST_SENDER_KINDS: { readonly [C in MessageRequestChannel]: { readonly [K in SocialSenderKind]: { readonly aName: string; readonly yours: string } } } = {
+  instagram: { personal: { aName: "a personal profile", yours: "your personal session" }, business: { aName: "a business account", yours: "your business session" } },
+  facebook: { personal: { aName: "a personal profile", yours: "your personal profile" }, business: { aName: "a Page", yours: "your Page" } },
+};
 
 /** A record with one entry per message-request channel (ADR 0004 13.2): a new channel is never left out of one. */
 export function messageRequestRecord<T>(of: (channel: MessageRequestChannel) => T): { readonly [C in MessageRequestChannel]: T } {

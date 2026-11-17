@@ -16,6 +16,7 @@ import { FakeEmailPort, type FakeAccount, type FakeMode } from "./fake-email-por
 import { FakeSmsPort, type FakeNumber, type FakeSmsMode } from "./fake-sms-port.ts";
 import { FakeLinkedInPort, type FakeSession } from "./fake-linkedin-port.ts";
 import { FakeSocialPort, type FakeSocialSession } from "./fake-social-port.ts";
+import { MESSAGE_REQUEST_CHANNELS, type MessageRequestChannel } from "../../src/domain/social-channels.ts";
 import { HEARTBEAT_KEY } from "../../src/server/engine/worker-state.ts";
 
 /** The values a failed call resolves with when `failuresResolve` is set, as the Instantly adapter's do (review bot on 592d679). */
@@ -54,8 +55,11 @@ export interface EngineHarnessOptions {
   readonly sms?: { readonly numbers: readonly FakeNumber[]; readonly modes?: readonly FakeSmsMode[] };
   /** A simulated LinkedIn provider's sessions (ticket 24, ADR 0004). Without them the engine has the unconnected LinkedIn port. */
   readonly linkedin?: { readonly sessions: readonly FakeSession[] };
-  /** A simulated Instagram provider (ADR 0004 13.1): its sessions, labelled "Simulated Instagram (not a session)". */
-  readonly instagram?: { readonly sessions: readonly FakeSocialSession[] };
+  /**
+   * A simulated provider per message-request channel (ADR 0004 13.1, 14): its sessions, labelled "Simulated <channel> (not a
+   * session)". A channel left out has the unconnected port, as the running application does.
+   */
+  readonly social?: { readonly [C in MessageRequestChannel]?: { readonly sessions: readonly FakeSocialSession[] } };
 }
 
 /** A provider the harness can drive: it acts on its own at instants the harness advances to. */
@@ -87,7 +91,8 @@ export class EngineHarness {
   readonly smsProvider: FakeSmsPort | null;
   /** The simulated LinkedIn provider, when the harness has one. */
   readonly linkedinProvider: FakeLinkedInPort | null;
-  readonly instagramProvider: FakeSocialPort | null;
+  /** The simulated message-request providers this harness has, by channel. */
+  readonly socialProviders: { readonly [C in MessageRequestChannel]?: FakeSocialPort };
   engine: Engine;
   readonly crashes: string[] = [];
   /** Engine ticks run so far. */
@@ -124,7 +129,12 @@ export class EngineHarness {
       : options.port ?? new FakeEmailPort({ now: () => this.clock, random: options.random ?? (() => 0.5), accounts: options.accounts, modes: options.modes ?? ["honest"] });
     this.smsProvider = options.sms ? new FakeSmsPort({ now: () => this.clock, random: options.random ?? (() => 0.5), numbers: options.sms.numbers, modes: options.sms.modes ?? ["honest"] }) : null;
     this.linkedinProvider = options.linkedin ? new FakeLinkedInPort({ now: () => this.clock, sessions: options.linkedin.sessions }) : null;
-    this.instagramProvider = options.instagram ? new FakeSocialPort({ channel: "instagram", now: () => this.clock, sessions: options.instagram.sessions }) : null;
+    this.socialProviders = Object.fromEntries(
+      MESSAGE_REQUEST_CHANNELS.flatMap((channel) => {
+        const given = options.social?.[channel];
+        return given ? [[channel, new FakeSocialPort({ channel, now: () => this.clock, sessions: given.sessions })]] : [];
+      }),
+    );
     this.engine = this.newEngine();
     this.app = createApp({
       store: this.store,
@@ -134,7 +144,7 @@ export class EngineHarness {
       emailProvider: "status" in this.provider ? (this.provider as Provider & EmailProviderSource) : null,
       smsProvider: this.smsProvider ? "test-simulator" : "none",
       linkedinProvider: this.linkedinProvider ? "test-simulator" : "none",
-      socialProviders: { instagram: this.instagramProvider ? "test-simulator" : "none" },
+      socialProviders: Object.fromEntries(MESSAGE_REQUEST_CHANNELS.map((channel) => [channel, this.socialProviders[channel] ? "test-simulator" : "none"])),
       ...(options.rules ? { rules: options.rules } : {}),
       ...(options.bulkRules ? { bulkRules: options.bulkRules } : {}),
       ...(options.measureRules ? { measureRules: options.measureRules } : {}),
@@ -169,12 +179,25 @@ export class EngineHarness {
     this.linkedinProvider?.advance();
   }
 
-  /** The simulated LinkedIn provider. */
-  get instagram(): FakeSocialPort {
-    if (!this.instagramProvider) throw new Error("this harness has no Instagram provider");
-    return this.instagramProvider;
+  /** The simulated provider of a message-request channel. */
+  social(channel: MessageRequestChannel): FakeSocialPort {
+    const port = this.socialProviders[channel];
+    if (!port) throw new Error(`this harness has no simulated ${channel} provider`);
+    return port;
   }
 
+  /** Every simulated message-request provider this harness has. */
+  get socialPortList(): readonly FakeSocialPort[] {
+    return MESSAGE_REQUEST_CHANNELS.flatMap((channel) => this.socialProviders[channel] ?? []);
+  }
+
+  /** The engine's message-request ports: each simulated provider, through `wrap` (a gate, or as it is). */
+  private socialPortsFor(wrap: (port: FakeSocialPort) => SendPort): Pick<EngineDependencies, "socialPorts"> {
+    const list = this.socialPortList;
+    return list.length === 0 ? {} : { socialPorts: Object.fromEntries(list.map((port) => [port.channel, wrap(port)])) };
+  }
+
+  /** The simulated LinkedIn provider. */
   get linkedin(): FakeLinkedInPort {
     if (!this.linkedinProvider) throw new Error("this harness has no LinkedIn provider");
     return this.linkedinProvider;
@@ -345,7 +368,7 @@ export class EngineHarness {
       port: this.gated(this.provider),
       ...(this.smsProvider ? { smsPort: this.gated(this.smsProvider) } : {}),
       ...(this.linkedinProvider ? { linkedinPort: this.gated(this.linkedinProvider) } : {}),
-      ...(this.instagramProvider ? { socialPorts: { instagram: this.gated(this.instagramProvider) } } : {}),
+      ...this.socialPortsFor((port) => this.gated(port)),
       now: () => this.clock,
       newId: this.engineIds,
       ...(this.options.rules ? { rules: this.options.rules } : {}),
@@ -451,7 +474,7 @@ export class EngineHarness {
   async otherWorker(): Promise<void> {
     this.advanceProviders();
     // Another process: its ticks do not queue behind this one's.
-    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), ...(this.linkedinProvider ? { linkedinPort: this.linkedinProvider } : {}), ...(this.instagramProvider ? { socialPorts: { instagram: this.instagramProvider } } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
+    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), ...(this.linkedinProvider ? { linkedinPort: this.linkedinProvider } : {}), ...this.socialPortsFor((port) => port), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
   }
 
   /**
@@ -459,7 +482,7 @@ export class EngineHarness {
    * tick, so a test can save from inside a hook, between a claim and its handover.
    */
   async otherProcessSave(campaignId: string, definition: CampaignDefinition): Promise<string> {
-    const other = new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), ...(this.linkedinProvider ? { linkedinPort: this.linkedinProvider } : {}), ...(this.instagramProvider ? { socialPorts: { instagram: this.instagramProvider } } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) });
+    const other = new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.provider, ...(this.smsProvider ? { smsPort: this.smsProvider } : {}), ...(this.linkedinProvider ? { linkedinPort: this.linkedinProvider } : {}), ...this.socialPortsFor((port) => port), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) });
     return (await other.saveDefinition(campaignId, definition, new Date(this.clock).toISOString(), null, { tick: false })).outcome;
   }
 
@@ -475,7 +498,7 @@ export class EngineHarness {
     const dump = () =>
       new Map(tables.map((t) => [t, new Set(db.prepare(`SELECT * FROM ${t}`).all().map((r) => JSON.stringify({ ...r, version: undefined })))]));
     const before = dump();
-    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.gated(this.provider), ...(this.smsProvider ? { smsPort: this.gated(this.smsProvider) } : {}), ...(this.linkedinProvider ? { linkedinPort: this.gated(this.linkedinProvider) } : {}), ...(this.instagramProvider ? { socialPorts: { instagram: this.gated(this.instagramProvider) } } : {}), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
+    await new Engine({ ...this.options.engine, ticks: new TickQueue(), store: this.store.engine, port: this.gated(this.provider), ...(this.smsProvider ? { smsPort: this.gated(this.smsProvider) } : {}), ...(this.linkedinProvider ? { linkedinPort: this.gated(this.linkedinProvider) } : {}), ...this.socialPortsFor((port) => this.gated(port)), now: () => this.clock, newId: this.engineIds, ...(this.options.rules ? { rules: this.options.rules } : {}) }).tick();
     const after = dump();
     return tables.flatMap((t) => {
       const a = before.get(t)!;
@@ -526,7 +549,7 @@ export class EngineHarness {
     this.halt = false;
     await this.tick();
     for (let guard = 0; guard < 100_000 && this.clock < target && !this.stopped && !this.halted(); guard++) {
-      const wakes = [await this.engine.nextWakeAt(), this.provider.nextActivityAt(), this.smsProvider?.nextActivityAt() ?? null, this.linkedinProvider?.nextActivityAt() ?? null, this.instagramProvider?.nextActivityAt() ?? null, this.providersDownUntil, target].filter((t): t is number => t !== null && t > this.clock);
+      const wakes = [await this.engine.nextWakeAt(), this.provider.nextActivityAt(), this.smsProvider?.nextActivityAt() ?? null, this.linkedinProvider?.nextActivityAt() ?? null, ...this.socialPortList.map((port) => port.nextActivityAt()), this.providersDownUntil, target].filter((t): t is number => t !== null && t > this.clock);
       this.clock = Math.min(...wakes);
       await this.tick();
       await onInstant?.();

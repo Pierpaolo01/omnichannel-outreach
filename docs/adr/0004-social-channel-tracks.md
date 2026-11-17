@@ -1,7 +1,7 @@
 # 0004. Social channel tracks: LinkedIn, then Instagram and Facebook
 
 - **Date:** 2026-11-16.
-- **Status:** Proposed. Written by the ticket 24 implementer before the code (delivery workflow, "Design first"). The council reviews it with part a's pull request. Section 13 (Instagram, and Facebook as its second instance) added by the ticket 25 implementer on 17 November 2026, before its code.
+- **Status:** Proposed. Written by the ticket 24 implementer before the code (delivery workflow, "Design first"). The council reviews it with part a's pull request. Section 13 (Instagram, and Facebook as its second instance) added by the ticket 25 implementer on 17 November 2026, before its code. Section 14 (Facebook) added by the ticket 26 implementer on 17 November 2026.
 - **Consumers:** tickets [24](https://github.com/Pierpaolo01/omnichannel-outreach/issues/24) (LinkedIn, this design worked in full), [25](https://github.com/Pierpaolo01/omnichannel-outreach/issues/25) (Instagram), [26](https://github.com/Pierpaolo01/omnichannel-outreach/issues/26) (Facebook) and [27](https://github.com/Pierpaolo01/omnichannel-outreach/issues/27) (the InMail fallback, which attaches at one point named in 4.4).
 - **Builds on:** [ADR 0003](0003-sequence-engine.md), every rule of which a social track keeps unless this ADR says otherwise: one definition, lead time and stored deadlines, the claim and the handover transaction with its predicates, the attempt table (5.3), capacity counted per provider work, pacing at every send call, priority (4.3), quiesce, holds, the reads that say when, test runs as subjects, and the generated-run discipline. [ADR 0002](0002-email-through-instantly.md) is the model for how a provider limitation is recorded.
 - **Product source:** [the social decision](https://github.com/Pierpaolo01/omnichannel-outreach/issues/9#issuecomment-6823218555), quoted in each ticket. The [research](https://github.com/Pierpaolo01/omnichannel-outreach/blob/789af21/docs/research/social-first-contact.md) states the platforms' documented behaviour. Everything else is a factory decision and says so.
@@ -450,6 +450,95 @@ As section 12 for LinkedIn: no Instagram session is connected and no test accoun
 2. **Pacing.** A session's default gap comes from the tracks with leads running on it. On a message-request channel those are the live tracks that chose it; on LinkedIn, the live tracks of a campaign whose pool holds it. On either, it also includes any track a running lead fixed to the session has started and not finished, so a removed or unticked track counts only while its leads run. Email and SMS keep the campaign-pool rule (`session-pacing.test.ts`).
 3. **Wording.** The inspector says what two tracks of one lead on two sessions do (13.6; Q46 is with the principal). Before launch gives the shared-account limit per track. Both "Blocks launch" sentences come from one exhaustive record over the domain's blocker kinds.
 4. **The article** before a channel's name is the registry's `aName`. The generated coverage is Instagram's (13.2), and ticket 26 parameterises it.
+
+## 14. Facebook, the second message-request channel (ticket 26)
+
+Added by the ticket 26 implementer on 17 November 2026. Facebook is the second instance of section 13's message-request channel: an entry in the registry and what that entry needs, not a copy of Instagram's code. Everything in section 13 holds for Facebook as written, with "Instagram" read as the channel. This section says only what differs, what had to change outside the registry and why, and how the tests show it.
+
+### 14.1 What is the same
+
+By reference, unchanged: the track and its step kinds (13.3), the destination rule and the skip causes (13.4, apart from the normaliser), the per-track sender choice, its fixing at the track's first handover and the removed track that keeps its sessions (13.5), ownership of a conversation (13.6), allowances, capacity, priority, windows and interruption (13.7), the reply mark, test runs and measures (13.8), invariants M1 to M10 and 29 (13.9), and the unconnected port in the running application. No session of either channel is connected, so a Facebook track meets launch blocker 3 exactly as an Instagram track does, and `GET /api/social-providers` says "No Facebook session is connected, so Facebook tracks cannot launch."
+
+### 14.2 The registry entry
+
+| Fact | Where | Facebook |
+| - | - | - |
+| The channel | `MessageRequestChannel`, `MESSAGE_REQUEST_CHANNELS` | `"facebook"`, after Instagram |
+| Its name, and with its article | `SOCIAL_CHANNELS.facebook.name`, `.aName` | Facebook, "a Facebook" |
+| Its account normaliser | `.accountKey` | `facebookAccountKey` (14.3) |
+| Its account id prefix | `.accountPrefix` | `facebook:` |
+| What its address is called | `.addressNoun` | profile ("Your Facebook profile, for the messages"; the ticket says "the user's own Facebook profile") |
+| A fictitious example address | `.exampleAddress` | `https://www.facebook.com/your.name` |
+| Its CSV columns | `MESSAGE_REQUEST_COLUMNS.facebook` | people `facebook` (absent from the verified schema: Q43 applies), businesses `facebook` |
+| Its sender kinds in words | `MESSAGE_REQUEST_SENDER_KINDS` (new) | personal: "a personal profile", "your personal profile"; business: "a Page", "your Page" |
+| Its icon | `web/icons.tsx` | a person with a small message beside them, not the platform's mark |
+| Its store row | migration 26 | `message_request_channels` row and one `addChannel(db, "facebook")` |
+
+`MESSAGE_REQUEST_SENDER_KINDS` is the one fact that had to be added to the registry: section 13 hard-coded "a business account" and "your business session" in three places (the inspector's sender list, the record's first-message sentence and the inspector's limits). On Facebook a business sender is a Page, so those words are now the registry's, per channel, through an exhaustive record. The session kind stays `personal | business` in the store and the API (`sender_accounts.social_kind`); only its words differ.
+
+### 14.3 The normaliser
+
+`facebookAccountKey` (`src/domain/social-account.ts`), by section 13.4's contract: a key, or null for anything that is not an account, which reads as missing.
+
+- Trimmed; `http` or `https`; host `facebook.com`, `www.facebook.com`, `m.facebook.com` or `web.facebook.com`.
+- **A username:** a path of exactly one segment with an optional trailing slash, 1 to 100 letters, digits, `.` and `-` (a Page with no username of its own has its name and number joined by `-`), not starting or ending with `.`, holding a letter or digit, lower-cased, not one of the site's own first segments (`groups`, `events`, `pages`, `people`, `watch`, `marketplace`, `login`, `share`, `sharer`, `profile`, `photos`, `help` and the others listed in the code) and not ending in `.php`. Key `https://www.facebook.com/<username>`.
+- **A profile or Page with no username:** `/profile.php?id=<digits>`; other parameters and the fragment are dropped. Key `https://www.facebook.com/profile.php?id=<digits>`.
+- **Not an account:** empty, a bare handle, a post, a photo, a group, an event, a share link, another host (`fb.com` and `business.facebook.com` included), and the multi-segment `/pages/<name>/<id>` and `/people/<name>/<id>` forms (Q48).
+
+Measured against the real businesses export on 17 November 2026, by aggregate counts only: 12 rows; 7 one-segment `www.facebook.com/<name>`, 1 `profile.php?id=`, 1 a six-segment path holding `pages`, 3 empty. The normaliser reads 8 as accounts. The people file has no Facebook column.
+
+### 14.4 The sender
+
+The user chooses each Facebook track's sessions, each a personal profile or a Page, in the inspector, as on Instagram (13.5); each session is shown with its kind in Facebook's words. What each kind can message is the platform's, and the application assumes none of it. The research documents that a personal profile can message someone who is not a friend, into Message Requests, and that blocking can prevent delivery; that eligible Pages can send up to 10 new message requests a day to people and Pages, with availability gradual and eligibility conditions on sender and recipient; and that Messenger's business API needs a qualifying interaction first, which this app does not use. So, as on Instagram: any chosen session of either kind may be used for any account; the platform's refusal is reported (`not_allowed`, the account not marked bad, Q44); and no limit is set by the app (Q47, Q49).
+
+### 14.5 The store
+
+Migration 26, the next number after the integration tip's 25: one row in `message_request_channels` and `addChannel(db, "facebook")`, which widens the four CHECKs that list the social channels (`sender_accounts.channel`, `replies.channel`, the stopping reply's channel on enrollments and test runs) and `sms_bindings.channel`, rebuilding each from its own stored text with its indexes, views and triggers. The destination triggers and the bad marks read `message_request_channels`, so they take a Facebook account by that row. `migration-26.test.ts` upgrades a version-25 database holding Instagram rows. Should pull request 71 (InMail) land first, this migration takes the next number when the integration tip is merged.
+
+### 14.6 Two channels in one campaign
+
+A lead with an Instagram track and a Facebook track has two conversations: each track goes to that channel's account, from that channel's session, through that channel's pair, allowance and reply mark. Nothing is read across channels. The account ids carry the channel (`instagram:<session>`, `facebook:<session>`) even where the platform's session ids are the same, a pair stores its channel (`sms_bindings.channel`), and a reply mark is allowed only where something reached the person on its own channel. A mark on either channel ends the lead in the campaign, as any reply does (section 7), so both tracks stop. Shown through HTTP in `message-request-channels.test.ts` ("Instagram and Facebook in one campaign"): the same session id on both channels; an account taken on Instagram leaves the lead's Facebook track free; each channel's allowance is its own; a mark refused on the channel nothing reached and accepted on the other. In the browser by `e2e/message-requests.spec.ts`.
+
+### 14.7 The tests, parameterised by channel
+
+- **Through HTTP:** `src/server/engine/instagram.test.ts` is now `message-request-channels.test.ts`: every one of its 23 cases runs once per message-request channel, with each channel's sentences written out by hand in the test, then the three joint cases above. `removed-started-track.test.ts`, `claimed-not-handed.test.ts` and `session-pacing.test.ts` run on every message-request channel. `test/support/message-request-accounts.ts` gives each channel's fictitious account forms, written by hand, never through the production normaliser.
+- **The harness:** `EngineHarness`'s `instagram` option and getter are now `social: { [channel]: { sessions } }` and `h.social(channel)`; the engine and app take every simulated provider the harness has.
+- **The generated runs** (`test/support/generated-message-requests.ts`): each drawn channel is a **lane** with its own sessions, allowances, account cells, scripts, tracks, chosen senders and provider logs, and the record's own forms and reading of each channel's cells (`FORMS`, which imports nothing from `src/domain/`). A seed draws Instagram alone, Facebook alone, or both in one campaign, from a stream of its own (`channelsOf`); with both, the first lane draws from the main stream exactly as before and the second from streams of its own, so a seed drawn with one channel is ticket 25's world under that channel's names. The two lanes use the same session ids. Email, SMS and LinkedIn tracks are drawn beside or after the first lane's track as before. M1 to M10 are checked on every lane; M3 holds every lane after a mark or stop on any; M10 counts a lead reached on any channel as touched. A behaviour of one lane is named with its channel (`facebook:a-reply-marked`), and `RUN_CHANNELS` must equal `MESSAGE_REQUEST_CHANNELS` (a test fails otherwise).
+- **Fixed seeds:** offsets 1, 4, 5, 6, 14, 17, 26, 28 and 31 from 25000, one bounded case each, cover all 65 behaviours, every lane behaviour on both channels and the joint ones ("instagram-and-facebook-in-one-campaign", "one-lead-reached-on-both-channels", "a-reply-marked-on-one-channel-of-a-lead-reached-on-both"). Offsets 0 to 39 all passed unmutated, locally, on one worker: 128 s for the forty, 34 s for the nine.
+- **Mutations:** each of section 13's fourteen now runs on Instagram alone and on Facebook alone at its recorded seed; every recorded seed still kills on both (97 s for the 28 locally, one worker). One new mutation only a joint campaign can show: "a reply mark's reach read on any message-request channel" (M6), killed with both channels at offset 10. In the search, each mutation and channel searches its own killing seed.
+
+### 14.8 Nothing changes for email, SMS, calls, LinkedIn or Instagram
+
+`scripts/no-instagram-digest.ts` with `DIGEST_WITH_INSTAGRAM=1` adds an Instagram track to its campaign of email, SMS, phone and LinkedIn tracks, and runs unchanged on the integration tip and on this branch: digest `349028b6…` on both. Without the variable it is `ba6e437d…` on both, as ticket 25 recorded, and `scripts/no-social-digest.ts` is `eb4141e8…` on both.
+
+### 14.9 Questions for the principal
+
+Q43 to Q47 as they stand for Facebook:
+
+- **Q43 applies.** The verified people file has no Facebook column either (checked on the real export, by counts). *Built:* a people-file `facebook` column is read when a file has one; otherwise every Facebook track goes to the company's account.
+- **Q44 applies.** A personal recipient may restrict message requests or block the sender, and a Page's first-contact messages have eligibility conditions. *Built:* the refusal fails the track for that lead, the account not marked bad.
+- **Q45 applies, more sharply.** On Facebook the research documents a Page-specific first-contact route with conditions. *Built:* any chosen session of either kind for any account; the platform's refusal is reported.
+- **Q46 applies** unchanged: one conversation per (session, account), Facebook's Pages shared by colleagues as Instagram's accounts are.
+- **Q47 applies:** no default allowance on Facebook either.
+
+New:
+
+- **Q48. Which Facebook addresses are a lead's account.** *Built:* a username URL or `profile.php?id=`; the `/pages/<name>/<id>` and `/people/<name>/<id>` forms are not read, so such a company counts as having no Facebook account (one of twelve rows in the real export holds a `pages` path). Should those forms be read, by the number they carry?
+- **Q49. A Page's documented 10 new message requests a day.** *Built:* the user's own number per session, with no cap from the app, so a Page's allowance can be set above what Facebook may let it send; whatever Facebook then answers is reported as it answers (a refusal, or a limit that holds the session's messages), unverified until a session is connected. Should a Page session's allowance be capped at 10 new conversations a day, or left to the user?
+
+### 14.10 What is unverified, and why
+
+As 13.12, for Facebook: no Facebook session is connected and no test profile is designated (#28), so everything is verified on the simulated provider only. Unverified: that a session can send each message and how it answers; whether a sent request is visible to the recipient; the platform's limits on the user's profiles and Pages; which kinds of sender can message which accounts (Q45, Q49); whether the URL forms of Q48 identify the account a session can open; the test run on the user's own profile; and whether a session survives the laptop sleeping.
+
+### 14.11 What had to change outside the registry, and why
+
+- **Sender-kind words** (14.2): three screens named a business sender as an Instagram business account.
+- **Test support, by channel** (14.7): the harness option, the generated runs and the HTTP tests named Instagram; ticket 25 left them for this ticket.
+- **Browser tests:** `e2e/fake-instagram.ts` and `e2e/instagram.spec.ts` became `fake-message-requests.ts` and `message-requests.spec.ts`, run once per channel and once with both; the keyboard checks of the Add track menu count its items from the registry, not by Instagram's position; the win-back menu lists Facebook. The accessibility and layout scans gain each channel's screens and the joint record.
+- **Migration tests** that expected the latest version to be 25 now read the number of migrations, so a later migration does not break them.
+- **The digest script** (14.8) gains its Instagram form.
+
+Nothing in the engine, the server, the store's code, the reply-action parser or the request schemas changed: they took Facebook from the registry, as the scratch proof of 13.2 found.
 
 ## The review of `194fc44` (council, review bot and verifier, 16 November 2026)
 
