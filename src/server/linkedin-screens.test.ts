@@ -115,5 +115,9 @@ describe("the Test run tab's LinkedIn read (ADR 0004 section 8)", () => {
     // Q40: the wait is not cut short; it ends three calendar days after the invite went, in the campaign's zone.
     expect(m1?.until).toBe("2026-11-05T00:00:00.000Z");
     expect(run?.linkedinReply).toEqual({ allowed: true });
+    // The mark, confirmed on the status the read showed, ends only the test (council on 194fc44, item 13).
+    const marked = await h.request<TestRunTab>("POST", `/api/test-runs/${run?.id ?? ""}/replies`, { requestId: "mark-1", channel: "linkedin", expect: { status: run?.status } });
+    expect(marked.status).toBe(200);
+    expect(marked.body.run).toMatchObject({ running: false, ending: "your_reply", linkedinReply: { allowed: false } });
   });
 });

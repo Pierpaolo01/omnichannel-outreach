@@ -7,7 +7,7 @@ import { stepWhen, type StepEnv } from "../domain/sequence/dispatch.ts";
 import { stepWaitApi } from "./engine/step-when-view.ts";
 import { isLive, maySend } from "../domain/sequence/attempt.ts";
 import { liveSteps, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { progressOf, unsettledOwnersOf } from "../domain/sequence/progress.ts";
+import { deriveStatus, progressOf, unsettledOwnersOf } from "../domain/sequence/progress.ts";
 import { heldReason } from "../domain/sequence/dispatch.ts";
 import type { EndReason, FinishReason, SubjectState } from "../domain/sequence/state.ts";
 import type { TestRunEnding, TestRunRead, TestRunTab, TestStepRow } from "../shared/api.ts";
@@ -94,6 +94,7 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
     email: run.contacts.email?.value ?? null,
     mobile: run.contacts.mobile?.value ?? null,
     linkedin: run.contacts.linkedin?.value ?? null,
+    status: deriveStatus(s),
     mayStillSend: s.work.filter(maySend).length,
     steps: stepsOf(s, rules, now, env),
     // The mark's own rule on the stored run (it reads the run as of the action itself), as a lead's read says it (ticket 24b).

@@ -1711,6 +1711,8 @@ export interface TestRunRead {
   /** Its messages still with a provider, which may still be sent after it ended. */
   readonly mayStillSend: number;
   readonly steps: readonly TestStepRow[];
+  /** The run's outreach status at the read, which a reply mark's confirmation sends back as its expectation (ticket 24b). */
+  readonly status: OutreachStatus;
   /** Whether the user may mark this test replied on LinkedIn now, by the engine's rule; null with no LinkedIn track (ticket 24b). */
   readonly linkedinReply: LinkedinReplyMark | null;
 }

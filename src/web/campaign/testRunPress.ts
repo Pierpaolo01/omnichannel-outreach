@@ -8,7 +8,8 @@ import type { KeyValue } from "../calls/callDesk.ts";
  */
 export interface TestRunPress {
   readonly v: 1;
-  readonly kind: "run" | "stop";
+  /** Run test, Stop test, or the run's LinkedIn reply mark (ticket 24b). */
+  readonly kind: "run" | "stop" | "reply";
   readonly requestId: string;
   readonly path: string;
   readonly body: unknown;
@@ -32,7 +33,7 @@ export function pendingPress(store: KeyValue, campaignId: string): TestRunPress 
     const value: unknown = JSON.parse(text);
     if (typeof value !== "object" || value === null) return null;
     const p = value as Partial<TestRunPress>;
-    return p.v === 1 && (p.kind === "run" || p.kind === "stop") && typeof p.requestId === "string" && typeof p.path === "string" && typeof p.pressedAt === "number" ? (p as TestRunPress) : null;
+    return p.v === 1 && (p.kind === "run" || p.kind === "stop" || p.kind === "reply") && typeof p.requestId === "string" && typeof p.path === "string" && typeof p.pressedAt === "number" ? (p as TestRunPress) : null;
   } catch {
     return null;
   }

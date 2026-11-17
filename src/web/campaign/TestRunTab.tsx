@@ -7,6 +7,7 @@ import { ErrorState } from "../components.tsx";
 import { useLiveRead } from "../controls/useLiveRead.ts";
 import { Icon, type IconName } from "../icons.tsx";
 import { answered, isTestRunPressKey, keepPress, pendingPress, type TestRunPress } from "./testRunPress.ts";
+import { ConfirmStrip, ROW_CHANGED } from "../controls/ControlViews.tsx";
 import { endingDetail, endingTitle, progressText, stepDetail, stepStateText, timeIn } from "./testRunWording.ts";
 import type { SequenceEditor } from "./useSequence.ts";
 
@@ -35,7 +36,7 @@ export function TestRunTab({ campaignId, editor }: { campaignId: string; editor:
   return (
     <div className="grid grid-cols-1 items-start gap-4 min-[1080px]:grid-cols-[380px_minmax(0,1fr)]">
       <Contacts campaignId={campaignId} tab={tab} editor={editor} onChange={refresh} presses={presses} />
-      <RunPanel tab={tab} starting={presses.press?.kind === "run"} />
+      <RunPanel tab={tab} starting={presses.press?.kind === "run"} presses={presses} />
     </div>
   );
 }
@@ -44,6 +45,13 @@ export function TestRunTab({ campaignId, editor }: { campaignId: string; editor:
 const DISABLED = "disabled:border-line disabled:bg-transparent disabled:text-muted";
 
 const newRequestId = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `r-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
+/** What an answered press did, said where focus goes. */
+const PRESS_DONE: Record<TestRunPress["kind"], string> = {
+  run: "The test started. Its steps are on the right.",
+  stop: "The test is stopped. Nothing more goes to your test contacts.",
+  reply: "Marked replied on LinkedIn. The test stopped, as a lead’s outreach stops at your mark.",
+};
 
 interface Presses {
   /** The newest control answer, numbered as it arrived in the page's one order with the reads. */
@@ -87,7 +95,7 @@ function usePresses(campaignId: string, refresh: () => Promise<void>, issue: () 
         answered(store, campaignId, p.requestId);
         setLatest((prev) => (prev === null || issued > prev.issued ? { view, issued } : prev));
         setPress((now) => (now?.requestId === p.requestId ? null : now));
-        setSaid((prev) => ({ text: p.kind === "run" ? "The test started. Its steps are on the right." : "The test is stopped. Nothing more goes to your test contacts.", n: (prev?.n ?? 0) + 1 }));
+        setSaid((prev) => ({ text: PRESS_DONE[p.kind], n: (prev?.n ?? 0) + 1 }));
         await refresh();
       } catch (error) {
         // A refusal is the server's answer: the press is done. A failure with no answer keeps it for Try again.
@@ -151,9 +159,13 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   const leadId = useId();
   const [email, setEmail] = useState(tab.contacts.email ?? "");
   const [mobile, setMobile] = useState(tab.contacts.mobile ?? "");
+  const linkedinId = useId();
+  const [linkedin, setLinkedin] = useState(tab.contacts.linkedin ?? "");
+  // The test profile is asked for while the sequence has a LinkedIn track, or one is saved (ticket 24b).
+  const asksLinkedin = editor.view.definition.tracks.some((t) => !t.removed && t.channel === "linkedin") || tab.contacts.linkedin !== null;
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<{ n: number; focus: boolean }>({ n: 0, focus: false });
-  const [fieldError, setFieldError] = useState<{ field: "email" | "mobile"; message: string } | null>(null);
+  const [fieldError, setFieldError] = useState<{ field: "email" | "mobile" | "linkedin"; message: string } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [renderAs, setRenderAs] = useState<string | null>(null);
   const savedRef = useRef<HTMLSpanElement>(null);
@@ -162,10 +174,11 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   const { press, sending, refusal, said } = presses;
 
   // Compared by the server's own reading of a contact (review bot on 55d6ac6): "+447700900456" is the stored "+44 7700 900456".
-  const dirty = contactsUnsaved({ email, mobile }, tab.contacts);
+  const typed = asksLinkedin ? { email, mobile, linkedin } : { email, mobile };
+  const dirty = contactsUnsaved(typed, tab.contacts);
   const lead = tab.leads.find((l) => l.id === renderAs) ?? tab.leads[0] ?? null;
   const running = tab.run?.running === true;
-  const noContact = tab.contacts.email === null && tab.contacts.mobile === null;
+  const noContact = tab.contacts.email === null && tab.contacts.mobile === null && tab.contacts.linkedin === null;
   // A kept press blocks another until the server answers it (Try again resends it): it is never replaced, so never orphaned.
   const pending = press !== null;
 
@@ -183,16 +196,17 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   // One save at a time (review bot on ffa202c; verifier R1): a save asked for while one waits is queued, the latest draft
   // only, and sent after that one's answer, so an older answer can never land after a newer save. The fields take only
   // the answer to the newest save, and only where they still hold what it sent.
-  const current = useRef({ email, mobile });
+  type Typed = { email: string; mobile: string; linkedin?: string };
+  const current = useRef<Typed>(typed);
   useEffect(() => {
-    current.current = { email, mobile };
-  }, [email, mobile]);
+    current.current = asksLinkedin ? { email, mobile, linkedin } : { email, mobile };
+  }, [email, mobile, linkedin, asksLinkedin]);
   const inFlight = useRef(false);
-  const queued = useRef<{ email: string; mobile: string } | null>(null);
+  const queued = useRef<Typed | null>(null);
   const [queuedNext, setQueuedNext] = useState(false);
   const form = useRef<HTMLFormElement>(null);
 
-  const send = async (sent: { email: string; mobile: string }): Promise<void> => {
+  const send = async (sent: Typed): Promise<void> => {
     inFlight.current = true;
     setSaving(true);
     setFieldError(null);
@@ -205,9 +219,10 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
         // The fields show what was stored, as the server wrote it, unless they were edited while it was saving.
         setEmail((now) => (now === sent.email ? (stored.contacts.email ?? "") : now));
         setMobile((now) => (now === sent.mobile ? (stored.contacts.mobile ?? "") : now));
+        if (sent.linkedin !== undefined) setLinkedin((now) => (now === sent.linkedin ? (stored.contacts.linkedin ?? "") : now));
       }
     } catch (error) {
-      const body = error instanceof ApiRequestError ? (error.body as { error?: { field?: "email" | "mobile"; message?: string } } | null) : null;
+      const body = error instanceof ApiRequestError ? (error.body as { error?: { field?: "email" | "mobile" | "linkedin"; message?: string } } | null) : null;
       if (queued.current === null) {
         if (body?.error?.field) setFieldError({ field: body.error.field, message: body.error.message ?? "" });
         else setSaveError(error instanceof Error ? error.message : "Saving failed.");
@@ -224,7 +239,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
       // Focus moves to "Saved." only when the user is not typing past the save (item 16): the fields still hold what it
       // sent, and focus is not in one of them.
       const typing = form.current?.contains(document.activeElement) === true && document.activeElement instanceof HTMLInputElement;
-      const edited = current.current.email !== sent.email || current.current.mobile !== sent.mobile;
+      const edited = current.current.email !== sent.email || current.current.mobile !== sent.mobile || current.current.linkedin !== sent.linkedin;
       setSaved((prev) => ({ n: prev.n + 1, focus: !typing && !edited }));
     }
   };
@@ -242,8 +257,8 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
     void send(draft);
   };
 
-  const hint = noContact ? "Add your email or mobile, and save them, to run a test." : dirty ? "Save your contacts to run a test with them." : editor.unsaved ? "Your latest change to the sequence isn’t saved yet; a test runs the saved version." : "";
-  const status = pending ? (press.kind === "run" ? `Starting the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : `Stopping the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.`) : (said?.text ?? hint);
+  const hint = noContact ? (asksLinkedin ? "Add your email, mobile or LinkedIn profile, and save them, to run a test." : "Add your email or mobile, and save them, to run a test.") : dirty ? "Save your contacts to run a test with them." : editor.unsaved ? "Your latest change to the sequence isn’t saved yet; a test runs the saved version." : "";
+  const status = pending ? (press.kind === "reply" ? `Marking the test replied: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : press.kind === "run" ? `Starting the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : `Stopping the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.`) : (said?.text ?? hint);
 
   return (
     <section aria-labelledby="test-contacts" className="flex min-w-0 flex-col gap-3.5 rounded-box border border-line bg-base-100 px-5 pb-5 pt-4">
@@ -262,7 +277,19 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
       >
         <ContactField id={emailId} label="Your email" icon="email" value={email} onChange={setEmail} type="email" placeholder="you@example.com" error={fieldError?.field === "email" ? fieldError.message : tab.contacts.emailIsALead ? "A lead has this email now, so tests can’t use it. Use another of your own." : null} />
         <ContactField id={mobileId} label="Your mobile, for texts and the test call" icon="sms" value={mobile} onChange={setMobile} type="tel" placeholder="+44 7700 900000" error={fieldError?.field === "mobile" ? fieldError.message : tab.contacts.mobileIsALead ? "A lead has this number now, so tests can’t use it. Use another of your own." : null} />
-        <p className="text-[13.5px] text-muted">Only contacts that are your own. They are never leads: a lead’s email or number is refused.</p>
+        {asksLinkedin && (
+          <ContactField
+            id={linkedinId}
+            label="Your LinkedIn profile, for the invite and messages"
+            icon="linkedin"
+            value={linkedin}
+            onChange={setLinkedin}
+            type="url"
+            placeholder="https://www.linkedin.com/in/your-profile"
+            error={fieldError?.field === "linkedin" ? fieldError.message : tab.contacts.linkedinIsALead ? "A lead has this profile now, so tests can’t use it. Use another of your own." : null}
+          />
+        )}
+        <p className="text-[13.5px] text-muted">Only contacts that are your own. They are never leads: a lead’s email{asksLinkedin ? ", number or profile" : " or number"} is refused.</p>
         <div className="flex flex-wrap items-center gap-3">
           {/* Disabled while a save waits: a second press is queued by Enter in a field, never sent beside it. */}
           <button type="submit" className={`btn btn-sm border-line-strong bg-base-100 font-medium ${DISABLED}`} disabled={saving || !dirty}>
@@ -294,7 +321,10 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
         <p className="text-[13.5px] text-muted">Their merge fields fill the copy. Nothing is sent to them.</p>
       </div>
 
-      <p className="text-[14px] text-ink-2">Sends every step of the current sequence to you, in order, from the real sender accounts. Each wait is cut to about a minute.</p>
+      <p className="text-[14px] text-ink-2">
+        Sends every step of the current sequence to you, in order, from the real sender accounts. Each wait is cut to about a minute
+        {asksLinkedin ? ", except the wait for you to accept the LinkedIn invite on your test profile, which you do by hand" : ""}.
+      </p>
       <div className="flex flex-wrap items-center gap-2.5">
         {running && !(pending && press.kind === "run") ? (
           <>
@@ -349,7 +379,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   );
 }
 
-function ContactField({ id, label, icon, value, onChange, type, placeholder, error }: { id: string; label: string; icon: IconName; value: string; onChange: (v: string) => void; type: "email" | "tel"; placeholder: string; error: string | null }) {
+function ContactField({ id, label, icon, value, onChange, type, placeholder, error }: { id: string; label: string; icon: IconName; value: string; onChange: (v: string) => void; type: "email" | "tel" | "url"; placeholder: string; error: string | null }) {
   const errorId = `${id}-error`;
   return (
     <div className="flex flex-col gap-1.5">
@@ -358,7 +388,7 @@ function ContactField({ id, label, icon, value, onChange, type, placeholder, err
       </label>
       <span className={`input flex w-full items-center gap-2 border-line-strong ${error ? "border-crit" : ""}`}>
         <Icon name={icon} className="size-4 flex-none text-muted" />
-        <input id={id} type={type} className="min-w-0 grow" value={value} placeholder={placeholder} autoComplete={type === "email" ? "email" : "tel"} aria-invalid={error !== null} aria-describedby={error ? errorId : undefined} onChange={(e) => onChange(e.target.value)} />
+        <input id={id} type={type} className="min-w-0 grow" value={value} placeholder={placeholder} autoComplete={type === "email" ? "email" : type === "url" ? "url" : "tel"} aria-invalid={error !== null} aria-describedby={error ? errorId : undefined} onChange={(e) => onChange(e.target.value)} />
       </span>
       {error !== null && (
         <span id={errorId} className="text-[13px] text-crit">
@@ -371,7 +401,7 @@ function ContactField({ id, label, icon, value, onChange, type, placeholder, err
 
 const STEP_ICON: Record<TestStepRow["channel"], IconName> = { email: "email", sms: "sms", call: "call", linkedin: "linkedin" };
 
-function RunPanel({ tab, starting }: { tab: TestRunTabView; starting: boolean }) {
+function RunPanel({ tab, starting, presses }: { tab: TestRunTabView; starting: boolean; presses: Presses }) {
   const run = tab.run;
   return (
     <section aria-labelledby="test-run-heading" className="flex min-w-0 flex-col gap-3 rounded-box border border-line bg-base-100 px-5 pb-5 pt-4">
@@ -391,7 +421,7 @@ function RunPanel({ tab, starting }: { tab: TestRunTabView; starting: boolean })
           <p className="text-[14px] text-ink-2">A test sends the whole sequence to your own email and mobile, and puts its calls on your Calls list. It is optional: you can launch without one.</p>
         </>
       ) : (
-        <RunRead run={run} tab={tab} />
+        <RunRead run={run} tab={tab} presses={presses} />
       )}
       {tab.noTestSinceEdit && run !== null && !starting && (
         <p className="flex gap-2 text-[13.5px] text-ink-2">
@@ -400,13 +430,13 @@ function RunPanel({ tab, starting }: { tab: TestRunTabView; starting: boolean })
         </p>
       )}
       <p className="border-t border-line pt-3 text-[13px] text-muted">
-        Reply to any test message from your email or mobile to check that it stops the test. Email shows sent or failed only: Instantly doesn’t report delivery, and a sent email is not proof it reached the inbox. Test sends count against each sender’s daily limit like any send.
+        Reply to any test message from your email or mobile to check that it stops the test{run?.linkedinReply ? "; a LinkedIn reply is never detected, so mark it here once you have answered on your test profile" : ""}. Email shows sent or failed only: Instantly doesn’t report delivery, and a sent email is not proof it reached the inbox. Test sends count against each sender’s daily limit like any send.
       </p>
     </section>
   );
 }
 
-function RunRead({ run, tab }: { run: TestRunRead; tab: TestRunTabView }) {
+function RunRead({ run, tab, presses }: { run: TestRunRead; tab: TestRunTabView; presses: Presses }) {
   const started = timeIn(tab.zone, run.startedAt, tab.at);
   return (
     <>
@@ -447,6 +477,49 @@ function RunRead({ run, tab }: { run: TestRunRead; tab: TestRunTabView }) {
           );
         })}
       </ol>
+      {run.linkedinReply !== null && run.running && <TestReplyMark run={run} presses={presses} />}
     </>
+  );
+}
+
+/**
+ * The test run's LinkedIn reply mark (ticket 24b; ADR 0004 section 7): offered while the read allows it, with the read's
+ * refusal said in its place otherwise, and confirmed in place against the status the read showed (the snapshot rule of
+ * the record's controls): the press sends that status, so a run that changed since is refused by the server.
+ */
+function TestReplyMark({ run, presses }: { run: TestRunRead; presses: Presses }) {
+  const [opened, setOpened] = useState<{ status: TestRunRead["status"]; runId: string } | null>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const mark = run.linkedinReply;
+  const pending = presses.press !== null;
+  if (mark === null) return null;
+  if (!mark.allowed) return <p className="border-t border-line pt-3 text-[13.5px] text-muted">{mark.reason}</p>;
+  return (
+    <div className="flex flex-col gap-2 border-t border-line pt-3">
+      {opened ? (
+        <ConfirmStrip
+          text="Mark this test replied on LinkedIn? It stops the test, as a reply stops a lead’s outreach in this campaign. Carry on the conversation on LinkedIn."
+          action="Mark replied"
+          changed={opened.status !== run.status ? ROW_CHANGED : null}
+          busy={pending ? "Another change to this test is on its way." : null}
+          onConfirm={() => {
+            presses.press_("reply", `/api/test-runs/${encodeURIComponent(opened.runId)}/replies`, { channel: "linkedin", expect: { status: opened.status } });
+            setOpened(null);
+          }}
+          onCancel={() => {
+            setOpened(null);
+            requestAnimationFrame(() => trigger.current?.focus());
+          }}
+        />
+      ) : (
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button ref={trigger} type="button" className={`btn btn-sm border-line-strong bg-base-100 font-medium ${DISABLED}`} disabled={pending} onClick={() => setOpened({ status: run.status, runId: run.id })}>
+            <Icon name="linkedin" className="size-4" />
+            Mark replied on LinkedIn
+          </button>
+          <span className="text-[13px] text-muted">Once you have answered a test message on your test profile.</span>
+        </div>
+      )}
+    </div>
   );
 }
