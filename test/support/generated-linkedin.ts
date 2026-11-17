@@ -334,6 +334,17 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const earlyOff = new Map<number, number>(campaigns.flatMap((c, i) => (fallbackOn(c.definition, i) && rnd4() < 0.35 ? [[i, START + Math.floor((0.5 + rnd4() * 1.5) * DAY)] as const] : [])));
   /** The fallback switched off while a chosen InMail waits to go (L25's case), in a share of the others, from the fourth stream. */
   const offWhenChosen = new Set<number>(campaigns.flatMap((c, i) => (fallbackOn(c.definition, i) && !earlyOff.has(i) && rnd4() < 0.5 ? [i] : [])));
+  /**
+   * The council's draws on `8b0c846` (items 1, 2, 7, 8), from the fourth stream, each once per campaign or run, at the moment
+   * it bites: a running edit of the messages while an InMail is chosen (the first removed, one added, two reordered); a lead
+   * with its InMail chosen stopped and restarted later; and the session's report changed between an InMail's claim and its
+   * handover (no credit, or no plan), with credits returning a day later.
+   */
+  const editWhenChosen = new Map<number, "remove" | "insert" | "reorder">(campaigns.flatMap((c, i) => (fallbackOn(c.definition, i) && rnd4() < 0.5 ? [[i, pickOf(rnd4, ["remove", "remove", "insert", "reorder"] as const)] as const] : [])));
+  let stopWhenChosen = rnd4() < 0.5;
+  const restarts: { id: string; at: number }[] = [];
+  let reportAtClaim: "no_credit" | "no_plan" | null = rnd4() < 0.35 ? (rnd4() < 0.7 ? "no_credit" : "no_plan") : null;
+  const reportsBack: { session: string; at: number; plan: "premium" | "sales_navigator" | "none"; credits: number }[] = [];
   /** The user spending a session's credits by hand (its credits at 0 from then): when, by session. */
   const creditDrops: { session: string; at: number }[] = [];
   /** Each sign-out: from when, until when it was drawn to last, and when the run actually restored it. */
@@ -370,11 +381,14 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
    * A session's credits as the engine can know them at `at` (13.5): the last report the session gave by then (a signed-out
    * session reports nothing, so its last report stands; seed 24016), less the InMails it delivered at or after that report.
    */
-  const creditsAt = (session: string, at: number): number => {
-    // The report the tick at `at` began with (its first at that instant), else the last before it; then the InMails delivered
-    // from that report up to, not including, `at` (an InMail the same tick sends is after its judgment; seed 24024).
+  /** The report the tick at `at` began with (its first at that instant), else the last before it (seed 24024). */
+  const reportAt = (session: string, at: number) => {
     const reports = h.linkedin.inmailReportLog.filter((r) => r.session === session && r.at <= at);
-    const report = reports.find((r) => r.at === at) ?? reports.at(-1);
+    return reports.find((r) => r.at === at) ?? reports.at(-1);
+  };
+  const creditsAt = (session: string, at: number): number => {
+    // The InMails delivered from that report up to, not including, `at` (an InMail the same tick sends is after its judgment).
+    const report = reportAt(session, at);
     if (!report) return 0;
     const since = h.linkedin.deliveryLog.filter((d) => d.action === "inmail" && d.sender === session && d.at >= report.at && d.at < at).length;
     return Math.max(0, report.credits - since);
@@ -392,12 +406,16 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     }
     return deadlineWall(lead, sentAt, until);
   };
-  const planned = (session: string) => {
-    const plan = inmailPlans.get(session)?.plan;
+  /** Whether the session's report at `at` says Premium or Sales Navigator (its plan can change: the draws of 13.5). */
+  const planned = (session: string, at: number = h.clock) => {
+    const plan = reportAt(session, at)?.plan;
     return plan === "premium" || plan === "sales_navigator";
   };
-  /** Whether a session has a plan and a credit by the record at `at`. */
-  const standingFree = (session: string, at: number) => planned(session) && creditsAt(session, at) >= 1;
+  /** Whether that report is fresh enough to judge on (13.5, question Q58's interim: a day). */
+  const freshAt = (session: string, at: number) => {
+    const report = reportAt(session, at);
+    return report !== undefined && at - report.at <= DAY;
+  };
   /** The wall instant the deadline is reached: the lead's clock runs only outside its holds (a clamp held: at the resume). */
   const deadlineWall = (lead: Lead, sentAt: number, until: number): number => {
     const { span, clampedAt } = deadlineOf(lead, sentAt, until);
@@ -430,6 +448,21 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     const changed = await h.freshEngineTick();
     const more = handovers() - handed;
     if (changed.length > 0 || more > 0) problem(`29: at ${iso(h.clock)} a fresh engine handed over ${more} and changed what the running worker had left: ${changed.join("; ").slice(0, 600)}`);
+  };
+
+  // The report changed between an InMail's claim and its handover (council on 8b0c846, item 8), once per run.
+  h.hooks.afterClaim = async (attemptId) => {
+    if (reportAtClaim === null) return;
+    const a = await h.store.engine.attempt(attemptId);
+    if (a?.action !== "inmail") return;
+    const session = sessionOfAccount(a.accountId);
+    const was = h.linkedin.sessions.get(session)?.inmail;
+    if (!was) return;
+    const kind = reportAtClaim;
+    reportAtClaim = null;
+    await storeReport(session, kind === "no_plan" ? { plan: "none", credits: 0 } : { plan: was.plan, credits: 0 });
+    reportsBack.push({ session, at: h.clock + DAY, plan: was.plan, credits: was.credits + 1 });
+    features.add(`a-report-between-an-inmail-claim-and-its-handover:${kind}`);
   };
 
   // --- Events.
@@ -474,6 +507,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       earlyOff.delete(ci);
       await switchOff(ci);
     }
+    await chosenEvents();
     for (const ci of [...offWhenChosen]) {
       for (const l of leads.filter((x) => x.campaign === ci)) {
         const tp = (await h.store.engine.subject(l.id, h.clock))?.tracks.find((x) => x.trackId === campaigns[ci]!.li.id);
@@ -581,6 +615,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       // L21: never after the person accepted (the session would have found them connected), nor once connected in time.
       const acceptance = li.acceptanceLog.find((a) => a.key === invite.key);
       if (acceptance && acceptance.at <= x.at && !lead.script?.connectionRemoved) problem(`L21: ${x.subjectId}'s InMail was handed over at ${iso(x.at)}, after they accepted at ${iso(acceptance.at)}`);
+      // L22 at the handover (council on 8b0c846, item 8): handed over only on a report, read by then, with a plan and a credit.
+      if (refusal?.reason !== "rate_limited" && (!planned(x.sender, x.at) || creditsAt(x.sender, x.at) < 1)) problem(`L22: ${x.subjectId}'s InMail was handed over at ${iso(x.at)} with ${x.sender} reporting ${planned(x.sender, x.at) ? `${creditsAt(x.sender, x.at)} credits free` : "no plan"}`);
       if (refusal?.reason === "inmail_refused") features.add("an-inmail-refused");
       else if (!refusal) features.add("an-inmail-sent");
     }
@@ -603,9 +639,13 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
         problem(`L19: ${lead.id}'s invite expired with the fallback on and no InMail judged`);
       }
       // L22 (b, c): the choice by the session's own standing at the expiry, by the record's plan and credits.
-      if (state === "no_plan" && planned(sender)) problem(`L22: ${lead.id}'s InMail was refused as no plan, though ${sender} reports ${inmailPlans.get(sender)?.plan}`);
-      if (judged && state !== "no_plan" && !planned(sender)) problem(`L22: ${lead.id}'s InMail was ${state} from ${sender}, which reports no Premium or Sales Navigator`);
-      if (state !== null && state !== "no_plan" && state !== "no_credit" && state !== "accepted" && creditsAt(sender, deadline) < 1) problem(`L22: ${lead.id}'s InMail was chosen at ${iso(deadline)} with ${sender} out of credits by the record`);
+      const choseIt = state !== null && state !== "no_plan" && state !== "no_credit" && state !== "stale_report";
+      if (state === "no_plan" && planned(sender, deadline)) problem(`L22: ${lead.id}'s InMail was refused as no plan, though ${sender} reported a plan at ${iso(deadline)}`);
+      if (choseIt && state !== "accepted" && !planned(sender, deadline)) problem(`L22: ${lead.id}'s InMail was ${state} from ${sender}, which reported no Premium or Sales Navigator`);
+      if (choseIt && !freshAt(sender, deadline)) problem(`L22: ${lead.id}'s InMail was chosen on a report older than a day`);
+      if (state === "stale_report" && freshAt(sender, deadline)) problem(`L22: ${lead.id}'s InMail was refused for an old report, though ${sender} reported within a day of ${iso(deadline)}`);
+      if (state === "stale_report") features.add("an-inmail-on-a-stale-report");
+      if (choseIt && state !== "accepted" && creditsAt(sender, deadline) < 1) problem(`L22: ${lead.id}'s InMail was chosen at ${iso(deadline)} with ${sender} out of credits by the record`);
       if (state === "no_credit") {
         // The credits other tracks had chosen before and not yet spent: a credit is free only beyond them.
         let committed = 0;
@@ -643,6 +683,132 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
         const first = track?.steps.filter((s) => s.role !== "inmail")[1]?.id;
         const at = li.deliveryLog.find((x) => x.subjectId === lead.id && x.action === "inmail")?.at ?? Infinity;
         if (first && li.deliveryLog.some((x) => x.subjectId === lead.id && x.stepId === first && x.at > at)) problem(`L23: ${lead.id}'s first message went after its InMail`);
+        // L23, the other side (council on 8b0c846, item 1): a follow-up the user kept is never skipped for the InMail. Every
+        // message of the record's own definition after the first, live now, went by the drain on a completed track.
+        const kept = c.li.steps.filter((s) => s.role !== "inmail").slice(2).map((s) => s.id).filter((id) => track?.steps.some((s) => s.id === id && !s.removed));
+        const untouched = st.subject.ended === null && !stopped.has(lead.id) && !marked.has(lead.id) && !(skipped.get(lead.id)?.length) && tp.finishReason === "completed";
+        for (const id of untouched ? kept : []) if (!li.deliveryLog.some((x) => x.subjectId === lead.id && x.stepId === id)) problem(`L23: ${lead.id}'s follow-up ${id} never went after its InMail, its track completed`);
+      }
+    }
+    if (drained) await checkCredits();
+  }
+
+  /**
+   * L26 and L27 (ADR 0004 13.5; council on 8b0c846, items 2 and 7), after the drain, from the record's reports and logs.
+   * L26: with c credits reported and n InMails chosen on a session, min(c, n) go: none waits for want of sharing while the
+   * session reports a credit free. L27: a lead stopped with its InMail chosen and restarted after another lead's expiry chose
+   * on the same session never takes that credit back: it does not go while the other's waits for ever.
+   */
+  async function checkCredits(): Promise<void> {
+    const li = h.linkedin;
+    const now = h.clock;
+    const states = new Map<string, NonNullable<Awaited<ReturnType<typeof h.store.engine.subject>>>>();
+    for (const l of leads) {
+      const st = await h.store.engine.subject(l.id, now);
+      if (st) states.set(l.id, st);
+    }
+    const trackOf = (l: Lead) => states.get(l.id)?.tracks.find((t) => t.trackId === campaigns[l.campaign]!.li.id);
+    const senderOf = (l: Lead) => li.deliveryLog.find((x) => x.subjectId === l.id && x.action === "invite")?.sender;
+    const inmailed = (l: Lead) => li.handoverLog.some((x) => x.subjectId === l.id && x.action === "inmail");
+    const running = (l: Lead) => {
+      const st = states.get(l.id);
+      return st !== undefined && st.subject.ended === null && !st.subject.leadPaused && !campaignHeld.get(campaigns[l.campaign]!.id)?.some((x) => x.to === null);
+    };
+    for (const s of sessions) {
+      const waiting = leads.filter((l) => senderOf(l) === s.id && trackOf(l)?.inmail === "chosen" && trackOf(l)?.finishedAt === null && !inmailed(l) && running(l));
+      if (waiting.length === 0) continue;
+      if (!planned(s.id, now) || !freshAt(s.id, now) || !li.sessions.get(s.id)?.healthy || (allowances.get(s.id)?.messages ?? 0) === 0) continue;
+      if (creditsAt(s.id, now) >= 1) problem(`L26: ${waiting.map((l) => l.id).join(" and ")} still wait for an InMail from ${s.id}, which reports ${creditsAt(s.id, now)} credits free`);
+      else features.add("chosen-inmails-beyond-the-credits");
+    }
+    for (const a of leads) {
+      const ta = trackOf(a);
+      if (!ta || (ta.inmail !== "chosen" && ta.inmail !== "sent")) continue;
+      for (const stop of stops.get(a.id) ?? []) {
+        if (stop.to === null) continue;
+        for (const b of leads) {
+          const tb = trackOf(b);
+          const ib = li.deliveryLog.find((x) => x.subjectId === b.id && x.action === "invite");
+          if (b.id === a.id || !tb || !ib || senderOf(b) !== senderOf(a) || (tb.inmail !== "chosen" && tb.inmail !== "sent")) continue;
+          const db = judgedDeadline(b, ib.at);
+          if (!(db > stop.from && db < stop.to)) continue;
+          features.add("a-restart-after-another-took-a-credit");
+          if (inmailed(a) && !inmailed(b) && running(b)) problem(`L27: ${a.id}, restarted at ${iso(stop.to)}, had its InMail sent while ${b.id}'s, chosen at ${iso(db)} during its stop, still waits`);
+        }
+      }
+    }
+  }
+
+  /** A session's report as it gives it now, stored as an account sync would store it (another process's sync). */
+  async function storeReport(session: string, standing: { plan: "premium" | "sales_navigator" | "none"; credits: number }): Promise<void> {
+    h.linkedin.sessions.get(session)!.inmail = { ...standing };
+    const listed = (await h.linkedin.accounts()).map((a) => ({ ...a, id: linkedinAccountId(a.id) }));
+    await h.store.engine.upsertAccounts(listed, h.clock);
+  }
+
+  /** The council's draws on `8b0c846`, each at the moment it bites (see `editWhenChosen`). */
+  async function chosenEvents(): Promise<void> {
+    for (const r of [...restarts]) {
+      if (r.at > h.clock) continue;
+      restarts.splice(restarts.indexOf(r), 1);
+      if ((await h.request("POST", `/api/enrollments/${r.id}/controls`, { requestId: `g-${++requestNo}`, action: "resume_from_next_step" })).status === 200) {
+        restarted.set(r.id, h.clock);
+        stopped.delete(r.id);
+        const open = (stops.get(r.id) ?? []).find((x) => x.to === null);
+        if (open) open.to = h.clock;
+        features.add("a-lead-with-a-chosen-inmail-restarted");
+      }
+    }
+    for (const b of [...reportsBack]) {
+      if (b.at > h.clock) continue;
+      reportsBack.splice(reportsBack.indexOf(b), 1);
+      await storeReport(b.session, { plan: b.plan, credits: b.credits });
+      features.add("inmail-credits-returned");
+    }
+    const chosen: Lead[] = [];
+    for (const l of leads) {
+      const tp = (await h.store.engine.subject(l.id, h.clock))?.tracks.find((x) => x.trackId === campaigns[l.campaign]!.li.id);
+      if (tp?.inmail === "chosen" && tp.finishedAt === null && !h.linkedin.handoverLog.some((x) => x.subjectId === l.id && x.action === "inmail")) chosen.push(l);
+    }
+    for (const l of chosen) {
+      const kind = editWhenChosen.get(l.campaign);
+      if (kind === undefined) continue;
+      editWhenChosen.delete(l.campaign);
+      const c = campaigns[l.campaign]!;
+      const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
+      const tracks = stored.tracks.map((tr) => {
+        if (tr.id !== c.li.id) return tr;
+        const messages = tr.steps.filter((s) => s.role !== "inmail" && !s.removed).slice(1);
+        if (kind === "remove" && messages.length > 1) return { ...tr, steps: tr.steps.map((s) => (s.id === messages[0]!.id ? { ...s, removed: true } : s)) };
+        if (kind === "insert") {
+          const at = tr.steps.findIndex((s) => s.id === messages[0]?.id);
+          const added = { id: `${tr.id}-y${++requestNo}`, waitDays: 1, subject: "", body: "A message added while the InMail waits.", threading: "new_subject" as const, removed: false };
+          return at < 0 ? tr : { ...tr, steps: [...tr.steps.slice(0, at), added, ...tr.steps.slice(at)] };
+        }
+        if (kind === "reorder" && messages.length > 2) {
+          const [, a, b] = messages;
+          const steps = [...tr.steps];
+          const ia = steps.findIndex((s) => s.id === a!.id);
+          const ib = steps.findIndex((s) => s.id === b!.id);
+          [steps[ia], steps[ib]] = [steps[ib]!, steps[ia]!];
+          return { ...tr, steps };
+        }
+        return tr;
+      });
+      if ((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, tracks })).status === 200) {
+        noteSwitch(l.campaign, { ...stored, tracks });
+        features.add(`a-running-edit-while-an-inmail-is-chosen:${kind}`);
+      }
+    }
+    if (stopWhenChosen && chosen.length > 0) {
+      stopWhenChosen = false;
+      const l = chosen[0]!;
+      const r = await h.request("POST", `/api/enrollments/${l.id}/controls`, { requestId: `g-${++requestNo}`, action: "stop" });
+      if (r.status === 200 || (await h.store.engine.subject(l.id, h.clock))?.subject.ended === "stopped_manually") {
+        stopped.set(l.id, h.clock);
+        stops.set(l.id, [...(stops.get(l.id) ?? []), { from: h.clock, to: null }]);
+        restarts.push({ id: l.id, at: h.clock + Math.floor((0.5 + rnd4() * 1.5) * DAY) });
+        features.add("a-lead-with-a-chosen-inmail-stopped");
       }
     }
   }
@@ -1163,8 +1329,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           const inmailBlocked = p.inmail === "chosen" && shown?.nextStep?.when.why === "inmail_unavailable";
           if (inmailBlocked) {
             const session = li.deliveryLog.find((x) => x.subjectId === lead.id && x.action === "invite")?.sender ?? "";
-            if (!standingFree(session, now)) features.add("an-inmail-waiting-for-a-credit");
-            else problem(`L22: ${lead.id}'s InMail reads unavailable, though ${session} has a plan and ${creditsAt(session, now)} credits by the record`);
+            // Whether it should have gone is L26's, from every lead's InMail on the session together (13.5: credits are shared).
+            features.add(planned(session, now) && creditsAt(session, now) >= 1 ? "an-inmail-waiting-behind-earlier-holdings" : "an-inmail-waiting-for-a-credit");
             continue;
           }
           if (p.dueWall !== null && p.dueWall < now - 3 * DAY && hold === null && !st.attempts.some((a) => a.stepId === p.nextStepId && a.state !== "withdrawn" && a.state !== "rejected" && a.state !== "sent")) problem(`L13: ${lead.id}'s ${p.nextStepId} has been due since ${iso(p.dueWall)} with nothing holding it`);

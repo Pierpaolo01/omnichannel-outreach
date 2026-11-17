@@ -45,7 +45,7 @@ function connectedAtTheSend(s: SubjectState): SubjectState {
 }
 
 /** A swap of one of progress.ts's rule flags for a replay, undone after it. */
-type Flag = "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession" | "conversationKeysOwnOnly" | "inmailJudgesStanding" | "inmailWaitsForExpiry" | "acceptanceSkipsInmail" | "refusedInmailEndsTrack" | "switchOffReachesChosen" | "inmailOffWhenRemoved" | "inmailTakesFirstPlace";
+type Flag = "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession" | "conversationKeysOwnOnly" | "inmailJudgesStanding" | "inmailWaitsForExpiry" | "acceptanceSkipsInmail" | "refusedInmailEndsTrack" | "switchOffReachesChosen" | "inmailOffWhenRemoved" | "inmailTakesFirstPlace" | "stopReleasesHolding" | "handoverRechecksBacking" | "replacedNamedAtChoice";
 /** Several flags swapped at once for one replay, undone after it. */
 function flags(values: Partial<Record<Flag, boolean>>): () => () => void {
   return () => {
@@ -72,7 +72,7 @@ function flag<K extends Flag>(name: K, value: (typeof progressRules)[K]): () => 
 }
 
 /** The InMail mutations' killing seed offsets (ticket 27), found over offsets 0 to 29; ADR 0004 13.11 records them. */
-const INMAIL_SEEDS = { L18: 24, L19: 16, L20: 7, L21: 18, L22: 0, L23: 24, L24: 18, L25: 7 } as const;
+const INMAIL_SEEDS = { L18: 24, L19: 16, L20: 7, L21: 18, L22: 0, L23: 24, L24: 18, L25: 7, replaced: 0, restart: 0, handover: 0 } as const;
 
 /** The seed offset that reaches a step no session has any allowance for (the search's 24015 on a6c1700). */
 const NO_ALLOWANCE_SEED = 15;
@@ -381,6 +381,28 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     seed: INMAIL_SEEDS.L25,
     rules: {},
     patch: flags({ switchOffReachesChosen: false }),
+  },
+  // The council on 8b0c846 (items 1, 7 and 8; ADR 0004 13.5, 13.15).
+  // L23: the step the InMail replaces is found among the live steps at its send, so a follow-up an edit promoted is skipped.
+  "the replaced step is found among the live steps at the handover": {
+    invariant: "L23",
+    seed: INMAIL_SEEDS.replaced,
+    rules: {},
+    patch: flags({ replacedNamedAtChoice: false }),
+  },
+  // L27: a stop keeps the InMail's credit, so a restart has it back without acquiring, ahead of the lead that chose since.
+  "a restart restores a commitment without acquiring": {
+    invariant: "L27",
+    seed: INMAIL_SEEDS.restart,
+    rules: {},
+    patch: flags({ stopReleasesHolding: false }),
+  },
+  // L22: the handover does not read the session's report again, so a claim made before a report of zero still goes.
+  "the handover does not re-read the report": {
+    invariant: "L22",
+    seed: INMAIL_SEEDS.handover,
+    rules: {},
+    patch: flags({ handoverRechecksBacking: false }),
   },
   // L13: a taken pair held instead of skipped: the second campaign's lead is left waiting on it for ever.
   "a taken LinkedIn pair is held, not skipped": {
