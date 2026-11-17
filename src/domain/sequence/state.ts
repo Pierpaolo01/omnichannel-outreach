@@ -271,6 +271,8 @@ export interface SmsBinding {
   readonly ownerCampaignId: string | null;
   /** That campaign's name as stored now; null for a binding this change takes. */
   readonly ownerCampaignName: string | null;
+  /** The owning lead's name as stored now (verifier on f2824d4, item 9); null for a test run or a binding this change takes. */
+  readonly ownerLeadName?: string | null;
   /** Whether the owner is a test run (ticket 21), whose binding is released when it ends. */
   readonly ownerIsTest: boolean;
   /** Whether the owner has ended. An ended owner keeps its binding all the same (ruling 8). */
@@ -304,6 +306,8 @@ export interface ConversationCause {
   readonly ownerCampaignId: string | null;
   readonly ownerCampaignName: string | null;
   readonly ownerIsTest: boolean;
+  /** The owning lead's name when the cause was stored (item 9); absent on causes stored before it was kept. */
+  readonly ownerLeadName?: string | null;
 }
 
 /**

@@ -5,6 +5,7 @@
  * Log all read tracks through `dependentStateOf`.
  */
 import type { DeclinedPath, TrackDefinition } from "../../domain/sequence/definition.ts";
+import { holdsConversations } from "../../domain/sequence/definition.ts";
 import { runs, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { FinishReason, SubjectState } from "../../domain/sequence/state.ts";
 import type { DeclineTrackView, DependentTrackState } from "../../shared/api.ts";
@@ -55,11 +56,11 @@ export function finishedStateOf(reason: FinishReason): Exclude<DependentTrackSta
  */
 export function dependentStateOf(live: SubjectState, track: Pick<TrackDefinition, "id" | "channel">, now: number): DependentTrackState {
   const p = live.tracks.find((t) => t.trackId === track.id);
-  if (p?.finishReason === "skipped_conversation_taken") return { state: "skipped_conversation_taken", startsAt: null, owners: conversationOwnersView(live, track.id), channel: track.channel === "linkedin" ? "linkedin" : "sms" };
+  if (p?.finishReason === "skipped_conversation_taken") return { state: "skipped_conversation_taken", startsAt: null, owners: conversationOwnersView(live, track.id), channel: holdsConversations(track.channel) ? track.channel : "sms" };
   if (p?.finishReason) {
     const state = finishedStateOf(p.finishReason);
     // Only a taken conversation names its owners, above.
-    return state === "skipped_conversation_taken" ? { state, startsAt: null, owners: [], channel: track.channel === "linkedin" ? "linkedin" : "sms" } : { state, startsAt: null };
+    return state === "skipped_conversation_taken" ? { state, startsAt: null, owners: [], channel: holdsConversations(track.channel) ? track.channel : "sms" } : { state, startsAt: null };
   }
   if (live.subject.ended !== null) return { state: p && p.startedAt !== null ? "stopped_after_start" : "stopped", startsAt: null };
   if (track.channel === "call" && live.subject.noMoreCalls) return { state: "no_more_calls", startsAt: null };

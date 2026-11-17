@@ -4,7 +4,8 @@ import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { FakeSocialSession } from "../../../test/support/fake-social-port.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
-import type { ActivityView, CampaignMeasures, EnrollmentProgress, EnrollmentRead, LeadSearchResult, SocialProvidersStatus } from "../../shared/api.ts";
+import type { ActivityView, CampaignMeasures, EnrollmentProgress, EnrollmentRead, LeadSearchResult, NeedsAttention, SocialProvidersStatus } from "../../shared/api.ts";
+import { noUsableChannelItem } from "../../web/calls/interruption.ts";
 
 /**
  * The Instagram track (ticket 25, ADR 0004 section 13) through the real HTTP app, SQLite store and engine, against the
@@ -218,7 +219,13 @@ describe("ownership of a conversation (ADR 0004 13.6)", () => {
     const owner = delivered(NORTHGATE)[0]!.subjectId;
     const skippedName = owner === c.lead("Nia Cole") ? "Ola Berg" : "Nia Cole";
     const skipped = (await progress(c.lead(skippedName))).tracks.find((t) => t.trackId === "ig");
-    expect(skipped).toMatchObject({ finishReason: "skipped_conversation_taken", conversationOwners: [{ name: "Instagram", test: false }] });
+    const ownerName = skippedName === "Nia Cole" ? "Ola Berg" : "Nia Cole";
+    // A colleague in this same campaign owns it: named as that lead, never as "another campaign" (verifier on f2824d4, item 9).
+    expect(skipped).toMatchObject({ finishReason: "skipped_conversation_taken", conversationOwners: [{ name: "Instagram", test: false, lead: ownerName }] });
+    // Today reads the same owner, and says it in Instagram's words.
+    const today = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.noUsableChannel.find((x) => x.enrollmentId === c.lead(skippedName));
+    expect(today?.channels).toEqual([{ channel: "instagram", why: "conversation_taken", owners: [{ name: "Instagram", test: false, lead: ownerName }] }]);
+    expect(noUsableChannelItem(today ? [today] : [], "2026-11-02", "Europe/London")?.body).toContain(`Now their Instagram account is in an Instagram conversation (a message request or a follow-up) with ${ownerName}, a lead of this campaign, on every Instagram session this campaign can use.`);
   });
 
   test("a second campaign on the same session is skipped for an account the first reached; a person's own account and their company's are two", async () => {
@@ -228,7 +235,7 @@ describe("ownership of a conversation (ADR 0004 13.6)", () => {
     const second = await campaign([instagram("ig2", [step("x1", 0, "Second.")])], "Second");
     await h.advanceTo(h.clock + 2 * H);
     // Nia's company account was reached by the first campaign: the second skips her, naming it.
-    expect((await progress(second.lead("Nia Cole"))).tracks.find((t) => t.trackId === "ig2")).toMatchObject({ finishReason: "skipped_conversation_taken", conversationOwners: [{ name: "First", test: false }] });
+    expect((await progress(second.lead("Nia Cole"))).tracks.find((t) => t.trackId === "ig2")).toMatchObject({ finishReason: "skipped_conversation_taken", conversationOwners: [{ name: "First", test: false, lead: null }] });
     expect(delivered(NORTHGATE).map((d) => d.stepId)).toEqual(["m1"]);
     expect(delivered(PAT_OWN).map((d) => d.stepId)).toEqual(["m1"]);
     // Harbour's own account was never reached (Pat went to their own): another destination, free.

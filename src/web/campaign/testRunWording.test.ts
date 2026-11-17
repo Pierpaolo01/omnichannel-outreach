@@ -37,7 +37,7 @@ describe("the Test run tab says only what the run's facts say (ticket 21)", () =
     expect(stepStateText(row({ channel: "sms", state: "held", at: null, hold: "provider_skipped" }), "Europe/London", READ)).toBe("On hold");
     expect(stepDetail(row({ channel: "sms", state: "held", at: null, hold: "provider_skipped" }), run)).toBe("On hold because the provider skipped the lead. Nothing is dropped.");
     // Question Q7 answered (provisional for test runs): a test mobile in another campaign's conversation is skipped, and says whose.
-    expect(stepDetail(row({ channel: "sms", state: "skipped", reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false }] }), run)).toBe(
+    expect(stepDetail(row({ channel: "sms", state: "skipped", reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false, lead: null }] }), run)).toBe(
       "Skipped: your test mobile was already in a text conversation with campaign Spring clinics on every number this campaign can use",
     );
   });

@@ -566,6 +566,11 @@ export interface ConversationOwnerView {
   readonly name: string;
   /** The conversation belongs to that campaign's test run, not to one of its leads. */
   readonly test: boolean;
+  /**
+   * A lead of the same campaign owns it (verifier on f2824d4, item 9): that lead's name ("" if the stored cause has none),
+   * said instead of the campaign. Null when the owner is another campaign or a test run.
+   */
+  readonly lead: string | null;
 }
 /**
  * Why a track waits for the user (ADR 0003 5.4). A mobile whose conversation is taken on every number is not a hold: its

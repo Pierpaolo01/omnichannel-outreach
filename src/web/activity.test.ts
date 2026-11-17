@@ -46,12 +46,12 @@ describe("what the timeline says of SMS, skipped and released tracks (ticket 13b
     expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "no_mobile" })).toEqual(["SMS track skipped", "No mobile of their own.", null]);
     expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "company_lead" })).toEqual(["SMS track skipped", "A company lead is never texted: a main line isn’t a mobile.", null]);
     // Question Q7 answered: the campaign that keeps the conversation is named, in the past tense of the skip.
-    expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false }] })).toEqual([
+    expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false, lead: null }] })).toEqual([
       "SMS track skipped",
       "Their mobile was already in a text conversation with campaign Spring clinics on every number this campaign can use, so a reply couldn’t show which campaign it answers.",
       null,
     ]);
-    expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false }, { name: "Winter clinics", test: true }] })[1]).toContain(
+    expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false, lead: null }, { name: "Winter clinics", test: true, lead: null }] })[1]).toContain(
       "with campaign Spring clinics and the test run of campaign Winter clinics on every number",
     );
     expect(say({ campaign, at, kind: "released", channel: "sms", track: one("SMS track"), after: one("Email track"), because: "skipped" })).toEqual(["SMS track started", "It starts after the email track, which was skipped for this lead.", null]);
@@ -143,7 +143,7 @@ describe("every track state the server sends after an unworked skip has its own 
       not_started: "Email track 2 has not started.",
     };
     for (const [state, sentence] of Object.entries(table) as [DependentTrackState["state"], string][]) {
-      const a = (state === "waiting" ? { track, state, startsAt: "2026-11-14T01:05:00.000Z" } : { track, state, startsAt: null, owners: [{ name: "Spring clinics", test: false }], channel: "sms" }) as { track: typeof track } & DependentTrackState;
+      const a = (state === "waiting" ? { track, state, startsAt: "2026-11-14T01:05:00.000Z" } : { track, state, startsAt: null, owners: [{ name: "Spring clinics", test: false, lead: null }], channel: "sms" }) as { track: typeof track } & DependentTrackState;
       expect(dependentLine(a, "Europe/London"), state).toBe(sentence);
     }
     // Only waiting and held, states the server read, say it will start.

@@ -9,8 +9,8 @@ import { stepDetail } from "./testRunWording.ts";
 import { conversationTaken, conversationUnsettled } from "./sms-wording.ts";
 
 /** A taken or unsettled conversation in its own channel's words (ADR 0004, Q41; council on b21af02, item 1). */
-const OWNERS = [{ name: "Spring clinics", test: false }];
-const OWNER_A = [{ name: "Owner A", test: false }];
+const OWNERS = [{ name: "Spring clinics", test: false, lead: null }];
+const OWNER_A = [{ name: "Owner A", test: false, lead: null }];
 const ZONE = "Europe/London";
 const AT = "2026-11-02T09:05:00.000Z";
 const CAMPAIGN = { id: "c1", name: "Autumn physio" };
@@ -77,6 +77,23 @@ describe("a conversation's sentences name its own channel", () => {
     for (const channel of CONVERSATION_CHANNELS) {
       expect(conversationTaken(OWNERS, channel)).not.toContain("undefined");
       expect(conversationUnsettled(OWNERS, channel)).not.toContain("undefined");
+    }
+  });
+});
+
+describe("a conversation's owner, as the stored cause gives it (verifier on f2824d4, item 9)", () => {
+  const owners = {
+    colleague: [{ name: "Autumn physio", test: false, lead: "Nia Cole" }],
+    colleagueUnnamed: [{ name: "Autumn physio", test: false, lead: "" }],
+    otherCampaign: [{ name: "Spring clinics", test: false, lead: null }],
+    testRun: [{ name: "Autumn physio", test: true, lead: null }],
+  } as const;
+  const said = { colleague: "with Nia Cole, a lead of this campaign, on every", colleagueUnnamed: "with another lead of this campaign on every", otherCampaign: "with campaign Spring clinics on every", testRun: "with the test run of campaign Autumn physio on every" } as const;
+  test.each(CONVERSATION_CHANNELS.flatMap((c) => (Object.keys(owners) as (keyof typeof owners)[]).map((o) => [c, o] as const)))("%s, owned by %s: named as such, never as a fixed phrase", (channel, owner) => {
+    for (const tense of ["past", "now"] as const) {
+      const sentence = conversationTaken(owners[owner], channel, "their", tense);
+      expect(sentence).toContain(said[owner]);
+      if (owner === "colleague" || owner === "colleagueUnnamed") expect(sentence).not.toMatch(/another campaign|campaign Autumn/);
     }
   });
 });

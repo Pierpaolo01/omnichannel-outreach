@@ -65,8 +65,11 @@ export async function stepEnvOf(
 
 /** Who owns the conversation a track was skipped for (question Q7 answered), as every read names them. Empty otherwise. */
 export function conversationOwnersView(s: SubjectState, trackId: string): ConversationOwnerView[] {
-  return conversationOwnersOf(s, trackId).map((o) => ({ name: o.name, test: o.test }));
+  return conversationOwnersOf(s, trackId).map((o) => ({ name: o.name, test: o.test, lead: o.lead }));
 }
+
+/** One owner, as the reads list them once each: the same campaign's run, or the same lead of this campaign. */
+export const sameOwner = (a: ConversationOwnerView, b: ConversationOwnerView): boolean => a.name === b.name && a.test === b.test && a.lead === b.lead;
 
 export function progressView(s: SubjectState, now: number, env: StepEnv = {}, when: typeof stepWhen = stepWhen): EnrollmentProgress {
   // The reply that stopped the lead, as stored when it stopped. A later text or email is kept on the
@@ -117,7 +120,7 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
           linkedin: track.channel === "linkedin" ? linkedinTrackView(s, track.id) : null,
           messageRequest: isMessageRequestChannel(track.channel) ? messageRequestTrackView(s, track.id, track.channel) : null,
           hold: heldReason(s, track.id, now),
-          holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test })),
+          holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test, lead: o.lead })),
           // When it goes, by the engine's own decision functions at this instant (ADR 0003 "Reads that say when").
           nextStep: nextStepOf(s, track.id, numberOf, now, env, when),
           steps: track.steps.map((st, i) => {
@@ -251,7 +254,7 @@ export async function needsAttention(
     if (!stored) continue;
     for (const p of stored.tracks) {
       const reason = heldReason(stored, p.trackId, now);
-      if (reason) heldTracks.push({ enrollmentId: id, trackId: p.trackId, channel: stored.campaign.definition.tracks.find((t) => t.id === p.trackId)?.channel ?? "email", reason, owners: unsettledOwnersOf(stored, p.trackId, now).map((o) => ({ name: o.name, test: o.test })) });
+      if (reason) heldTracks.push({ enrollmentId: id, trackId: p.trackId, channel: stored.campaign.definition.tracks.find((t) => t.id === p.trackId)?.channel ?? "email", reason, owners: unsettledOwnersOf(stored, p.trackId, now).map((o) => ({ name: o.name, test: o.test, lead: o.lead })) });
     }
     // Ticket 20a: as of the read, each due step the claim's step guard accepts now that waits for a transport the
     // provider cannot use yet, or for an account full for its reset day (not for a pacing slot or an in-flight place).
@@ -291,8 +294,9 @@ export async function needsAttention(
     if (!s) continue;
     const channels = [...new Set(liveTracksFor(s).map((t) => t.channel))].flatMap((channel) => {
       const why = unreachableWhy(s, channel);
-      // A taken conversation names its owners: every SMS track of the branch it skipped, once each.
-      const owners = why !== "conversation_taken" ? [] : liveTracksFor(s).filter((t) => t.channel === "sms").flatMap((t) => conversationOwnersView(s, t.id)).filter((o, i, all) => all.findIndex((x) => x.name === o.name && x.test === o.test) === i);
+      // A taken conversation names its owners, as each skip of this channel's tracks recorded them, once each (verifier on
+      // f2824d4, item 9): a colleague's lead in this campaign by name, another campaign by its name; never a fixed phrase.
+      const owners = why !== "conversation_taken" ? [] : liveTracksFor(s).filter((t) => t.channel === channel).flatMap((t) => conversationOwnersView(s, t.id)).filter((o, i, all) => all.findIndex((x) => sameOwner(x, o)) === i);
       return why === null ? [] : [{ channel, why, owners }];
     });
     noUsableChannel.push({ enrollmentId: id, campaignId: s.campaign.id, endedAt: new Date(s.subject.endedWall ?? now).toISOString(), channels });

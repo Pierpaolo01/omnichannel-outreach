@@ -17,7 +17,12 @@ export function whyNoSmsNumber(status: SmsProviderStatus | null): string | null 
 }
 
 /** "campaign Spring clinics", "the test run of campaign Spring clinics". */
-const ownerName = (o: ConversationOwnerView): string => (o.test ? `the test run of campaign ${o.name}` : `campaign ${o.name}`);
+/**
+ * One owner in words, from the stored cause (verifier on f2824d4, item 9): a lead of this same campaign by name, else the
+ * owning campaign or its test run. Never a fixed phrase.
+ */
+const ownerName = (o: ConversationOwnerView): string =>
+  o.lead !== null ? (o.lead === "" ? "another lead of this campaign" : `${o.lead}, a lead of this campaign,`) : o.test ? `the test run of campaign ${o.name}` : `campaign ${o.name}`;
 
 /**
  * Why an SMS track was skipped for a taken conversation (ADR 0003, question Q7 answered): the mobile was already in a

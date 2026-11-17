@@ -159,7 +159,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
       }
       else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && held(track.id) !== null) {
         const hold = held(track.id);
-        rows.push(hold === null ? { ...base, state: "due", at: iso(p.dueWall ?? 0) } : { ...base, state: "held", at: null, hold, holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test })) });
+        rows.push(hold === null ? { ...base, state: "due", at: iso(p.dueWall ?? 0) } : { ...base, state: "held", at: null, hold, holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test, lead: o.lead })) });
       } else if (waitsHere(track, step.id)) rows.push({ ...base, state: "due", at: null, ...waitsHere(track, step.id) });
       else if (live) rows.push({ ...base, state: "with_provider", at: live.handedWall === null ? null : iso(live.handedWall) });
       // A step of a track that finished without reaching it: skipped, with why its track finished (council on ffa202c, item 13).

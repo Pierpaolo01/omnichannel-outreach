@@ -1157,7 +1157,20 @@ export interface ConversationOwner {
   readonly name: string;
   /** The owner is that campaign's test run. */
   readonly test: boolean;
+  /**
+   * A lead of this same campaign owns it (verifier on f2824d4, item 9): its name as stored with the cause, "" when a cause
+   * stored before names were kept has none. Null when the owner is another campaign or a test run: the campaign is named.
+   */
+  readonly lead: string | null;
 }
+
+/** The owner as said: a lead of the subject's own campaign by its name, else the owner's campaign (item 9). */
+function ownerOf(state: SubjectState, c: { readonly owner: string; readonly ownerCampaignId: string | null; readonly ownerCampaignName: string | null; readonly ownerIsTest: boolean; readonly ownerLeadName?: string | null }): ConversationOwner | null {
+  if (c.ownerCampaignId === null || c.ownerCampaignName === null) return null;
+  const lead = !c.ownerIsTest && c.ownerCampaignId === state.campaign.id ? (c.ownerLeadName ?? "") : null;
+  return { campaignId: c.ownerCampaignId, name: c.ownerCampaignName, test: c.ownerIsTest, lead };
+}
+const sameOwnerAs = (a: ConversationOwner, b: ConversationOwner): boolean => a.campaignId === b.campaignId && a.test === b.test && a.lead === b.lead;
 
 /**
  * Who owned the conversation a track was skipped for (ADR 0003, question Q7 answered), once each, in the order the skip
@@ -1170,8 +1183,8 @@ export function conversationOwnersOf(state: SubjectState, trackId: string): Conv
   if (p?.finishReason !== "skipped_conversation_taken") return [];
   const owners: ConversationOwner[] = [];
   for (const c of p.conversationOwners ?? []) {
-    if (c.ownerCampaignId === null || c.ownerCampaignName === null) continue;
-    if (!owners.some((o) => o.campaignId === c.ownerCampaignId && o.test === c.ownerIsTest)) owners.push({ campaignId: c.ownerCampaignId, name: c.ownerCampaignName, test: c.ownerIsTest });
+    const o = ownerOf(state, c);
+    if (o && !owners.some((x) => sameOwnerAs(x, o))) owners.push(o);
   }
   return owners;
 }
@@ -1183,8 +1196,8 @@ export function conversationOwnersOf(state: SubjectState, trackId: string): Conv
 export function unsettledOwnersOf(state: SubjectState, trackId: string, now: number): ConversationOwner[] {
   const owners: ConversationOwner[] = [];
   for (const b of (blockedNumbers(state, trackId, now) ?? []).filter((x) => !isConversation(x))) {
-    if (b.ownerCampaignId === null || b.ownerCampaignName === null) continue;
-    if (!owners.some((o) => o.campaignId === b.ownerCampaignId && o.test === b.ownerIsTest)) owners.push({ campaignId: b.ownerCampaignId, name: b.ownerCampaignName, test: b.ownerIsTest });
+    const o = ownerOf(state, b);
+    if (o && !owners.some((x) => sameOwnerAs(x, o))) owners.push(o);
   }
   return owners;
 }
@@ -1301,6 +1314,7 @@ export function skipTakenConversations(state: SubjectState, now: number): Subjec
       ownerCampaignId: b.ownerCampaignId,
       ownerCampaignName: b.ownerCampaignName,
       ownerIsTest: b.ownerIsTest,
+      ownerLeadName: b.ownerLeadName ?? null,
     }));
     s = withTrack(finishTrack(s, track.id, "skipped_conversation_taken", leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now)), track.id, (t) => ({ ...t, conversationOwners: cause }));
   }

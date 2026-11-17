@@ -205,7 +205,7 @@ describe("leads left with no usable channel (question Q20's interim: they stay l
     expect(body("sms", "bad")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now their mobile number is marked wrong.");
     expect(body("call", "missing")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now they have no number to call.");
     // Question Q7 answered: a mobile in another campaign's text conversation names that campaign, in the one wording.
-    expect(noUsableChannelItem([ended("e1", SAM, "2026-11-15T08:00:00Z", [{ channel: "sms", why: "conversation_taken", owners: [{ name: "Spring clinics", test: false }] }])], TODAY, ZONE)?.body).toBe(
+    expect(noUsableChannelItem([ended("e1", SAM, "2026-11-15T08:00:00Z", [{ channel: "sms", why: "conversation_taken", owners: [{ name: "Spring clinics", test: false, lead: null }] }])], TODAY, ZONE)?.body).toBe(
       "In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now their mobile is in a text conversation with campaign Spring clinics on every number this campaign can use.",
     );
     expect(body("call", "bad")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now every number to call is marked wrong.");
@@ -271,7 +271,7 @@ describe("the order of Needs attention (ticket 20b): the prototype's, with the n
 
   test("a track waiting on another campaign's first text whose fate is not known yet says why (question Q7 answered, point 10)", () => {
     const empty = { overdueCallbacks: [], stalledInboxes: [], heldTracks: [], accountWaits: [], senderProblems: [], heldCapacity: [], anomalies: [], waitingForCapacity: [], noUsableChannel: [], waitingOnProvider: [], waitingOnTransport: [], sendingInterrupted: null };
-    const items = attentionItems({ ...empty, heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e1", trackId: "sms", channel: "sms", reason: "sms_conversation_unsettled", owners: [{ name: "Spring clinics", test: false }] }] }, { overdueCallbacks: [], userZone: ZONE, date: TODAY, carriedOver: 0, carriedOverLastDay: 0 });
+    const items = attentionItems({ ...empty, heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e1", trackId: "sms", channel: "sms", reason: "sms_conversation_unsettled", owners: [{ name: "Spring clinics", test: false, lead: null }] }] }, { overdueCallbacks: [], userZone: ZONE, date: TODAY, carriedOver: 0, carriedOverLastDay: 0 });
     // The lead and its campaign named, and linked to its record, where its row offers Skip (verifier on faac357, item 5).
     expect(items.map((i) => [i.title, i.body, i.action?.href])).toEqual([
       ["Pat Oneil is on hold in Clinics, London", "On hold because the first text from campaign Spring clinics to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet. Nothing is dropped.", "/leads/people/p1"],

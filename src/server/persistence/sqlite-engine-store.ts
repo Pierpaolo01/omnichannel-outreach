@@ -64,7 +64,7 @@ const machineZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
  * and each of them moves the conversations' version by trigger (migration 23); the others it reads only for a name or to
  * find the lead's destinations. A test reads both lists.
  */
-export const CONVERSATION_PAIRS_QUERY = `SELECT b.sender_number, b.recipient_key, b.owner_subject, COALESCE(e.campaign_id, tr.campaign_id) AS owner_campaign, c.name AS owner_campaign_name,
+export const CONVERSATION_PAIRS_QUERY = `SELECT b.sender_number, b.recipient_key, b.owner_subject, COALESCE(e.campaign_id, tr.campaign_id) AS owner_campaign, c.name AS owner_campaign_name, CASE WHEN e.id IS NULL THEN NULL ELSE COALESCE(op.display_name, oc.name) END AS owner_lead_name,
                 tr.id IS NOT NULL AS owner_is_test, COALESCE(e.ended, tr.ended) AS owner_ended,
                 (EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject AND w.account_id = b.sender_number AND w.destination = b.recipient_key
                   AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))
@@ -82,6 +82,8 @@ export const CONVERSATION_PAIRS_QUERY = `SELECT b.sender_number, b.recipient_key
          LEFT JOIN enrollments e ON e.id = b.owner_subject
          LEFT JOIN test_runs tr ON tr.id = b.owner_subject
          LEFT JOIN campaigns c ON c.id = COALESCE(e.campaign_id, tr.campaign_id)
+         LEFT JOIN people op ON op.id = e.person_id
+         LEFT JOIN companies oc ON oc.id = e.company_id
          WHERE b.released_at IS NULL
            AND (b.recipient_key IN (SELECT key FROM live_contact_details WHERE owner_kind = :kind AND owner_id = :owner AND channel = 'phone')
              OR b.recipient_key IN (SELECT value FROM json_each(:own))
@@ -1624,7 +1626,7 @@ export class SqliteEngineStore implements EngineStore {
         // The lead's LinkedIn profile is a destination of conversations too (ADR 0004, question Q41): its session's pairs.
         // Its message-request accounts too (ADR 0004 13.6): every social destination is one.
         .all({ kind: owner?.kind ?? "", owner: owner?.id ?? "", own: JSON.stringify(owner ? [] : details.filter((d) => d.mobile).map((d) => d.key)), profiles: JSON.stringify(details.filter((d) => isSocialChannel(d.channel)).map((d) => d.key)), subject: subjectId })
-        .map((b) => ({ channel: conversationChannelOf(strOrNull(b, "pair_channel")), sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, ownerSent: Number(b["owner_sent"]) === 1, ownerAnswered: Number(b["owner_answered"]) === 1 })),
+        .map((b) => ({ channel: conversationChannelOf(strOrNull(b, "pair_channel")), sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerLeadName: strOrNull(b, "owner_lead_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, ownerSent: Number(b["owner_sent"]) === 1, ownerAnswered: Number(b["owner_answered"]) === 1 })),
       lead: { zone, details, resolved, mergeData, phones, ...(importedProfile ? { importedProfile } : {}), ...(importedAccounts ? { importedAccounts } : {}) },
       markBad: [],
       accounts,

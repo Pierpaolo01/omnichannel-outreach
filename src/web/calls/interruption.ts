@@ -252,7 +252,7 @@ function unreachableLine(c: NeedsAttention["noUsableChannel"][number]["channels"
 }
 
 /** Each reason the read can give, as a cause of several leads' endings: a new reason fails typecheck here. */
-const CAUSE: Record<Why, string> = { missing: "a missing detail", bad: "a detail marked wrong", declined: "a decline on a call", conversation_taken: "another campaign’s conversation with them" };
+const CAUSE: Record<Why, string> = { missing: "a missing detail", bad: "a detail marked wrong", declined: "a decline on a call", conversation_taken: "a conversation another lead or campaign already holds with them" };
 
 /**
  * Leads left with no usable channel (`noUsableChannel`, most recently ended first): one entry. They stay listed while the
