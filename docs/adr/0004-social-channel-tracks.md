@@ -238,15 +238,15 @@ Each must be killed by a recorded seed in `pnpm check`, failing the invariant it
 | an acceptance applied as a reply | L6 | 0 |
 | the note allowance ignored (every invite carries its note) | L7 | 0 |
 | the expiry finishes the track at the instant evaluated, not at its deadline (the laptop off across a deadline shows it) | L8 | 10 |
-| `connected` ignored, by the connection check (taken as clear) and by the pre-send check | L9 | 1 |
+| `connected` ignored, by the connection check (taken as clear) and by the pre-send check | L9 | 2 (1 until ticket 27's fifth stream) |
 | the expiry ends the lead instead of finishing the track | L10 | 0 |
 | the connection gate covers only the first message | L2 | 24 |
 | a LinkedIn pair owned by another subject is ignored (in evaluation, the connection check, the account choice and the handover, and the session's "pending" for the owner's own invite with it) | L11 | 10 |
 | a reply marked where nothing reached the person | L12 | 0 |
 | a taken LinkedIn pair is held, not skipped | L13 | 11 |
-| a pending invitation from elsewhere is sent again | L1 | 0 |
+| a pending invitation from elsewhere is sent again | L1 | 6 (0 until ticket 27's fifth stream) |
 | a removed connection marks the profile bad | L14 | 16 |
-| a withheld release (the release rule leaves every pair taken) | L15 | 0 |
+| a withheld release (the release rule leaves every pair taken) | L15 | 11 (0 until ticket 27's fifth stream) |
 | an edited wait keeps the old deadline | L8 | 6 |
 | a binding lookup ignores the channel (the LinkedIn session taken from any pair the subject owns) | L13 here (the invite waits for ever on the SMS number); L16 in the SMS track runs, seed 3 from their SEED | 11 |
 | a check's result is stored for the track, not the session (and asked of the first healthy session only) | L17 | 2 |
@@ -533,9 +533,11 @@ Each item was reproduced first through HTTP, in `linkedin-inmail.test.ts` ("cred
 - **The record's own error (seed 24024 again, L22 at the handover):** a report and a handover at the same instant. The simulated provider now orders its report and handover logs with one sequence, and the record judges a handover by the last report before it.
 
 **The generated runs** draw, from a fourth stream:
-- a running edit of the messages while an InMail is chosen (the first message removed, a message added, two reordered);
-- a lead with its InMail chosen stopped, then restarted;
+- a running edit of the messages while an InMail is chosen (the first message removed, a message added, two reordered), only in a campaign where no switch-off is drawn;
+- a lead with its InMail chosen stopped while another lead on its session is chosen or waiting for its deadline. In a share of runs the session's credits are then set to one, and the lead is restarted a minute after the other lead's choice, before its InMail can go;
 - the session's report changed between an InMail's claim and its handover (no credit, or no plan), with credits returning a day later.
+
+A fifth stream builds, in 30% of runs, a contested credit. The first session reports two credits; the first campaign has the fallback on, a weekday morning window and people who neither accept nor refuse. The other draws on that campaign and session are made and then set aside, so the streams stay put. In these runs, InMails chosen at a deadline wait together, and a stop and restart meets a credit another lead holds. In half of them the first message is removed once an InMail there is chosen. Those InMails go when the morning window opens, so at the send the first live message is a follow-up the user kept. Before this draw, the mutation of item 1 was killed only through the record's error at seed 24024 (below), and by no offset from 0 to 50 once that error was fixed.
 
 New invariants, asserted by the record:
 - **L22 at the handover:** an InMail is handed over only on a report read by then that has a plan and a credit free.
@@ -547,6 +549,30 @@ Mutations, with seeds recorded in `linkedin-mutations.ts`:
 - "the replaced step is found among the live steps at the handover" (L23);
 - "a restart restores a commitment without acquiring" (L27);
 - "the handover does not re-read the report" (L22).
+
+**Seeds after the draws** (offsets from 24000, searched over 0 to 50 on 17 November 2026). With the new streams, every InMail mutation was searched again, since the earlier seeds no longer drew the same runs:
+
+| Mutation | Invariant | Seed |
+|---|---|---|
+| an InMail sent is sent again | L18 | 0 |
+| a switched-off InMail is still sent | L19 | 16 |
+| the InMail goes before the expiry | L20 | 0 |
+| an acceptance does not stop the InMail | L21 | 18 |
+| every session taken as eligible for InMail | L22 | 7 |
+| the first message goes after the InMail | L23 | 0 |
+| a refused InMail leaves the track running | L24 | 42 |
+| a switch-off does not reach a chosen InMail | L25 | 16 |
+| the replaced step is found among the live steps at the handover | L23 | 0 |
+| a restart restores a commitment without acquiring | L27 | 0 |
+| the handover does not re-read the report | L22 | 18 |
+
+`LINKEDIN_FIXED_SEEDS` is now a greedy cover by cost of every behaviour the runs name over offsets 0 to 50, keeping 15, 46, 69, 73 and 93: 4, 8, 15, 16, 18, 30, 32, 42, 46, 50, 69, 73 and 93. With the new draws, 24 and 29 alone took over two minutes; the new set takes about two minutes in all. A switch-off while an InMail waits is reached by no offset from 0 to 50, so it is pinned by its example test ("switched off while the InMail is chosen and not yet handed over") and listed in `LINKEDIN_OTHER_FEATURES`.
+
+The removal changes offsets 0 and 1, the contested runs that draw it. Three earlier mutations were killed only there, and are now killed at seeds found by the same search: "`connected` ignored" (L9) at 2, "a pending invitation from elsewhere is sent again" (L1) at 6, and "a withheld release" (L15) at 11 (10.3's table).
+
+**The record's own errors, found on offsets 0 to 50 and fixed in the record:**
+- **Seeds 24044 and 24049 (L8 at an edit of the wait):** the record checked the deadline of a lead whose reply had been marked. That lead's clock stopped with it, so the record skips ended leads there, as its check after the drain already did.
+- **Seed 24024 (L23's other side):** a skip drawn for a lead waiting for acceptance was not noted among the record's skips, so two messages the user skipped read as kept. Every skip is now noted.
 
 ## The review of `194fc44` (council, review bot and verifier, 16 November 2026)
 

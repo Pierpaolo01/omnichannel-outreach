@@ -147,7 +147,11 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const rnd4 = random(seed * 13 + 31);
   // A fifth stream decides a run built for a contested credit (L27): the first session with two credits, the first campaign's
   // fallback on and a short weekday morning window, so InMails chosen at a midnight deadline wait together for it.
-  const contested = random(seed * 17 + 37)() < 0.3;
+  const fifth = random(seed * 17 + 37);
+  const contested = fifth() < 0.3;
+  // In half of those, the first message is removed once an InMail there is chosen: those InMails go at the window's
+  // opening, so the first live message at the send is then a follow-up the user kept (item 1's case).
+  const removeWhenChosen = contested && fifth() < 0.5;
   const features = new Set<string>();
   const problems: string[] = [];
   const problem = (text: string) => {
@@ -371,6 +375,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const contestCredit = rnd4() < 0.6;
   /** Campaigns drawn for an edit or a switch-off while an InMail is chosen: the drawn stop leaves their leads alone. */
   const noStop = new Set<number>([...editWhenChosen.keys(), ...offWhenChosen]);
+  // Set after `noStop`: the contest's stop and restart stay on campaign 0.
+  if (removeWhenChosen) editWhenChosen.set(0, "remove");
   const restarts: { id: string; at: number }[] = [];
   const drawnAtClaim: "no_credit" | "no_plan" | null = rnd4() < 0.35 ? (rnd4() < 0.7 ? "no_credit" : "no_plan") : null;
   let reportAtClaim = contested ? null : drawnAtClaim;
@@ -851,6 +857,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
         }
         return tr;
       });
+      // A track with too few messages for the edit is left alone.
+      if (JSON.stringify(tracks) === JSON.stringify(stored.tracks)) continue;
       if ((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, tracks })).status === 200) {
         noteSwitch(l.campaign, { ...stored, tracks });
         features.add(`a-running-edit-while-an-inmail-is-chosen:${kind}`);
@@ -1081,7 +1089,11 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       if (waiting.length > 0 && rnd2() < 0.6) {
         const target = pickOf(rnd2, waiting);
         const r = await h.request("POST", `/api/enrollments/${target.id}/controls`, { requestId: `g-${++requestNo}`, action: "skip" });
-        if (r.status === 200) features.add("a-skip-while-waiting-for-acceptance");
+        // Noted as every skip is, so the checks that read the record's skips see it (seed 24024: two messages skipped this way).
+        if (r.status === 200) {
+          skipped.set(target.id, [...(skipped.get(target.id) ?? []), h.clock]);
+          features.add("a-skip-while-waiting-for-acceptance");
+        }
         return;
       }
       const st = await h.store.engine.subject(lead.id, h.clock);
@@ -1139,8 +1151,9 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
             const t = st?.tracks.find((x) => x.trackId === c.li.id);
             const invite = h.linkedin.deliveryLog.find((x) => x.subjectId === l.id && x.action === "invite" && x.visibleAt !== Infinity);
             const sent = st?.results.find((r) => r.trackId === c.li.id && r.stepId === c.li.steps[0]!.id && r.result === "sent");
-            // A lead whose InMail fallback the expiry already judged waits no more (13.3): its deadline is spent.
-            if (!st || !t || !invite || !sent || t.finishedAt !== null || (t.connection ?? null) !== null || t.acceptBy == null || (t.inmail ?? null) !== null) continue;
+            // A lead whose InMail fallback the expiry already judged waits no more (13.3): its deadline is spent. An ended lead's
+            // clock stopped with it, so its deadline is not the record's to work out (seeds 24044, 24049: a reply marked).
+            if (!st || st.subject.ended !== null || !t || !invite || !sent || t.finishedAt !== null || (t.connection ?? null) !== null || t.acceptBy == null || (t.inmail ?? null) !== null) continue;
             const { span } = deadlineOf(l, invite.at, h.clock);
             if (t.acceptBy !== sent.at + span) problem(`L8: after the wait was edited to ${days} days at ${iso(h.clock)}, ${l.id}'s deadline is ${t.acceptBy - sent.at} ms of its clock after the send, not ${span}`);
             else features.add("a-deadline-checked-at-an-edit");

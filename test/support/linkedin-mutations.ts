@@ -71,8 +71,8 @@ function flag<K extends Flag>(name: K, value: (typeof progressRules)[K]): () => 
   };
 }
 
-/** The InMail mutations' killing seed offsets (ticket 27), found over offsets 0 to 29; ADR 0004 13.11 records them. */
-const INMAIL_SEEDS = { L18: 24, L19: 16, L20: 7, L21: 18, L22: 0, L23: 24, L24: 18, L25: 7, replaced: 0, restart: 0, handover: 0 } as const;
+/** The InMail mutations' killing seed offsets (ticket 27), searched again over offsets 0 to 50 after the council's draws; ADR 0004 13.16 records them. */
+const INMAIL_SEEDS = { L18: 0, L19: 16, L20: 0, L21: 18, L22: 7, L23: 0, L24: 42, L25: 16, replaced: 0, restart: 0, handover: 18 } as const;
 
 /** The seed offset that reaches a step no session has any allowance for (the search's 24015 on a6c1700). */
 const NO_ALLOWANCE_SEED = 15;
@@ -195,7 +195,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // nor skipped.
   "an existing connection is ignored": {
     invariant: "L9",
-    seed: 1,
+    seed: 2,
     rules: {
       inviteAlreadyConnected: (state) => state,
       connectionChecked: (state, trackId, session, destination, answer, now) => DEFAULT_RULES.connectionChecked(state, trackId, session, destination, answer === "connected" ? "clear" : answer, now),
@@ -250,7 +250,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // L1 (Q42): the check's and the handover's "pending" taken as clear: an invite pending from elsewhere is sent again.
   "a pending invitation from elsewhere is sent again": {
     invariant: "L1",
-    seed: 0,
+    seed: 6,
     rules: { outstandingInviteStops: () => false },
   },
   // L14 (Q37): a message refused because the connection is gone marks the profile bad.
@@ -272,7 +272,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
   // L15 (Q41): a pair whose invite was withdrawn and never accepted, or to which nothing went, is never released.
   "a withheld release": {
     invariant: "L15",
-    seed: 0,
+    seed: 11,
     rules: { releaseUnsent: (state) => state },
   },
   // L8 (council on b21af02, item 8): an edit of the wait leaves every waiting deadline where it was.
