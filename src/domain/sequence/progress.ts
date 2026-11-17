@@ -229,7 +229,7 @@ export function end(state: SubjectState, reason: EndReason, now: number): Subjec
   let ended: SubjectState = { ...state, subject: { ...state.subject, ended: reason, endedAt: leadNow(state.subject.clock, now), endedWall: now } };
   // A lead stopped or ended releases the credits its InMails held and had not used (ADR 0004 13.5; council on 8b0c846, item
   // 7): a restart acquires again, and never takes back what another lead holds by then.
-  if (rules.stopReleasesHolding) for (const p of state.tracks) ended = releaseInmailHold(ended, p.trackId);
+  for (const p of state.tracks) ended = releaseInmailHold(ended, p.trackId);
   return synced(quiesce(ended), now);
 }
 
@@ -317,7 +317,7 @@ export const rules = {
       // After an InMail known sent, a step that reads as the first message is a follow-up the user kept: the replaced first
       // message itself was skipped at the InMail's send, and an edit that removes it promotes the next one (review bot on b49a71b).
       case "first_message":
-        return !connected && (progress.inmail !== "sent" || stepId === (progress.inmailReplaces ?? null));
+        return !connected && (progress.inmail !== "sent" || (rules.inmailTakesFirstPlace && stepId === (progress.inmailReplaces ?? null)));
       case "follow_up":
         return !connected && progress.inmail !== "sent";
       default: {
@@ -339,8 +339,11 @@ export const rules = {
   switchOffReachesChosen: true,
   inmailOffWhenRemoved: true,
   inmailTakesFirstPlace: true,
-  /** A stop releases an InMail's credit (13.5); false only for the mutation "a restart restores a commitment without acquiring". */
-  stopReleasesHolding: true,
+  /**
+   * A restart acquires a credit only if one is free (13.5); false only for the mutation "a restart restores a commitment
+   * without acquiring", which re-takes it at the place it had (its InMail's due time), ahead of a lead that chose since.
+   */
+  restartAcquires: true,
   /** The handover re-reads the session's report (13.5, predicate 20); false only for the mutation that does not. */
   handoverRechecksBacking: true,
   /** The replaced first message is named at the choice (13.15); false only for the mutation that finds it among the live steps at the send. */
@@ -1554,7 +1557,8 @@ export function inmailBacking(state: SubjectState, trackId: string, now: number)
   const standing = session === null ? undefined : state.accounts[session]?.inmail;
   if (!standing || !planned(standing)) return "no_plan";
   if (!reportFresh(standing, now)) return "stale_report";
-  if ((p?.inmailHoldWall ?? null) === null) return "no_holding";
+  // Only the mutation that sends the InMail before the expiry (which acquires nothing) takes a missing holding as backed.
+  if ((p?.inmailHoldWall ?? null) === null) return rules.inmailWaitsForExpiry ? "no_holding" : "backed";
   const key = holdingKey(state.subject.id, trackId);
   const own = { key, acquiredWall: p?.inmailHoldWall ?? 0 };
   const ranked = [...standing.holdings.filter((h) => h.key !== key), own].sort(byAcquisition);
@@ -1598,7 +1602,8 @@ export function reacquireInmailHolds(state: SubjectState, now: number): SubjectS
   let s = state;
   for (const p of state.tracks) {
     if (p.inmail !== "chosen" || p.finishedAt !== null || (p.inmailHoldWall ?? null) !== null || !p.inmailSession) continue;
-    if (inmailAvailability(s.accounts[p.inmailSession], now) === "free") s = acquireInmailHold(s, p.trackId, p.inmailSession, now);
+    if (!rules.restartAcquires) s = acquireInmailHold(s, p.trackId, p.inmailSession, 0);
+    else if (inmailAvailability(s.accounts[p.inmailSession], now) === "free") s = acquireInmailHold(s, p.trackId, p.inmailSession, now);
   }
   return s;
 }

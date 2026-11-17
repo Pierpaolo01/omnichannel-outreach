@@ -145,6 +145,9 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const rnd3 = random(seed * 11 + 29);
   // A fourth stream schedules an early switch-off (L19's case): the other streams' draws are unchanged.
   const rnd4 = random(seed * 13 + 31);
+  // A fifth stream decides a run built for a contested credit (L27): the first session with two credits, the first campaign's
+  // fallback on and a short weekday morning window, so InMails chosen at a midnight deadline wait together for it.
+  const contested = random(seed * 17 + 37)() < 0.3;
   const features = new Set<string>();
   const problems: string[] = [];
   const problem = (text: string) => {
@@ -175,8 +178,9 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   for (const s of sessions) {
     const roll = rnd3();
     const report = roll < 0.4 ? { plan: "premium" as const, credits: Math.floor(rnd3() * 4) } : roll < 0.65 ? { plan: "sales_navigator" as const, credits: Math.floor(rnd3() * 4) } : roll < 0.85 ? { plan: "none" as const, credits: 0 } : null;
-    inmailPlans.set(s.id, report);
-    if (report) (s as { inmail?: { plan: "premium" | "sales_navigator" | "none"; credits: number } }).inmail = { ...report };
+    const given = contested && s === sessions[0] ? { plan: "premium" as const, credits: 2 } : report;
+    inmailPlans.set(s.id, given);
+    if (given) (s as { inmail?: { plan: "premium" | "sales_navigator" | "none"; credits: number } }).inmail = { ...given };
   }
   const h = new EngineHarness({
     start: START,
@@ -203,8 +207,11 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       ...Array.from({ length: messages }, (_, i): StepDefinition => ({ id: `c${ci}-m${i + 1}`, waitDays: i === 0 ? Math.floor(rnd() * 2) : Math.floor(rnd() * 3), subject: "", body: `Message ${i + 1}, {{first_name|there}}.`, threading: "new_subject", removed: false })),
     ];
     // The InMail fallback switched on in a share of campaigns, from the third stream: an InMail step right after the invite.
-    if (rnd3() < 0.45) steps.splice(1, 0, { id: `c${ci}-im`, waitDays: 0, subject: "", body: "An InMail, {{first_name|there}}.", threading: "new_subject", removed: false, role: "inmail" });
-    const li: TrackDefinition = { id: `c${ci}-li`, channel: "linkedin", branch: "main", window: windowOf(rnd), steps, start: { kind: "entry" }, removed: false, acceptWaitDays: 1 + Math.floor(rnd() * 4) };
+    const drawnOn = rnd3() < 0.45;
+    if (drawnOn || (contested && ci === 0)) steps.splice(1, 0, { id: `c${ci}-im`, waitDays: 0, subject: "", body: "An InMail, {{first_name|there}}.", threading: "new_subject", removed: false, role: "inmail" });
+    const drawnWindow = windowOf(rnd);
+    const window = contested && ci === 0 ? [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 12 })) : drawnWindow;
+    const li: TrackDefinition = { id: `c${ci}-li`, channel: "linkedin", branch: "main", window, steps, start: { kind: "entry" }, removed: false, acceptWaitDays: 1 + Math.floor(rnd() * 4) };
     const withEmail = rnd() < 0.5;
     const email: TrackDefinition | null = withEmail
       ? { id: `c${ci}-em`, channel: "email", branch: "main", window: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 })), steps: [{ id: `c${ci}-e1`, waitDays: 0, subject: "Hello {{first_name|there}}", body: "An email.", threading: "new_subject", removed: false }], start: rnd() < 0.5 ? { kind: "entry" } : { kind: "after", trackId: li.id, delayDays: Math.floor(rnd() * 2) }, removed: false }
@@ -266,8 +273,10 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       if (script?.sessions) features.add("an-answer-of-one-session");
       // A recipient LinkedIn refuses an InMail for (their settings), from the third stream.
       if (script && rnd3() < 0.15) Object.assign(script, { refusesInmail: true });
-      leads.push({ campaign: ci, name: `Lead${personNo} Fictional`, profile, email: `lead${personNo}@fictional.example`, zone, script, id: "" });
-      if (profile && script) h.linkedin.profiles.set(profile, { ...script });
+      // A contested run's first campaign: people who neither accept nor refuse, so InMails chosen together wait together.
+      const kept = contested && ci === 0 && profile !== null ? {} : script;
+      leads.push({ campaign: ci, name: `Lead${personNo} Fictional`, profile, email: `lead${personNo}@fictional.example`, zone, script: kept, id: "" });
+      if (profile && kept) h.linkedin.profiles.set(profile, { ...kept });
       (leads.at(-1) as Lead & { cell?: string }).cell = cell;
     }
   }
@@ -349,10 +358,22 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
    * with its InMail chosen stopped and restarted later; and the session's report changed between an InMail's claim and its
    * handover (no credit, or no plan), with credits returning a day later.
    */
-  const editWhenChosen = new Map<number, "remove" | "insert" | "reorder">(campaigns.flatMap((c, i) => (fallbackOn(c.definition, i) && rnd4() < 0.5 ? [[i, pickOf(rnd4, ["remove", "remove", "insert", "reorder"] as const)] as const] : [])));
-  let stopWhenChosen = rnd4() < 0.5;
+  // Only where no switch-off is drawn, which would cancel the InMail the edit is about.
+  const editWhenChosen = new Map<number, "remove" | "insert" | "reorder">(campaigns.flatMap((c, i) => (fallbackOn(c.definition, i) && !earlyOff.has(i) && !offWhenChosen.has(i) && rnd4() < 0.8 ? [[i, pickOf(rnd4, ["remove", "remove", "insert", "reorder"] as const)] as const] : [])));
+  let stopWhenChosen = rnd4() < 0.7 || contested;
+  // A contested run leaves campaign 0 and the first session to the contest: its other draws are made and then dropped.
+  if (contested) {
+    earlyOff.delete(0);
+    offWhenChosen.delete(0);
+    editWhenChosen.delete(0);
+  }
+  /** With the drawn stop, the session's credits set to one, so the lead that chooses during the stop holds the last (L27). */
+  const contestCredit = rnd4() < 0.6;
+  /** Campaigns drawn for an edit or a switch-off while an InMail is chosen: the drawn stop leaves their leads alone. */
+  const noStop = new Set<number>([...editWhenChosen.keys(), ...offWhenChosen]);
   const restarts: { id: string; at: number }[] = [];
-  let reportAtClaim: "no_credit" | "no_plan" | null = rnd4() < 0.35 ? (rnd4() < 0.7 ? "no_credit" : "no_plan") : null;
+  const drawnAtClaim: "no_credit" | "no_plan" | null = rnd4() < 0.35 ? (rnd4() < 0.7 ? "no_credit" : "no_plan") : null;
+  let reportAtClaim = contested ? null : drawnAtClaim;
   const reportsBack: { session: string; at: number; plan: "premium" | "sales_navigator" | "none"; credits: number }[] = [];
   /** The user spending a session's credits by hand (its credits at 0 from then): when, by session. */
   const creditDrops: { session: string; at: number }[] = [];
@@ -689,7 +710,12 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       if (went && tp.finishReason === "invite_not_accepted") problem(`L25: ${lead.id}'s InMail went, and its track took the withdrawal path`);
       // L25, after the drain: a chosen InMail not yet handed over, with the fallback switched off since, takes the withdrawal path.
       const handed = li.handoverLog.some((x) => x.subjectId === lead.id && x.action === "inmail");
-      if (drained && state === "chosen" && !handed && !fallbackAt(lead.campaign, now) && tp.finishedAt === null && st.subject.ended === null) problem(`L25: ${lead.id}'s InMail is still chosen though the fallback was switched off before it went`);
+      // Any switch-off after the choice and before a handover reaches the InMail then, whatever the switch does later.
+      const handedAt = li.handoverLog.find((x) => x.subjectId === lead.id && x.action === "inmail")?.at ?? Infinity;
+      const judged2 = outages.find((o) => o.from <= deadline && deadline < o.to)?.to ?? deadline;
+      const offBefore = (switches.get(lead.campaign) ?? []).find((x) => !x.on && x.at > judged2 && x.at < handedAt);
+      const runningAt = (at: number) => !(stops.get(lead.id) ?? []).some((x) => x.from <= at && (x.to === null || at < x.to)) && !(marked.get(lead.id) !== undefined && (marked.get(lead.id) ?? Infinity) <= at);
+      if (drained && offBefore && (state === "chosen" || state === "sent") && runningAt(offBefore.at)) problem(`L25: ${lead.id}'s InMail is ${state} though the fallback was switched off at ${iso(offBefore.at)}, after its choice and before any handover`);
       if (state === "switched_off") features.add("an-inmail-switched-off-before-it-went");
       if (state === "accepted") features.add("an-acceptance-before-the-inmail-went");
       // L23, after the drain: the first message never follows an InMail (it took its place).
@@ -707,6 +733,14 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
         const kept = modelled.filter((s) => s.role !== "inmail" && !s.removed).slice(1).map((s) => s.id).filter((id) => id !== first && track?.steps.some((s) => s.id === id && !s.removed));
         const untouched = st.subject.ended === null && !stopped.has(lead.id) && !marked.has(lead.id) && !(skipped.get(lead.id)?.length) && tp.finishReason === "completed";
         for (const id of untouched ? kept : []) if (!li.deliveryLog.some((x) => x.subjectId === lead.id && x.stepId === id)) problem(`L23: ${lead.id}'s follow-up ${id} never went after its InMail, its track completed`);
+        // And without waiting for completion: a kept follow-up that never went while a later one, in today's order, did.
+        if (!(skipped.get(lead.id)?.length)) {
+          const order = (track?.steps ?? []).filter((s) => !s.removed && kept.includes(s.id)).map((s) => s.id);
+          const sentIds = new Set(li.deliveryLog.filter((x) => x.subjectId === lead.id).map((x) => x.stepId));
+          order.forEach((id, i) => {
+            if (!sentIds.has(id) && order.slice(i + 1).some((later) => sentIds.has(later))) problem(`L23: ${lead.id}'s follow-up ${id} never went, though a later one did after the InMail`);
+          });
+        }
       }
     }
     if (drained) await checkCredits();
@@ -750,7 +784,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           const ib = li.deliveryLog.find((x) => x.subjectId === b.id && x.action === "invite");
           if (b.id === a.id || !tb || !ib || senderOf(b) !== senderOf(a) || (tb.inmail !== "chosen" && tb.inmail !== "sent")) continue;
           const db = judgedDeadline(b, ib.at);
-          if (!(db > stop.from && db < stop.to)) continue;
+          // Chosen before the restart (during the stop, or before it while the stopped lead held the credit).
+          if (!(db < stop.to)) continue;
           features.add("a-restart-after-another-took-a-credit");
           if (inmailed(a) && !inmailed(b) && running(b)) problem(`L27: ${a.id}, restarted at ${iso(stop.to)}, had its InMail sent while ${b.id}'s, chosen at ${iso(db)} during its stop, still waits`);
         }
@@ -770,6 +805,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     for (const r of [...restarts]) {
       if (r.at > h.clock) continue;
       restarts.splice(restarts.indexOf(r), 1);
+      // Already restarted by the run's own restart event, or ended otherwise since: nothing to restart.
+      if (!stopped.has(r.id)) continue;
       if ((await h.request("POST", `/api/enrollments/${r.id}/controls`, { requestId: `g-${++requestNo}`, action: "resume_from_next_step" })).status === 200) {
         restarted.set(r.id, h.clock);
         stopped.delete(r.id);
@@ -819,14 +856,54 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
         features.add(`a-running-edit-while-an-inmail-is-chosen:${kind}`);
       }
     }
-    if (stopWhenChosen && chosen.length > 0) {
+    // A lead whose session another lead still waits on (its deadline ahead, its fallback on): the case L27 is about.
+    const partnerDeadline = async (l: Lead): Promise<number> => {
+      const session = h.linkedin.deliveryLog.find((x) => x.subjectId === l.id && x.action === "invite")?.sender;
+      let next = Infinity;
+      for (const o of leads) {
+        if (o.id === l.id || h.linkedin.deliveryLog.find((x) => x.subjectId === o.id && x.action === "invite")?.sender !== session) continue;
+        // Another lead's InMail chosen and waiting now (the common case: one session, waits ending together, a window shut).
+        if (chosen.some((x) => x.id === o.id)) return h.clock;
+        if (!fallbackAt(o.campaign, h.clock)) continue;
+        const ot = (await h.store.engine.subject(o.id, h.clock))?.tracks.find((x) => x.trackId === campaigns[o.campaign]!.li.id);
+        if (ot?.acceptByWall != null && (ot.inmail ?? null) === null && ot.finishedAt === null && (ot.connection ?? null) === null && ot.acceptByWall > h.clock) next = Math.min(next, ot.acceptByWall);
+      }
+      return next;
+    };
+    const stoppable: Lead[] = [];
+    for (const x of chosen) if (!noStop.has(x.campaign) && Number.isFinite(await partnerDeadline(x))) stoppable.push(x);
+    if (stopWhenChosen && stoppable.length > 0) {
       stopWhenChosen = false;
-      const l = chosen[0]!;
+      const l = stoppable[0]!;
       const r = await h.request("POST", `/api/enrollments/${l.id}/controls`, { requestId: `g-${++requestNo}`, action: "stop" });
       if (r.status === 200 || (await h.store.engine.subject(l.id, h.clock))?.subject.ended === "stopped_manually") {
         stopped.set(l.id, h.clock);
         stops.set(l.id, [...(stops.get(l.id) ?? []), { from: h.clock, to: null }]);
-        restarts.push({ id: l.id, at: h.clock + Math.floor((0.5 + rnd4() * 1.5) * DAY) });
+        // The event is scheduled from what the run observes (the other leads' deadlines on this session); the checks stay the
+        // record's own. Restart after the next of them, so another lead may choose while this one is stopped.
+        const session = h.linkedin.deliveryLog.find((x) => x.subjectId === l.id && x.action === "invite")?.sender;
+        // Restarted just after the other lead's deadline (a minute after the stop when it is chosen already), while its InMail
+        // still waits for its window or its sender's next slot.
+        const partner = await partnerDeadline(l);
+        if (contestCredit && session) {
+          const was = h.linkedin.sessions.get(session)?.inmail;
+          if (was && (was.plan === "premium" || was.plan === "sales_navigator")) {
+            await storeReport(session, { plan: was.plan, credits: 1 });
+            features.add("a-credit-contested-by-a-stop");
+          }
+        }
+        // Restart a minute after the other lead's InMail is chosen (now, or at its deadline), before it can go, so the restart
+        // meets a credit that lead holds. The event moves the clock itself, to be there at that moment.
+        {
+          await h.advanceTo(Math.max(h.clock, partner) + MIN);
+          if ((await h.request("POST", `/api/enrollments/${l.id}/controls`, { requestId: `g-${++requestNo}`, action: "resume_from_next_step" })).status === 200) {
+            restarted.set(l.id, h.clock);
+            stopped.delete(l.id);
+            const open = (stops.get(l.id) ?? []).find((x) => x.to === null);
+            if (open) open.to = h.clock;
+            features.add("a-lead-with-a-chosen-inmail-restarted");
+          }
+        }
         features.add("a-lead-with-a-chosen-inmail-stopped");
       }
     }
@@ -853,6 +930,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     const ci = Math.floor(rnd3() * campaigns.length);
     const c = campaigns[ci]!;
     if (roll < 0.05) {
+      if (contested && ci === 0) return;
       const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
       const on = fallbackOn(stored, ci);
       const text = roll < 0.015 && on;
@@ -872,7 +950,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     }
     const s = pickOf(rnd3, sessions);
     const standing = h.linkedin.sessions.get(s.id)?.inmail;
-    if (standing && standing.credits > 0) {
+    if (standing && standing.credits > 0 && !(contested && s === sessions[0])) {
       standing.credits = 0;
       creditDrops.push({ session: s.id, at: h.clock });
       features.add("inmail-credits-spent-by-hand");

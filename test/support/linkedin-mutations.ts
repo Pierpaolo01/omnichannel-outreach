@@ -45,7 +45,7 @@ function connectedAtTheSend(s: SubjectState): SubjectState {
 }
 
 /** A swap of one of progress.ts's rule flags for a replay, undone after it. */
-type Flag = "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession" | "conversationKeysOwnOnly" | "inmailJudgesStanding" | "inmailWaitsForExpiry" | "acceptanceSkipsInmail" | "refusedInmailEndsTrack" | "switchOffReachesChosen" | "inmailOffWhenRemoved" | "inmailTakesFirstPlace" | "stopReleasesHolding" | "handoverRechecksBacking" | "replacedNamedAtChoice";
+type Flag = "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession" | "conversationKeysOwnOnly" | "inmailJudgesStanding" | "inmailWaitsForExpiry" | "acceptanceSkipsInmail" | "refusedInmailEndsTrack" | "switchOffReachesChosen" | "inmailOffWhenRemoved" | "inmailTakesFirstPlace" | "restartAcquires" | "handoverRechecksBacking" | "replacedNamedAtChoice";
 /** Several flags swapped at once for one replay, undone after it. */
 function flags(values: Partial<Record<Flag, boolean>>): () => () => void {
   return () => {
@@ -390,12 +390,12 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     rules: {},
     patch: flags({ replacedNamedAtChoice: false }),
   },
-  // L27: a stop keeps the InMail's credit, so a restart has it back without acquiring, ahead of the lead that chose since.
+  // L27: a restart re-takes its InMail's credit without acquiring, at the head of the line, ahead of a lead that holds it now.
   "a restart restores a commitment without acquiring": {
     invariant: "L27",
     seed: INMAIL_SEEDS.restart,
     rules: {},
-    patch: flags({ stopReleasesHolding: false }),
+    patch: flags({ restartAcquires: false }),
   },
   // L22: the handover does not read the session's report again, so a claim made before a report of zero still goes.
   "the handover does not re-read the report": {
