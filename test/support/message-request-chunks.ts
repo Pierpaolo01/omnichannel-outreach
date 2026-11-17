@@ -12,10 +12,11 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
  */
 export const MESSAGE_REQUEST_SEED = 25000;
 /**
- * Offsets from MESSAGE_REQUEST_SEED: a greedy cover of every behaviour below over offsets 0 to 99, all of which passed
- * unmutated on 17 November 2026 (one run of this new family, one worker).
+ * Offsets from MESSAGE_REQUEST_SEED: a cover of every behaviour below over offsets 0 to 99, all of which passed unmutated
+ * on 17 November 2026 after the record pinned each track's destination at its start (the review of f2824d4, item 8; one
+ * worker). The first four were the cover before it; 1 adds what the generator's changed draws took from them.
  */
-export const MESSAGE_REQUEST_FIXED_SEEDS: readonly number[] = [17, 63, 79, 91];
+export const MESSAGE_REQUEST_FIXED_SEEDS: readonly number[] = [1, 17, 63, 79, 91];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const MESSAGE_REQUEST_FEATURES: readonly string[] = [
   "a-campaign-paused",
@@ -40,6 +41,7 @@ export const MESSAGE_REQUEST_FEATURES: readonly string[] = [
   "a-session-with-no-allowance",
   "a-skip",
   "a-step-waiting-on-a-zero-allowance",
+  "a-started-track-whose-account-a-reimport-replaced",
   "a-stopped-lead-restarted",
   "an-account-changed-by-a-reimport",
   "an-account-marked-bad",
@@ -59,10 +61,12 @@ const FRESH_EVERY = 10;
 const freshFor = (mutation: { readonly invariant: string }): number => (mutation.invariant === "29" ? 1 : 0);
 const SEARCH_SEEDS = 100;
 /**
- * Each seed's own bound: about twenty times the slowest seed's time on CI's unit shard (17 November 2026: the LinkedIn
- * family's nine fixed seeds took 222 s together, the slowest about 40 s; the message-request family's four took 14 s).
+ * Each seed's own bound: the whole 30 minutes one case of all the fixed seeds had (verifier on f2824d4, item 11). Measured
+ * on 17 November 2026: on CI's unit shard the LinkedIn family's nine seeds took 222 s together and the message-request
+ * family's four 14 s; locally, on one worker at a load average near 30, the nine took 407 s, the slowest (24029) 188 s. A
+ * machine five times slower than that stays inside it seed by seed, where nine seeds in one case did not.
  */
-const SEED_LIMIT_MS = 900_000;
+const SEED_LIMIT_MS = 1_800_000;
 const MAX_SEEDS = 30;
 const RUN_WRITES = 3_000;
 const RUN_TICKS = 2_000;

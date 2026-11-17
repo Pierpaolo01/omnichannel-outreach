@@ -89,10 +89,12 @@ const FRESH_EVERY = 10;
 const freshFor = (mutation: { readonly invariant: string }): number => (mutation.invariant === "29" ? 1 : 0);
 const SEARCH_SEEDS = 100;
 /**
- * Each seed's own bound: about twenty times the slowest seed's time on CI's unit shard (17 November 2026: the LinkedIn
- * family's nine fixed seeds took 222 s together, the slowest about 40 s; the message-request family's four took 14 s).
+ * Each seed's own bound: the whole 30 minutes one case of all the fixed seeds had (verifier on f2824d4, item 11). Measured
+ * on 17 November 2026: on CI's unit shard the LinkedIn family's nine seeds took 222 s together and the message-request
+ * family's four 14 s; locally, on one worker at a load average near 30, the nine took 407 s, the slowest (24029) 188 s. A
+ * machine five times slower than that stays inside it seed by seed, where nine seeds in one case did not.
  */
-const SEED_LIMIT_MS = 900_000;
+const SEED_LIMIT_MS = 1_800_000;
 const MAX_SEEDS = 30;
 /** Every mutation replay stops after this many engine writes or ticks: an unmutated run of the 100 needs under 300 of each. */
 const RUN_WRITES = 3_000;

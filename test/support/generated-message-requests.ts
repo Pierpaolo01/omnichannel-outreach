@@ -433,15 +433,21 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
         features.add(next.length > now.length ? "a-session-added-to-a-pool" : "a-session-removed-from-a-pool");
       }
     } else if (roll < 0.23 && !lead.companyLead) {
-      // A re-import gives the person another own account, or empties it.
-      const cell = rnd2() < 0.7 ? `https://www.instagram.com/example_lead_${seed}_${lead.name.replace(/\D/g, "")}_v${requestNo}` : "";
+      // A re-import gives the person another own account, or empties it. Half of them go to a person whose Instagram track
+      // has started (a message handed over, by the provider's log), so a started track meets a replaced account (the
+      // review of f2824d4, item 8): it must be skipped, never retargeted.
+      const started = leads.filter((l) => !l.companyLead && reachedOnInstagram(l));
+      const target = started.length > 0 && rnd2() < 0.5 ? pickOf(rnd2, started) : lead;
+      const tc = campaigns[target.campaign]!;
+      const cell = rnd2() < 0.7 ? `https://www.instagram.com/example_lead_${seed}_${target.name.replace(/\D/g, "")}_v${requestNo}` : "";
       scriptFor(accountKey(cell));
-      const r = await h.request("POST", `/api/campaigns/${c.id}/imports`, csvOf({ businesses: [businessRow(lead.company)], people: [personRow(lead, cell)] }));
+      const r = await h.request("POST", `/api/campaigns/${tc.id}/imports`, csvOf({ businesses: [businessRow(target.company)], people: [personRow(target, cell)] }));
       if (r.status === 201) {
-        lead.cellChanges.push({ at: h.clock, cell });
-        lead.ownCell = cell;
-        cellHistory.set(lead.name, [...(cellHistory.get(lead.name) ?? []), { at: h.clock, cell }]);
+        target.cellChanges.push({ at: h.clock, cell });
+        target.ownCell = cell;
+        cellHistory.set(target.name, [...(cellHistory.get(target.name) ?? []), { at: h.clock, cell }]);
         features.add("an-account-changed-by-a-reimport");
+        if (target !== lead) features.add("a-started-track-whose-account-a-reimport-replaced");
       }
     }
   }

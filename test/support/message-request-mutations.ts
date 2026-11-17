@@ -5,8 +5,8 @@ import { viewRules } from "../../src/server/engine/step-when-view.ts";
 import { comparePriority } from "../../src/domain/sequence/dispatch.ts";
 import { end, goodAccount } from "../../src/domain/sequence/progress.ts";
 
-/** Found by searching offsets 0 to 29 (17 November 2026). */
-const RETARGET_SEED = 0;
+/** The first of offsets 0 to 29 that killed it (17 November 2026). */
+const RETARGET_SEED = 20;
 import { markedReplyId } from "../../src/domain/sequence/reply-identity.ts";
 import { isMessageRequestChannel } from "../../src/domain/social-channels.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
