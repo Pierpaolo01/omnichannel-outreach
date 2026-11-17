@@ -54,3 +54,18 @@ describe("Instagram steps by their role", () => {
     expect(trackLabel(def, { id: "ig", channel: "instagram" }).label).toBe("Win-back Instagram track");
   });
 });
+
+describe("Before launch says an Instagram session in Instagram's words (found in the evidence of ticket 25)", () => {
+  test("the withheld load figure names Instagram, not LinkedIn", async () => {
+    const { withheldExplanation } = await import("./withheld.ts");
+    const said = withheldExplanation({ tracks: [{ trackId: "ig", channel: "instagram", label: "the Instagram track", why: "not_modelled" }] });
+    expect(said).toBe("No load is projected for this campaign: the estimate doesn’t model Instagram tracks yet: it doesn’t read a session’s message allowance. The Instagram track has no figure, and nor does the rest of the campaign.");
+    expect(said).not.toContain("LinkedIn");
+  });
+
+  test("a session's messages used today say fewer Instagram messages, and no invites are counted", async () => {
+    const { usedTodayWarnings } = await import("./BeforeLaunchTab.tsx");
+    const warnings = usedTodayWarnings({ id: "instagram:s", label: "Session", channel: "instagram", healthy: true, capacity: 20, gapSeconds: 60, usedToday: 2, waiting: null, kinds: { invite: { capacity: 0, usedToday: 0 }, message: { capacity: 20, usedToday: 2 } } } as never);
+    expect(warnings.map((w) => w.detail)).toEqual(["Other campaigns or test runs sent or reserved them, so fewer Instagram messages can go today."]);
+  });
+});

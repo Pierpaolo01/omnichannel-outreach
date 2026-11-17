@@ -378,7 +378,8 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
                 <td className="py-2.5 max-[560px]:p-0">{blocked ? "—" : `${a.busiestDay} a day`}</td>
                 <td className="py-2.5 max-[560px]:p-0">
                   {/* A LinkedIn session's two allowances, each with its use (council on dee365d, item 4); never their sum. */}
-                  {(a.kinds ? [{ what: "invites", ...a.kinds.invite }, { what: "messages", ...a.kinds.message }] : [{ what: "", capacity: a.capacity, usedToday: a.usedToday }]).map((r) => (
+                  {/* A message-request session has one allowance, messages (ADR 0004 13.7): no invites row. */}
+                  {(a.kinds ? [...(a.channel === "instagram" ? [] : [{ what: "invites", ...a.kinds.invite }]), { what: "messages", ...a.kinds.message }] : [{ what: "", capacity: a.capacity, usedToday: a.usedToday }]).map((r) => (
                     <span key={r.what} className="block [&+&]:mt-1.5">
                       <span className={r.usedToday >= r.capacity ? "font-medium text-pause" : ""}>
                         {r.usedToday} of {r.capacity}
@@ -461,7 +462,7 @@ export function usedTodayWarnings(a: LoadProjectionView["accounts"][number]): { 
     const { invite, message } = a.kinds;
     return [
       ...(invite.usedToday > 0 ? [{ title: `${a.label} has ${invite.usedToday} of its ${invite.capacity} invites a day used today`, detail: `${why}, so fewer invites can go today.` }] : []),
-      ...(message.usedToday > 0 ? [{ title: `${a.label} has ${message.usedToday} of its ${message.capacity} messages a day used today`, detail: `${why}, so fewer LinkedIn messages can go today.` }] : []),
+      ...(message.usedToday > 0 ? [{ title: `${a.label} has ${message.usedToday} of its ${message.capacity} messages a day used today`, detail: `${why}, so fewer ${a.channel === "instagram" ? "Instagram" : "LinkedIn"} messages can go today.` }] : []),
     ];
   }
   return a.usedToday > 0 ? [{ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: `${why}, so fewer first ${a.channel === "sms" ? "texts" : "emails"} can go today.` }] : [];
