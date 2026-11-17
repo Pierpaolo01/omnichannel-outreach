@@ -7,9 +7,10 @@
  */
 import { channelReaches, liveTracksFor } from "./progress.ts";
 import type { SubjectState } from "./state.ts";
+import { isSocialChannel, SOCIAL_CHANNEL_LIST, type SocialChannel } from "../social-channels.ts";
 
-export type ProviderChannel = "email" | "sms" | "linkedin";
-export const PROVIDER_CHANNELS: readonly ProviderChannel[] = ["email", "sms", "linkedin"];
+export type ProviderChannel = "email" | "sms" | SocialChannel;
+export const PROVIDER_CHANNELS: readonly ProviderChannel[] = ["email", "sms", ...SOCIAL_CHANNEL_LIST];
 
 export interface ProviderEvidence {
   /** The last contact, or null when none since the worker started. */
@@ -30,8 +31,8 @@ export function providerFresh(e: ProviderEvidence, at: number): boolean {
 export function relevantChannels(state: SubjectState, trackId: string): ProviderChannel[] {
   const own = state.campaign.definition.tracks.find((t) => t.id === trackId)?.channel;
   const channels = new Set<ProviderChannel>();
-  if (own === "email" || own === "sms" || own === "linkedin") channels.add(own);
-  // A LinkedIn session detects no reply (ADR 0004 2.3), so it decides no other channel's safety: only its own sends wait on it.
+  if (own === "email" || own === "sms" || isSocialChannel(own)) channels.add(own);
+  // A social session detects no reply (ADR 0004 2.3), so it decides no other channel's safety: only its own sends wait on it.
   for (const t of liveTracksFor(state)) {
     if ((t.channel === "email" || t.channel === "sms") && channelReaches(state, t.channel)) channels.add(t.channel);
   }

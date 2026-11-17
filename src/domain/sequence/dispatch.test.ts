@@ -234,7 +234,7 @@ describe("SMS dispatch and conversations (ADR 0003 4.5, ticket 13)", () => {
     const skipped = evaluate(taken, MONDAY_9);
     expect(skipped.tracks.find((t) => t.trackId === "t2")).toMatchObject({ finishReason: "skipped_conversation_taken", finishedWall: MONDAY_9 });
     expect(skipped.results).toEqual(s.results);
-    expect(conversationOwnersOf(skipped, "t2")).toEqual([{ campaignId: "camp-2", name: "Spring clinics", test: false }]);
+    expect(conversationOwnersOf(skipped, "t2")).toEqual([{ campaignId: "camp-2", name: "Spring clinics", test: false, lead: null }]);
     // Its own binding is no obstacle.
     expect(chooseAccount({ ...s, smsBindings: [{ ...other(N1), owner: "lead-1", ownerCampaignId: "camp-1" }, other(N2)] }, MONDAY_9, "m1")?.id).toBe(N1);
   });

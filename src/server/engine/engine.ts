@@ -28,10 +28,11 @@ export const CONTROL_REQUEST_REUSED = "This request id was already used for anot
 function outcomeBody(input: OutcomeInput): string {
   return JSON.stringify({ outcome: input.outcome, redial: input.redial, callbackAt: input.callbackAt, declinedPath: input.declinedPath, numberId: input.numberId, note: input.note, noteScope: input.noteScope });
 }
-import { callOutcome, namespacedLinkedinPort, UnconnectedLinkedInPort, UnprovisionedSmsPort, type AttemptRef, type CallOutcome, type PortCallResult, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
+import { callOutcome, messageRequestPorts, namespacedLinkedinPort, UnconnectedLinkedInPort, UnprovisionedSmsPort, type AttemptRef, type CallOutcome, type PortCallResult, type HandoverRequest, type ProviderEvent, type SendPort } from "./ports.ts";
 import { rulesWith, type Rules } from "./rules.ts";
-import { HEARTBEAT_KEY, NOTICE_KEY, parseInstant, PROVIDERS_KEY, TICK_ENDED_KEY, TICK_FAILED_KEY } from "./worker-state.ts";
-import { relevantChannels, waitingOn, type ProviderEvidence } from "../../domain/sequence/providers.ts";
+import { HEARTBEAT_KEY, NOTICE_KEY, parseInstant, perChannel, PROVIDERS_KEY, TICK_ENDED_KEY, TICK_FAILED_KEY } from "./worker-state.ts";
+import { PROVIDER_CHANNELS, relevantChannels, waitingOn, type ProviderChannel, type ProviderEvidence } from "../../domain/sequence/providers.ts";
+import { isMessageRequestChannel, isSocialChannel, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel } from "../../domain/social-channels.ts";
 
 export type CrashPoint = "after_claim" | "after_presend" | "after_handover_commit" | "after_call" | "after_retry_commit" | "after_lookup" | "after_observe_event";
 
@@ -112,6 +113,11 @@ export interface EngineDependencies {
   readonly smsPort?: SendPort;
   /** The LinkedIn port (ticket 24, ADR 0004); the unconnected one when absent, since no LinkedIn session is connected (#28). */
   readonly linkedinPort?: SendPort;
+  /**
+   * The message-request channels' ports (ADR 0004 13.1), by channel; the unconnected one for each channel absent, since no
+   * Instagram (or Facebook) session is connected (#28).
+   */
+  readonly socialPorts?: { readonly [C in MessageRequestChannel]?: SendPort };
   /** Milliseconds since the epoch. */
   readonly now: () => number;
   readonly newId: () => string;
@@ -137,9 +143,9 @@ export interface EngineDependencies {
   readonly ticks?: TickQueue;
 }
 
-type Channel = "email" | "sms" | "linkedin";
-const OBSERVE_CHECKPOINT: Record<Channel, string> = { email: "email_observe_checkpoint", sms: "sms_observe_checkpoint", linkedin: "linkedin_observe_checkpoint" };
-const CHANNELS: readonly Channel[] = ["email", "sms", "linkedin"];
+type Channel = ProviderChannel;
+const OBSERVE_CHECKPOINT: Record<Channel, string> = perChannel((c) => `${c}_observe_checkpoint`);
+const CHANNELS: readonly Channel[] = PROVIDER_CHANNELS;
 const MAX_PASSES = 50;
 const QUOTA_WAIT = Number.MAX_SAFE_INTEGER;
 /** Ticket 20a: how long a port's last answer stands for "it answers", for a port that does not report its own freshness: four ticks. */
@@ -164,14 +170,14 @@ export class Engine {
   /** While a provider's answer is applied: the instant the rules say it is applied at (`answerInstant`); null otherwise. */
   private applyingAt: number | null = null;
   /** Ticket 20a: each provider's last actual answer, for a port that does not report its own (`SendPort.contact`). */
-  private readonly answeredAt: Record<Channel, number | null> = { email: null, sms: null, linkedin: null };
+  private readonly answeredAt: Record<Channel, number | null> = perChannel(() => null);
   /** Ticket 20a: which reads of each provider answered in the current round (a tick, or the dispatch gate's own asking). */
-  private round: Record<Channel, { accounts: boolean; observation: boolean }> = { email: { accounts: false, observation: false }, sms: { accounts: false, observation: false }, linkedin: { accounts: false, observation: false } };
+  private round: Record<Channel, { accounts: boolean; observation: boolean }> = perChannel(() => ({ accounts: false, observation: false }));
 
   /** Ticket 20a (council D): the last call each provider answered while its contact stood, extending it. */
-  private readonly extendedAt: Record<Channel, number | null> = { email: null, sms: null, linkedin: null };
+  private readonly extendedAt: Record<Channel, number | null> = perChannel(() => null);
   /** Ticket 20a (council G): each provider's last failed read, as evidence. */
-  private readonly failedRead: Record<Channel, { at: number; part: "accounts" | "observation" | "call" } | null> = { email: null, sms: null, linkedin: null };
+  private readonly failedRead: Record<Channel, { at: number; part: "accounts" | "observation" | "call" } | null> = perChannel(() => null);
   /** Whether the dispatch gate has asked every provider again in this round. */
   private askedThisRound = false;
 
@@ -186,7 +192,7 @@ export class Engine {
   }
 
   /** The contact each self-reporting port last reported, to see it jump (below). */
-  private readonly reportedSeen: Record<Channel, number | null> = { email: null, sms: null, linkedin: null };
+  private readonly reportedSeen: Record<Channel, number | null> = perChannel(() => null);
 
   /**
    * A port that reports its own contact (the adapter, which answers from a cache between polls) may answer every call
@@ -226,7 +232,7 @@ export class Engine {
       const failed = this.failedRead[c];
       return { contactAt: at, freshForMs, failedAt: failed?.at ?? null, failedPart: failed?.part ?? null };
     };
-    return { email: of("email"), sms: of("sms"), linkedin: of("linkedin") };
+    return perChannel(of);
   }
 
   private async saveEvidence(): Promise<void> {
@@ -234,7 +240,7 @@ export class Engine {
   }
 
   private newRound(): void {
-    this.round = { email: { accounts: false, observation: false }, sms: { accounts: false, observation: false }, linkedin: { accounts: false, observation: false } };
+    this.round = perChannel(() => ({ accounts: false, observation: false }));
   }
 
   /** A read answered: the round is contact only once every read the engine relies on has answered in it (`contactFrom`). */
@@ -297,7 +303,12 @@ export class Engine {
 
   constructor(deps: EngineDependencies) {
     this.store = deps.store;
-    this.ports = { email: deps.port, sms: deps.smsPort ?? new UnprovisionedSmsPort(), linkedin: namespacedLinkedinPort(deps.linkedinPort ?? new UnconnectedLinkedInPort()) };
+    this.ports = {
+      email: deps.port,
+      sms: deps.smsPort ?? new UnprovisionedSmsPort(),
+      linkedin: namespacedLinkedinPort(deps.linkedinPort ?? new UnconnectedLinkedInPort()),
+      ...messageRequestPorts(deps.socialPorts ?? {}),
+    };
     this.clockNow = deps.now;
     this.now = () => this.applyingAt ?? deps.now();
     this.newId = deps.newId;
@@ -790,7 +801,7 @@ export class Engine {
       const { events, checkpoint: next } = observed;
       await this.answered(asked, async () => {
         for (const event of events) {
-          changed = (await (channel === "sms" ? this.applySmsEvent(event) : channel === "linkedin" ? this.applyLinkedinEvent(event) : this.applyEvent(event))) || changed;
+          changed = (await (channel === "sms" ? this.applySmsEvent(event) : isSocialChannel(channel) ? this.applySocialEvent(channel, event) : this.applyEvent(event))) || changed;
           this.hooks.crashPoint?.("after_observe_event", null);
         }
       });
@@ -826,19 +837,21 @@ export class Engine {
   }
 
   /**
-   * A LinkedIn session's event (ADR 0004 2.3). An acceptance is recorded on the invite's track, never as a reply; a session
-   * never reports a reply (there is no reply detection), so one is an anomaly. Sends, refusals and failures are matched by
-   * their work, as every channel's are.
+   * A social session's event (ADR 0004 2.3, 13.3). A LinkedIn acceptance is recorded on the invite's track, never as a
+   * reply; a session never reports a reply (there is no reply detection), so one is an anomaly, and so is an acceptance on a
+   * message-request channel, whose platform reports none. Sends, refusals and failures are matched by their work, as every
+   * channel's are.
    */
-  private async applyLinkedinEvent(event: ProviderEvent): Promise<boolean> {
+  private async applySocialEvent(channel: SocialChannel, event: ProviderEvent): Promise<boolean> {
     const now = this.now();
+    const name = SOCIAL_CHANNELS[channel].name;
     if (event.kind === "reply") {
-      await this.store.recordAnomaly(null, "a LinkedIn session reported a reply, which the app does not detect", now);
+      await this.store.recordAnomaly(null, `a ${name} session reported a reply, which the app does not detect`, now);
       return false;
     }
     const w = (await this.store.work(event.key)) ?? (await this.store.workByProviderRef(event.providerRef));
-    if (!w) {
-      await this.store.recordAnomaly(null, `a LinkedIn ${event.kind} event the app cannot match`, now);
+    if (!w || (event.kind === "accepted" && channel !== "linkedin")) {
+      await this.store.recordAnomaly(null, `a ${name} ${event.kind} event the app cannot match`, now);
       return false;
     }
     if (event.kind !== "accepted") return this.applyEvent(event, w);
@@ -1125,7 +1138,7 @@ export class Engine {
       // refuses it, and the next pass decides again on the state as it is (question Q7 answered). Accounts it never reads.
       // Written over the current accounts and bindings: an evaluation adds or removes no binding, so with the guard
       // above they are the snapshot's; without it, it could never remove one another process released or add one taken.
-      // An InMail judged at the expiry read its session's standing (ADR 0004 13.5): refused too when that standing moved since
+      // An InMail judged at the expiry read its session's standing (ADR 0004 14.5): refused too when that standing moved since
       // (another lead's commitment of the last credit, a new report), and decided again (review bot on b49a71b).
       const judged = inmailJudgedSessions(snapshot, next);
       const standingHeld = (current: SubjectState) => judged.every((session) => JSON.stringify(snapshot.accounts[session]?.inmail ?? null) === JSON.stringify(current.accounts[session]?.inmail ?? null));
@@ -1245,22 +1258,23 @@ export class Engine {
   }
 
   /**
-   * The user marks a lead (or a test run) replied on LinkedIn (ADR 0004 section 7): in one transaction with its request id,
+   * The user marks a lead (or a test run) replied on a social channel (ADR 0004 7, 13.8): in one transaction with its request id,
    * bound to its first answer like every control, judged on the subject as of the action's instant. Accepted, it stops the
    * subject in this campaign only; the worker then runs, as after any accepted control.
    */
-  markReplied(subjectId: string, requestId: string, expected: { readonly status: OutreachStatus } | null = null): Promise<{ ok: true; replayed: boolean } | { ok: false; reason: string }> {
+  markReplied(subjectId: string, requestId: string, channel: SocialChannel, expected: { readonly status: OutreachStatus } | null = null): Promise<{ ok: true; replayed: boolean } | { ok: false; reason: string }> {
     return this.ticks.run(async () => {
       const now = this.now();
       // The expectation is part of the body an id is bound to, as for every control (ticket 17b).
-      const body = JSON.stringify(expected === null ? { action: "mark_replied", channel: "linkedin" } : { action: "mark_replied", channel: "linkedin", expect: expected });
+      // The channel is part of the body an id is bound to: the same id for another channel is another request.
+      const body = JSON.stringify(expected === null ? { action: "mark_replied", channel } : { action: "mark_replied", channel, expect: expected });
       const record = await this.store.controlSubject(subjectId, now, { id: requestId, action: "mark_replied", body }, this.rules.requestStanding, (stored) => {
         const s = this.rules.asOfAction(stored, now, this.rules.evaluate);
-        const marked = this.rules.markReplied(s, requestId, now);
+        const marked = this.rules.markReplied(s, requestId, now, channel);
         const unconfirmed = marked.ok ? this.rules.markPrecondition(this.rules.confirmedAgainst(stored, s), expected) : null;
         const out = unconfirmed === null ? marked : ({ ok: false, reason: unconfirmed } as const);
         if (!out.ok) return { write: same(s, stored) ? null : s, answer: "refused", reason: out.reason, effect: null };
-        return { write: this.rules.releaseUnsent(out.state), answer: "accepted", reason: null, effect: JSON.stringify({ channel: "linkedin" }) };
+        return { write: this.rules.releaseUnsent(out.state), answer: "accepted", reason: null, effect: JSON.stringify({ channel }) };
       });
       if (record.kind === "reused" || record.kind === "different") return { ok: false as const, reason: CONTROL_REQUEST_REUSED };
       if (record.answer === "refused") return { ok: false as const, reason: record.reason ?? "Refused." };
@@ -1407,7 +1421,7 @@ export class Engine {
       if (this.rules.claimRefusal(snapshot, item, now) !== null) continue;
       const track = snapshot.campaign.definition.tracks.find((t) => t.id === item.trackId);
       const step = track?.steps.find((s) => s.id === item.stepId);
-      const transport = this.ports[track?.channel === "sms" ? "sms" : track?.channel === "linkedin" ? "linkedin" : "email"].transportFor({ threading: step?.threading ?? "new_subject" });
+      const transport = this.ports[track === undefined || track.channel === "call" ? "email" : track.channel].transportFor({ threading: step?.threading ?? "new_subject" });
       // A step the port cannot send yet is not claimed: it waits, and nothing is sent for it.
       if (transport.available === false) continue;
       const allowed = this.dispatchAllowed(this.rules.dispatchInstant(this.tickStarted, this.now()), () => Promise.resolve(relevantChannels(snapshot, item.trackId)));
@@ -1492,12 +1506,12 @@ export class Engine {
     const subject = await this.store.subject(a.subjectId, now);
     const threadRefs = (subject?.work ?? []).flatMap((w) => (w.providerRef === null ? [] : [w.providerRef]));
     const port = await this.portOf(a.accountId);
-    const channel = port === this.ports.sms ? "sms" : port === this.ports.linkedin ? "linkedin" : "email";
+    const channel = CHANNELS.find((c) => this.ports[c] === port) ?? "email";
     // The replies the lead's record holds are not news (a restart after an auto-reply): the port reports any other reply,
     // in any of the lead's threads (ticket 17a; review bot on ca8baee, item 1; ADR 0002's correlation rules). The port is
     // asked by its own ids, and its answer is recorded by the stored one: the reply identity rule (ADR 0003 "Ticket 17a").
     const knownReplies = (subject?.replies ?? []).filter((r) => r.channel === channel).map((r) => r.providerRef);
-    const asked = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, subjectId: a.subjectId, threadRefs, knownReplies: channel === "linkedin" ? [] : knownReplies.map((id) => this.rules.portReplyId(channel, id)) }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result }));
+    const asked = await this.bounded(() => port.presendCheck({ sender: a.accountId, destination: a.destination, subjectId: a.subjectId, threadRefs, knownReplies: channel === "email" || channel === "sms" ? knownReplies.map((id) => this.rules.portReplyId(channel, id)) : [] }), { kind: "unavailable" as const }, port.channel, (result) => ({ call: "presendCheck", result }));
     // A LinkedIn session's check reads the connection, never a reply (ADR 0004 2.3, 3.3). Connected at an invite's slot: the
     // invite is skipped in the handover's own write, with no call, when every predicate but the check and the slot holds.
     if (channel === "linkedin") {
@@ -1516,14 +1530,21 @@ export class Engine {
         return false;
       }
       // A pending invitation stops every step as on the integration tip, but the InMail, whose own invite stays open while it
-      // goes (ADR 0004 13.3; council on 8b0c846, item 3: a message to a connection removed with an invitation pending).
+      // goes (ADR 0004 14.3; council on 8b0c846, item 3: a message to a connection removed with an invitation pending).
       const inmail = subject !== null && this.rules.actionOfStep(subject, a.trackId, a.stepId) === "inmail";
       // A message after an InMail known sent goes beside the track's own invite, which the fallback leaves open.
       const ownInviteOpen = inmail || subject?.tracks.find((p) => p.trackId === a.trackId)?.inmail === "sent";
       if (pendingStops && !ownInviteOpen) return false;
       // Connected at an InMail's slot: they accepted and the session has not reported it yet. No InMail to a connection; the
-      // acceptance, once observed, skips it and connects the track (13.3).
+      // acceptance, once observed, skips it and connects the track (14.3).
       if (asked.kind === "connected" && inmail && inmailSeams.acceptanceSkipsInmail) return false;
+      await this.update(a.subjectId, now, (s) => ({ ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: false } : x)) }));
+      this.hooks.crashPoint?.("after_presend", a.id);
+      return true;
+    }
+    // A message-request session's check reads nothing but whether it can act (ADR 0004 13.3): no reply, no relation.
+    if (isMessageRequestChannel(channel)) {
+      if (asked.kind !== "clear") return false;
       await this.update(a.subjectId, now, (s) => ({ ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: false } : x)) }));
       this.hooks.crashPoint?.("after_presend", a.id);
       return true;

@@ -16,6 +16,7 @@ const track = (linkedin: Partial<LinkedinTrackView> | null, fields: Partial<Trac
   finishedAt: null,
   conversationOwners: [],
   linkedin: linkedin === null ? null : { ...VIEW, ...linkedin },
+  messageRequest: null,
   hold: null,
   holdOwners: [],
   nextStep: null,
@@ -77,7 +78,7 @@ describe("a LinkedIn track's facts on the record", () => {
     // A stuck withdrawal is said once, in the expiry's own line (council on a6c1700, item 7).
     const stuck = linkedinTrackLines(track({ withdrawalStuck: true, withdrawalAsked: true, withdrawal: "wanted" }, { finishReason: "invite_not_accepted" }), "active", ZONE);
     expect(stuck.filter((l) => /hasn’t (answered|confirmed)/.test(l))).toHaveLength(1);
-    const taken = linkedinTrackLines(track(null, { finishReason: "skipped_conversation_taken", conversationOwners: [{ name: "Spring clinics", test: false }] }), "active", ZONE);
+    const taken = linkedinTrackLines(track(null, { finishReason: "skipped_conversation_taken", conversationOwners: [{ name: "Spring clinics", test: false, lead: null }] }), "active", ZONE);
     expect(taken[0]).toContain("campaign Spring clinics");
     expect(taken[0]).toContain("LinkedIn");
     expect(taken[0]).not.toMatch(/mobile|\btext\b/);
@@ -143,11 +144,11 @@ describe("Activity's LinkedIn entries in words", () => {
   });
 });
 
-describe("the InMail fallback on the record (ticket 27, ADR 0004 13.7)", () => {
+describe("the InMail fallback on the record (ticket 27, ADR 0004 14.7)", () => {
   const ZONE = "Europe/London";
   const REPORT = "2026-11-03T21:00:00.000Z";
   const inm = (fields: Partial<LinkedinTrackView["inmail"]>): LinkedinTrackView["inmail"] => ({ on: true, state: null, work: null, sentAt: null, reportedAt: REPORT, ...fields });
-  const track = (inmail: LinkedinTrackView["inmail"], finishReason: TrackProgressView["finishReason"] = null, more: Partial<LinkedinTrackView> = {}) => ({ channel: "linkedin", finishReason, conversationOwners: [], linkedin: { ...VIEW, invite: "sent" as const, note: "none" as const, inviteOpen: true, ...more, inmail } });
+  const track = (inmail: LinkedinTrackView["inmail"], finishReason: TrackProgressView["finishReason"] = null, more: Partial<LinkedinTrackView> = {}) => ({ channel: "linkedin" as const, finishReason, conversationOwners: [], linkedin: { ...VIEW, invite: "sent" as const, note: "none" as const, inviteOpen: true, ...more, inmail } });
 
   test("each state has its own sentence from its stored fact; the InMail is said as gone only once recorded sent; chosen promises nothing", () => {
     const states = ["chosen", "sent", "accepted", "no_plan", "no_credit", "stale_report", "refused", "switched_off", "skipped_by_user"] as const;

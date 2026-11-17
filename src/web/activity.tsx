@@ -1,3 +1,6 @@
+import { isMessageRequestChannel, SOCIAL_CHANNELS } from "../domain/social-channels.ts";
+import { messageRequestReason } from "./campaign/message-request-wording.ts";
+import type { TrackChannelApi } from "../shared/api.ts";
 import { useEffect, useId, useRef, useState } from "react";
 import { REPLY_WORDS } from "./controls/wording.ts";
 import type { ActivityEntry, ActivityNote, ActivityView, DependentTrackState, NoteAnswer } from "../shared/api.ts";
@@ -96,11 +99,14 @@ const REASON: Readonly<Record<string, string>> = {
   "profile unreachable": "LinkedIn refused the profile as unreachable. It is marked wrong.",
   // Q37: the connection is gone (they removed it); the profile stays theirs and is not marked wrong.
   "not connected": "LinkedIn refused the message: they are no longer connected. The profile isn’t marked wrong.",
-  // The InMail fallback (ticket 27; ADR 0004 13.3).
+  // The InMail fallback (ticket 27; ADR 0004 14.3).
   "inmail refused": "LinkedIn refused the InMail for this person. The profile isn’t marked wrong.",
   inmail_instead: "Not sent: the InMail went instead.",
   accepted: "No InMail: they accepted the invite before it went.",
 };
+
+/** Why a step was skipped or failed, in its own channel's words where the channel is a message-request one (ADR 0004 13.3). */
+const reasonText = (reason: string, channel: TrackChannelApi): string => (isMessageRequestChannel(channel) ? (messageRequestReason(channel, reason) ?? REASON[reason] ?? reason) : (REASON[reason] ?? reason));
 
 const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
 const CRIT = "bg-crit-soft text-crit";
@@ -180,15 +186,16 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
   // and a LinkedIn step by its role, "Connection invite" (ticket 24b).
   const named = (n: number) => stepTitle(entry.track, entry.channel, n, entry.role);
   const track = entry.track.several ? entry.track.label : null;
-  const icon: IconName = entry.channel === "linkedin" ? "linkedin" : sms ? "sms" : "email";
+  const icon: IconName = entry.channel;
   switch (entry.kind) {
     case "sent":
-      return { icon, tone: PLAIN, title: `${named(entry.stepNumber)} sent`, body: null, track };
+      // A message-request channel's step is said as a message: someone who follows the session gets no request (ticket 25).
+      return { icon, tone: PLAIN, title: isMessageRequestChannel(entry.channel) ? `${SOCIAL_CHANNELS[entry.channel].name} message ${entry.stepNumber} sent` : `${named(entry.stepNumber)} sent`, body: null, track };
     case "failed":
-      return { icon: "bad", tone: CRIT, title: `${named(entry.stepNumber)} failed`, body: `${entry.to}: ${REASON[entry.reason] ?? entry.reason}`, track };
+      return { icon: "bad", tone: CRIT, title: `${named(entry.stepNumber)} failed`, body: `${entry.to}: ${reasonText(entry.reason, entry.channel)}`, track };
     case "skipped": {
       // A taken conversation names the campaign that keeps it (question Q7 answered), through the one wording function.
-      const body = entry.reason === "sms_conversation_taken" ? `${conversationTaken(entry.owners ?? [], entry.channel).replace(/^t/, "T")}, so a reply couldn’t show which campaign it answers.` : (REASON[entry.reason] ?? entry.reason);
+      const body = entry.reason === "sms_conversation_taken" ? `${conversationTaken(entry.owners ?? [], entry.channel).replace(/^t/, "T")}, so a reply couldn’t show which campaign it answers.` : reasonText(entry.reason, entry.channel);
       return { icon: "system", tone: PLAIN, title: entry.stepNumber === null ? `${entry.track.label} skipped` : `${named(entry.stepNumber)} skipped`, body, track: entry.stepNumber === null ? null : track };
     }
     case "bounced":

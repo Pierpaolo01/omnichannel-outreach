@@ -339,7 +339,7 @@ describe("a running campaign's identities (ADR 0003 \"Ticket 19\", the boundary)
   });
 });
 
-describe("the InMail fallback in the definition (ticket 27, ADR 0004 13.2)", () => {
+describe("the InMail fallback in the definition (ticket 27, ADR 0004 14.2)", () => {
   const li = (steps: StepDefinition[]): TrackDefinition => ({ id: "li", channel: "linkedin", branch: "main", window: [{ day: 1, start: 9, end: 17 }], steps, start: { kind: "entry" }, removed: false, acceptWaitDays: 3 });
   const plain = (id: string, body = "Hi.") => step(id, { subject: "", body, threading: "new_subject" });
   const inmail = (id = "im", body = "An InMail.") => ({ ...plain(id, body), role: "inmail" as const });

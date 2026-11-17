@@ -4,6 +4,7 @@
  * stays true when a provider exists and a number is merely not connected. Null when the status has
  * not loaded: nothing is claimed.
  */
+import { MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
 import type { ConversationOwnerView, SmsProviderStatus } from "../../shared/api.ts";
 import type { TrackChannel } from "../../domain/sequence/definition.ts";
 
@@ -16,7 +17,12 @@ export function whyNoSmsNumber(status: SmsProviderStatus | null): string | null 
 }
 
 /** "campaign Spring clinics", "the test run of campaign Spring clinics". */
-const ownerName = (o: ConversationOwnerView): string => (o.test ? `the test run of campaign ${o.name}` : `campaign ${o.name}`);
+/**
+ * One owner in words, from the stored cause (verifier on f2824d4, item 9): a lead of this same campaign by name, else the
+ * owning campaign or its test run. Never a fixed phrase.
+ */
+const ownerName = (o: ConversationOwnerView): string =>
+  o.lead !== null ? (o.lead === "" ? "another lead of this campaign" : `${o.lead}, a lead of this campaign,`) : o.test ? `the test run of campaign ${o.name}` : `campaign ${o.name}`;
 
 /**
  * Why an SMS track was skipped for a taken conversation (ADR 0003, question Q7 answered): the mobile was already in a
@@ -39,20 +45,27 @@ export function ownersPhrase(owners: readonly ConversationOwnerView[]): string {
  * until it has its words. Email and call tracks hold no conversation (`holdsConversations`), so no sentence uses their
  * entries; they are neutral. The stored reason ids keep "sms" in their names (ADR 0004, follow-up); the sentences never do.
  */
-const CONVERSATION_WORDS: Readonly<Record<TrackChannel, { readonly destination: string; readonly conversation: string; readonly first: string; readonly senders: string }>> = {
+const conversationWords = (): Readonly<Record<TrackChannel, { readonly destination: string; readonly conversation: string; readonly first: string; readonly senders: string }>> => ({
   sms: { destination: "mobile", conversation: "a text conversation", first: "the first text", senders: "on every number this campaign can use" },
   linkedin: { destination: "LinkedIn profile", conversation: "a LinkedIn conversation (an invite or a message)", first: "the first invite or message", senders: "on every LinkedIn session this campaign can use" },
+  // The account a message request goes to may be their company's (ADR 0004 13.4): "their <Name> account" names whichever it is.
+  ...(Object.fromEntries(
+    MESSAGE_REQUEST_CHANNELS.map((c) => {
+      const name = SOCIAL_CHANNELS[c].name;
+      return [c, { destination: `${name} account`, conversation: `${SOCIAL_CHANNELS[c].aName} conversation (a message request or a follow-up)`, first: "the first message", senders: `on every ${name} session this campaign can use` }];
+    }),
+  ) as { readonly [C in MessageRequestChannel]: { readonly destination: string; readonly conversation: string; readonly first: string; readonly senders: string } }),
   email: { destination: "contact details", conversation: "a conversation", first: "the first contact", senders: "on every sender this campaign can use" },
   call: { destination: "contact details", conversation: "a conversation", first: "the first contact", senders: "on every sender this campaign can use" },
-};
+});
 
 export function conversationTaken(owners: readonly ConversationOwnerView[], channel: TrackChannel, whose: "their" | "your test" = "their", tense: "past" | "now" = "past"): string {
-  const w = CONVERSATION_WORDS[channel];
+  const w = conversationWords()[channel];
   return `${whose} ${w.destination} ${tense === "past" ? "was already" : "is"} in ${w.conversation} with ${ownersPhrase(owners)} ${w.senders}`;
 }
 
 /** A wait on another subject's first action whose fate is not known yet (`sms_conversation_unsettled`), in its channel's words. */
 export function conversationUnsettled(owners: readonly ConversationOwnerView[], channel: TrackChannel): string {
-  const w = CONVERSATION_WORDS[channel];
+  const w = conversationWords()[channel];
   return `${w.first} from ${ownersPhrase(owners)} to the same ${w.destination}, ${w.senders}, isn’t known to have gone or not yet`;
 }

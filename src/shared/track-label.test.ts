@@ -13,7 +13,7 @@ describe("a LinkedIn step is named by its role (ticket 24b; ADR 0004 3.1)", () =
     live.forEach((s, i) => expect(LINKEDIN_STEP_KIND_AT(i + 1)).toBe(linkedinStepKind(li, s.id)));
   });
 
-  test("with the InMail fallback on, the InMail is named by its role and every other step by its number as before (ADR 0004 13.9)", () => {
+  test("with the InMail fallback on, the InMail is named by its role and every other step by its number as before (ADR 0004 14.9)", () => {
     const inmail = { ...step("im"), role: "inmail" as const };
     const li = track("li", "linkedin", "main", [step("a"), inmail, step("gone", true), step("b"), step("c")]);
     for (const s of li.steps.filter((x) => !x.removed)) expect(LINKEDIN_STEP_KIND_AT(stepNumber(li, s.id), s.role)).toBe(linkedinStepKind(li, s.id));

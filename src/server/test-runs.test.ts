@@ -79,7 +79,7 @@ describe("test contacts (ADR 0003 'Ticket 21', the boundary)", () => {
     expect((await w.tab()).contacts).toMatchObject({ email: null, mobile: null });
     const ok = await w.h.request<TestRunTab>("PUT", `/api/campaigns/${w.campaign}/test-contacts`, { email: OWN_EMAIL, mobile: "+44 7700 900456" });
     expect(ok.status).toBe(200);
-    expect(ok.body.contacts).toEqual({ email: OWN_EMAIL, mobile: "+44 7700 900456", emailIsALead: false, mobileIsALead: false, linkedin: null, linkedinIsALead: false });
+    expect(ok.body.contacts).toEqual({ email: OWN_EMAIL, mobile: "+44 7700 900456", emailIsALead: false, mobileIsALead: false, linkedin: null, linkedinIsALead: false, social: { instagram: { address: null, isALead: false } } });
   });
 
   test("a lead's routes do not know a test run: its read, its controls and a bulk stop answer as for no lead (merge of ticket 18)", async () => {
@@ -343,8 +343,8 @@ describe("a test mobile in another subject's SMS conversation (ADR 0003, questio
 
     const steps = (await tab()).run?.steps ?? [];
     expect(steps.filter((s) => s.channel === "sms").map((s) => [s.stepId, s.state, s.reason, s.owners])).toEqual([
-      ["m1", "skipped", "sms_conversation_taken", [{ name: "Clinics, London", test: true }]],
-      ["m2", "skipped", "sms_conversation_taken", [{ name: "Clinics, London", test: true }]],
+      ["m1", "skipped", "sms_conversation_taken", [{ name: "Clinics, London", test: true, lead: null }]],
+      ["m2", "skipped", "sms_conversation_taken", [{ name: "Clinics, London", test: true, lead: null }]],
     ]);
     // Its email after the SMS track still goes; nothing was texted for the second test.
     expect(steps.find((s) => s.stepId === "e1")?.state).toBe("sent");

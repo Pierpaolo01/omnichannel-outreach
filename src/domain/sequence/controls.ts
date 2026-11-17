@@ -6,7 +6,8 @@
  * action's instant first (`asOfAction`), then calls these; the reads call the same functions on a copy.
  */
 import { leadNow, wallOfLead } from "./clock.ts";
-import type { TrackDefinition } from "./definition.ts";
+import type { TrackChannel, TrackDefinition } from "./definition.ts";
+import { SOCIAL_CHANNELS, type SocialChannel } from "../social-channels.ts";
 import type { OutreachStatus } from "../outreach-status.ts";
 import { markedReplyId } from "./reply-identity.ts";
 import { advanceTrack, anyInviteOpen, applyReply, channelReaches, deriveStatus, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
@@ -93,7 +94,7 @@ export function withProvider(state: SubjectState, stepId: string): boolean {
   return state.work.some((w) => w.stepId === stepId && isUncertain(w));
 }
 
-const PROVIDER_NAME = { email: "email provider", sms: "SMS provider", call: "call list", linkedin: "LinkedIn session" } as const;
+const PROVIDER_NAME = (channel: TrackChannel): string => (channel === "email" ? "email provider" : channel === "sms" ? "SMS provider" : channel === "call" ? "call list" : `${SOCIAL_CHANNELS[channel].name} session`);
 
 /** Skip the current step (ADR 0003 "Ticket 17a", "Skip step"): exactly one step, never sent. */
 function skip(state: SubjectState, now: number): ControlResult {
@@ -106,7 +107,7 @@ function skip(state: SubjectState, now: number): ControlResult {
   // the work uncertain; a new claim may inherit it). A skip never sends the skipped step (P4), so it waits for the
   // provider's final word (review bot on ca8baee, item 2).
   if (withProvider(state, stepId)) {
-    return refuse(`This step is already with the ${PROVIDER_NAME[track.channel]} and may still be sent, so it cannot be skipped until the provider says whether it was sent.`);
+    return refuse(`This step is already with the ${PROVIDER_NAME(track.channel)} and may still be sent, so it cannot be skipped until the provider says whether it was sent.`);
   }
   let s = state;
   // On a callback, the hold is released first, as an outcome's is (2.4 "Calls"): the result sits on a running clock.
@@ -296,17 +297,24 @@ export function judgeCampaignControl(
 // ---------------------------------------------------------------------------------------------
 // The user's reply mark (ADR 0004 section 7): the app detects no social reply, so the user marks it.
 
-export const NOTHING_SENT_ON_LINKEDIN = "Nothing has been sent to them on LinkedIn in this campaign, so there is no LinkedIn reply to mark.";
+/** Why a mark is refused when nothing reached the person on the channel (ADR 0004 Q39, 13.8). */
+export const nothingSentOn = (channel: SocialChannel): string => {
+  const name = SOCIAL_CHANNELS[channel].name;
+  return `Nothing has been sent to them on ${name} in this campaign, so there is no ${name} reply to mark.`;
+};
+export const NOTHING_SENT_ON_LINKEDIN = nothingSentOn("linkedin");
 
 /**
- * The LinkedIn work of this subject that lets the user mark a reply (ADR 0004 section 7; review bot on c20c8f0): work that
- * reached the person, known sent, or handed over and not yet settled (a refused invite, a withdrawn claim or a final "not
- * sent" reached nobody); the latest of them, with its kind and whether it is recorded sent. Null when none: the mark is
- * refused. The rule and the reads that word it take this one answer.
+ * The work of this subject on one social channel that lets the user mark a reply there (ADR 0004 section 7, 13.8; review bot
+ * on c20c8f0): work on that channel's tracks that reached the person, known sent, or handed over and not yet settled (a
+ * refused invite or message, a withdrawn claim or a final "not sent" reached nobody); the latest of them, with its kind and
+ * whether it is recorded sent. Null when none: the mark is refused. The rule and the reads that word it take this one
+ * answer. Work on another channel never counts: nothing reads across channels.
  */
-export function replyMarkWork(state: SubjectState): { readonly kind: "invite" | "message"; readonly state: "sent" | "handed" } | null {
+export function replyMarkWork(state: SubjectState, channel: SocialChannel): { readonly kind: "invite" | "message"; readonly state: "sent" | "handed" } | null {
   const sent = (w: (typeof state.work)[number]) => w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null;
-  const reached = state.work.filter((w) => w.kind != null && w.firstHandedWall !== null && (w.settled === null || sent(w)));
+  const onChannel = new Set(state.campaign.definition.tracks.filter((t) => t.channel === channel).map((t) => t.id));
+  const reached = state.work.filter((w) => w.kind != null && onChannel.has(w.trackId) && w.firstHandedWall !== null && (w.settled === null || sent(w)));
   const latest = [...reached].sort((a, b) => (b.firstHandedWall ?? 0) - (a.firstHandedWall ?? 0))[0];
   return latest?.kind ? { kind: latest.kind, state: sent(latest) ? "sent" : "handed" } : null;
 }
@@ -316,7 +324,7 @@ export function replyMarkWork(state: SubjectState): { readonly kind: "invite" | 
  * a lead that already replied, or ended interested on a call, is not stopped again (ADR 0003 2.4's reply row); and some
  * LinkedIn work of the subject must have been handed over in this campaign, since nothing else could be answered there.
  */
-export function markRepliedRefusal(state: SubjectState): string | null {
+export function markRepliedRefusal(state: SubjectState, channel: SocialChannel): string | null {
   const { subject, campaign } = state;
   if (subject.kind === "enrollment" && campaign.launchedAt === null) return NOT_LAUNCHED;
   if (subject.ended === "replied") return "They are already marked replied in this campaign.";
@@ -324,7 +332,7 @@ export function markRepliedRefusal(state: SubjectState): string | null {
   // Something must have reached the person on LinkedIn (council on 194fc44, item 7): work known sent, or handed over and not
   // yet settled. A refused invite (an unreachable profile), a withdrawn claim or a final "not sent" reached nobody.
   // A connection that existed before is not outreach (council on b21af02, item 5): only this subject's own work counts.
-  if (replyMarkWork(state) === null) return NOTHING_SENT_ON_LINKEDIN;
+  if (replyMarkWork(state, channel) === null) return nothingSentOn(channel);
   return null;
 }
 
@@ -341,8 +349,8 @@ export function markPrecondition(confirmed: SubjectState, expected: { readonly s
  * The mark (ADR 0004 section 7): a reply on LinkedIn at the mark's instant, stored under the control's request id, which
  * stops this subject in this campaign only and quiesces it, by the engine's own reply rule (`applyReply`).
  */
-export function markReplied(state: SubjectState, requestId: string, now: number): ControlResult {
-  const why = markRepliedRefusal(state);
+export function markReplied(state: SubjectState, requestId: string, now: number, channel: SocialChannel): ControlResult {
+  const why = markRepliedRefusal(state, channel);
   if (why !== null) return refuse(why);
-  return accept(applyReply(state, { channel: "linkedin", atWall: now, providerRef: markedReplyId("linkedin", requestId) }, now));
+  return accept(applyReply(state, { channel, atWall: now, providerRef: markedReplyId(channel, requestId) }, now));
 }

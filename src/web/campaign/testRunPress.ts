@@ -1,3 +1,4 @@
+import type { SocialChannel } from "../../domain/social-channels.ts";
 import type { KeyValue } from "../calls/callDesk.ts";
 
 /**
@@ -10,6 +11,8 @@ export interface TestRunPress {
   readonly v: 1;
   /** Run test, Stop test, the run's LinkedIn reply mark, or an answer to its stuck withdrawal (ticket 24b). */
   readonly kind: "run" | "stop" | "reply" | "withdrawn" | "kept";
+  /** A reply mark's channel (ticket 25; ADR 0004 13.8); one kept from before ticket 25 has none and was LinkedIn's. */
+  readonly channel?: SocialChannel;
   /** The test run a reply mark or a withdrawal answer was confirmed on (council on dee365d, item 10): its route names it. */
   readonly runId?: string;
   /** That run was still running when the mark was confirmed: only then does its answer say the test stopped. */

@@ -1,3 +1,4 @@
+import { isMessageRequestChannel, SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
 import { useId, useRef, type ReactNode } from "react";
 import { REPLY_WORDS } from "../controls/wording.ts";
 import { Link } from "wouter";
@@ -45,7 +46,7 @@ import {
   pausedCallsLine,
 } from "../calls/wording.ts";
 import { ErrorState, StaleNotice } from "../components.tsx";
-import { Icon } from "../icons.tsx";
+import { Icon, type IconName } from "../icons.tsx";
 import { StatusBadge } from "../status.tsx";
 import { useNow } from "../time.ts";
 
@@ -484,7 +485,9 @@ function Touches({ touches, notes, userZone }: { touches: readonly TouchView[]; 
 
 const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
 
-function touchRow(t: TouchView): { icon: "email" | "sms" | "reply" | "call" | "linkedin"; tone: string; title: string; body: string | null } {
+function touchRow(t: TouchView): { icon: IconName; tone: string; title: string; body: string | null } {
+  // A message-request channel's touch, in its own name (ADR 0004 13.3): one branch for every such channel.
+  if (isMessageRequestChannel(t.kind)) return { icon: t.kind, tone: PLAIN, title: `${SOCIAL_CHANNELS[t.kind].name} message sent`, body: null };
   switch (t.kind) {
     case "linkedin":
       return { icon: "linkedin", tone: PLAIN, title: "LinkedIn step sent", body: null };

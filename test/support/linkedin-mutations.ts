@@ -71,7 +71,7 @@ function flag<K extends Flag>(name: K, value: (typeof progressRules)[K]): () => 
   };
 }
 
-/** The InMail mutations' killing seed offsets (ticket 27), searched again over offsets 0 to 50 after the council's draws; ADR 0004 13.16 records them. */
+/** The InMail mutations' killing seed offsets (ticket 27), searched again over offsets 0 to 50 after the council's draws; ADR 0004 14.16 records them. */
 const INMAIL_SEEDS = { L18: 0, L19: 16, L20: 0, L21: 18, L22: 7, L23: 0, L24: 42, L25: 16, replaced: 0, restart: 0, handover: 18 } as const;
 
 /** The seed offset that reaches a step no session has any allowance for (the search's 24015 on a6c1700). */
@@ -123,8 +123,8 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     invariant: "L3",
     seed: 4,
     rules: {
-      markReplied: (state, requestId, now) => {
-        const refused = DEFAULT_RULES.markReplied(state, requestId, now);
+      markReplied: (state, requestId, now, channel) => {
+        const refused = DEFAULT_RULES.markReplied(state, requestId, now, channel);
         if (!refused.ok) return refused;
         return { ok: true, state: { ...state, replies: [...state.replies, { channel: "linkedin", atWall: now, providerRef: markedReplyId("linkedin", requestId) }] } };
       },
@@ -312,7 +312,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     rules: {},
     patch: flag("conversationKeysOwnOnly", true),
   },
-  // The InMail fallback (ticket 27, ADR 0004 13.11): one mutation per invariant L18 to L25. Their seeds are recorded in 13.11.
+  // The InMail fallback (ticket 27, ADR 0004 14.11): one mutation per invariant L18 to L25. Their seeds are recorded in 14.11.
   // L18: an InMail already sent is offered again as ready, claimed and handed over again.
   "an InMail sent is sent again": {
     invariant: "L18",
@@ -382,7 +382,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     rules: {},
     patch: flags({ switchOffReachesChosen: false }),
   },
-  // The council on 8b0c846 (items 1, 7 and 8; ADR 0004 13.5, 13.15).
+  // The council on 8b0c846 (items 1, 7 and 8; ADR 0004 14.5, 14.15).
   // L23: the step the InMail replaces is found among the live steps at its send, so a follow-up an edit promoted is skipped.
   "the replaced step is found among the live steps at the handover": {
     invariant: "L23",
@@ -409,5 +409,12 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     invariant: "L13",
     seed: 11,
     rules: { evaluate: (state, now, options) => DEFAULT_RULES.evaluate(state, now, { ...options, skipTakenConversations: false }) },
+  },
+  // L13 (the review bot on 0922582): a LinkedIn track a lead started, removed by a running edit before its first claim, finds
+  // no sender, so its invite waits for ever.
+  "a removed track a lead started finds no sender": {
+    invariant: "L13",
+    seed: 0,
+    rules: { chooseAccount: (state, now, stepId) => (state.campaign.definition.tracks.find((t) => t.steps.some((x) => x.id === stepId))?.removed ? null : DEFAULT_RULES.chooseAccount(state, now, stepId)) },
   },
 };

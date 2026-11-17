@@ -5,11 +5,12 @@
  * ticket 27) fails typecheck until it has its words. Days are said in the user's zone, as the read gives them. History is
  * said in the past tense; a present state only as the read says it at its instant. Provisional wording, for the principal.
  */
-import type { LinkedinReplyMark, LinkedinTrackView, NeedsAttention, OutreachStatus, TrackProgressView } from "../../shared/api.ts";
+import type { ReplyMark, LinkedinTrackView, NeedsAttention, OutreachStatus, TrackProgressView } from "../../shared/api.ts";
 import { statusGroup } from "../../domain/outreach-status.ts";
 import type { AttentionItem } from "../calls/wording.ts";
 import { dateIn } from "../calls/wording.ts";
 import { conversationTaken } from "./sms-wording.ts";
+import { markRepliedWords } from "./reply-mark-wording.ts";
 
 /** How the invite's note went, from the choice stored with the work at the handover (ADR 0004 section 4). */
 export function noteLine(note: NonNullable<LinkedinTrackView["note"]>): string {
@@ -105,7 +106,7 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
   // acceptance expiry asks for a withdrawal, so a stop, a reply on any channel, a move to win-back, an ending with no
   // channel left or an edit that removes the track leaves a sent invite open. Said once the track has ended or the lead no
   // longer runs, and only while no withdrawal was asked for: an expiry's withdrawal is said by its own line.
-  // With the InMail fallback chosen, the InMail's own line says the invite stays open (ADR 0004 13.7).
+  // With the InMail fallback chosen, the InMail's own line says the invite stays open (ADR 0004 14.7).
   const fallbackTaken = view.inmail.state === "chosen" || view.inmail.state === "sent";
   if (view.inviteOpen && view.withdrawal === null && !fallbackTaken && (track.finishReason !== null || statusGroup(status) === "handed_to_you" || statusGroup(status) === "ended")) lines.push(INVITE_STILL_OPEN);
   if (view.pendingElsewhereSince) lines.push(`An invite to them was already pending on LinkedIn, not sent by this application (first seen ${dateIn(userZone, view.pendingElsewhereSince)}). This track waits until it is accepted or gone.`);
@@ -113,7 +114,7 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
 }
 
 /**
- * The InMail fallback on the record (ticket 27; ADR 0004 13.7), one sentence by its stored facts and nothing more: the InMail
+ * The InMail fallback on the record (ticket 27; ADR 0004 14.7), one sentence by its stored facts and nothing more: the InMail
  * said as gone only once recorded sent, with the session while handed over, to go while chosen; why it did not go, by its
  * stored cause, before the expiry's own line; while still waiting for acceptance with the fallback on, what the end of the
  * wait does. Provisional sentences, for the principal.
@@ -162,7 +163,7 @@ export function inmailLine(view: Pick<LinkedinTrackView, "inmail" | "inviteOpen"
  */
 export const ENDS_AND_ASKS_WITHDRAWAL = "this track ends for them and the app asks LinkedIn to withdraw the invite";
 
-/** While a lead waits for acceptance on a track with the fallback on: what the end of the wait does (ADR 0004 13.7). */
+/** While a lead waits for acceptance on a track with the fallback on: what the end of the wait does (ADR 0004 14.7). */
 export const INMAIL_AT_THE_END = "If they haven’t accepted by the end of the wait, an InMail goes instead, if your session can send one then.";
 
 /** Q38's interim, on the record (ADR 0004 3.4), for every ending but the acceptance expiry (council on a6c1700, item 6). */
@@ -214,19 +215,14 @@ export function withdrawalStuckItems(stuck: NonNullable<NeedsAttention["inviteWi
 }
 
 /** The reply mark's confirmation and answer (ADR 0004 section 7): a mark of the user's, never a detected reply. */
-export const MARK_REPLIED = {
-  label: "Mark replied on LinkedIn",
-  pending: "Marking replied on LinkedIn",
-  preview: "Mark them replied on LinkedIn? Their outreach in this campaign stops, as any reply stops it, and nothing more goes to them here. Carry on the conversation on LinkedIn.",
-  done: "Marked replied on LinkedIn. Carry on the conversation on LinkedIn.",
-} as const;
+export const MARK_REPLIED = markRepliedWords("linkedin");
 
 /**
  * What a test run's LinkedIn reply mark is for, said from the work that allows it (review bot on c20c8f0): the read's own
  * `linkedinReply.work`, the work the engine's rule found, by its kind and whether it is recorded sent. Four sentences, one
  * per case, through an exhaustive mapping; nothing is inferred from which other fields are empty.
  */
-export function testReplyHelper(work: Extract<LinkedinReplyMark, { allowed: true }>["work"]): string {
+export function testReplyHelper(work: Extract<ReplyMark, { allowed: true }>["work"]): string {
   const after = "mark it once you have written back on LinkedIn from your test profile.";
   switch (`${work.kind}:${work.state}` as const) {
     case "message:sent":

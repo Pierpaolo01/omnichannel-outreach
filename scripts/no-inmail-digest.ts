@@ -1,5 +1,5 @@
 /**
- * Nothing changes for a LinkedIn track with the InMail fallback off (ticket 27, ADR 0004 13): one scripted campaign of a
+ * Nothing changes for a LinkedIn track with the InMail fallback off (ticket 27, ADR 0004 14): one scripted campaign of a
  * LinkedIn track (no InMail step) and an email track after it, through the real HTTP app and an in-memory SQLite store
  * against the simulated LinkedIn provider and the fake email provider. Its people accept, never accept, accept late, are
  * already connected, or cannot be reached; a withdrawal answers unknown once; one removes the connection while an invitation

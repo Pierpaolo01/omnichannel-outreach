@@ -216,9 +216,9 @@ export function galleryLead(id: string, campaignId: string, status: OutreachStat
     reply: status === "replied" ? { channel: "email", at: "2026-11-10T14:05:00.000Z" } : null,
     sender: null,
     smsSender: null,
-    linkedinReply: null,
+    replyMarks: {},
     zone: "Europe/London",
-    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, when: { kind: "at", at: "2026-11-11T09:00:00.000Z" } }, callTask: null, steps: [] }],
+    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, messageRequest: null, hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, when: { kind: "at", at: "2026-11-11T09:00:00.000Z" } }, callTask: null, steps: [] }],
     branch: status === "in_win_back" ? "win_back" : "main",
     winBackEnteredAt: null,
     declined: null,
@@ -379,7 +379,7 @@ async function readyForm(page: Page): Promise<void> {
 
 /** An import whose rows include the ones that changed nothing and a number a colleague holds. */
 function importWithUnmatchedRows(): { campaign: { id: string; name: string; defaultTimezone: null; createdAt: string }; imports: ImportRecord[] } {
-  const reach = { email: false, sms: false, call: true, linkedin: false };
+  const reach = { email: false, sms: false, call: true, linkedin: false, instagram: false };
   const person = (name: string, title: string, outcome: "new" | "already_enrolled" | "updated", id: string): Extract<SummaryEntry, { channels: unknown }> => ({
     outcome,
     lead: { kind: "person", personId: id },
@@ -2552,14 +2552,14 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
     focused: (page) => page.getByRole("menuitem", { name: "Email track" }),
   },
   {
-    name: "Up on Add track opens its menu on the last item, LinkedIn track",
+    name: "Up on Add track opens its menu on the last item, Instagram track",
     open: async (page) => {
       const id = await campaignWith(page, "Focus: menu opens on last");
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
     },
     act: (page) => page.keyboard.press("ArrowUp"),
-    focused: (page) => page.getByRole("menuitem", { name: "LinkedIn track" }),
+    focused: (page) => page.getByRole("menuitem", { name: "Instagram track" }),
   },
   // Ticket 14c: phone tracks.
   {
@@ -2568,7 +2568,8 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       const id = await campaignWith(page, "Focus: add a phone track");
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
-      // Up opens the menu on its last item, LinkedIn track (ticket 24b); Phone track is the one above it.
+      // Up opens the menu on its last item, Instagram track (ticket 25); LinkedIn track is above it, then Phone track.
+      await page.keyboard.press("ArrowUp");
       await page.keyboard.press("ArrowUp");
       await page.keyboard.press("ArrowUp");
     },
@@ -2670,7 +2671,8 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       const id = await campaignWith(page, "Focus: add a win-back SMS track", WITH_A_BRANCH);
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add win-back track" }).focus();
-      // Email, SMS, then LinkedIn (ticket 24b): Up opens on LinkedIn, and SMS is above it.
+      // Email, SMS, LinkedIn, then Instagram (ticket 25): Up opens on Instagram, and SMS is two above it.
+      await page.keyboard.press("ArrowUp");
       await page.keyboard.press("ArrowUp");
       await page.keyboard.press("ArrowUp");
     },

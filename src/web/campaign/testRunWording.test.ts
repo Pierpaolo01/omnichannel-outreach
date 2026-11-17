@@ -37,7 +37,7 @@ describe("the Test run tab says only what the run's facts say (ticket 21)", () =
     expect(stepStateText(row({ channel: "sms", state: "held", at: null, hold: "provider_skipped" }), "Europe/London", READ)).toBe("On hold");
     expect(stepDetail(row({ channel: "sms", state: "held", at: null, hold: "provider_skipped" }), run)).toBe("On hold because the provider skipped the lead. Nothing is dropped.");
     // Question Q7 answered (provisional for test runs): a test mobile in another campaign's conversation is skipped, and says whose.
-    expect(stepDetail(row({ channel: "sms", state: "skipped", reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false }] }), run)).toBe(
+    expect(stepDetail(row({ channel: "sms", state: "skipped", reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false, lead: null }] }), run)).toBe(
       "Skipped: your test mobile was already in a text conversation with campaign Spring clinics on every number this campaign can use",
     );
   });
@@ -46,7 +46,7 @@ describe("the Test run tab says only what the run's facts say (ticket 21)", () =
     expect(endingTitle("your_reply", null)).toBe("Stopped by your reply");
     expect(endingTitle("edited", null)).toBe("Stopped by an edit");
     const steps = [row({}), row({ stepId: "e2", state: "due" }), row({ stepId: "w1", branch: "win_back", state: "not_reached", at: null })];
-    expect(progressText({ id: "t", running: true, ending: null, startedAt: READ, endedAt: null, renderAs: { id: "l", name: "Pat" }, email: null, mobile: null, linkedin: null, status: "active", mayStillSend: 0, steps, linkedinTracks: [], linkedinReply: null })).toBe("1 of 2 steps done");
+    expect(progressText({ id: "t", running: true, ending: null, startedAt: READ, endedAt: null, renderAs: { id: "l", name: "Pat" }, email: null, mobile: null, linkedin: null, status: "active", mayStillSend: 0, steps, linkedinTracks: [], replyMarks: {}, social: { instagram: null }, stopReply: null })).toBe("1 of 2 steps done");
   });
 
   test("a finished test says what went and what was skipped and why, never that every step ran when some did not (council on ffa202c, item 13)", () => {

@@ -4,7 +4,7 @@
  * worker per database. A value that cannot be parsed reads as absent: nothing is invented from it (the boundary).
  */
 import { INTERRUPTION_GAP } from "../../domain/sequence/interruption.ts";
-import type { ProviderEvidence } from "../../domain/sequence/providers.ts";
+import { PROVIDER_CHANNELS, type ProviderChannel, type ProviderEvidence } from "../../domain/sequence/providers.ts";
 import type { EngineStore, WorkerLease } from "./engine-store.ts";
 
 /** The last instant a tick completed with every port answering (or the instant sending resumed). */
@@ -68,7 +68,7 @@ export async function interruptionNotice(store: Pick<EngineStore, "meta">): Prom
  * no worker has run on yet (no heartbeat) is not interrupted: nothing is due on it that a worker missed.
  */
 export interface FailedRead {
-  readonly channel: "email" | "sms" | "linkedin";
+  readonly channel: ProviderChannel;
   readonly part: "accounts" | "observation" | "call";
   readonly at: number;
 }
@@ -76,7 +76,7 @@ export interface FailedRead {
 const emptyEvidence: ProviderEvidence = { contactAt: null, freshForMs: 0, failedAt: null, failedPart: null };
 
 /** The providers' evidence as the worker last saved it; a value that cannot be parsed is no evidence. */
-export function parseEvidence(raw: string | null): Record<"email" | "sms" | "linkedin", ProviderEvidence> {
+export function parseEvidence(raw: string | null): Record<ProviderChannel, ProviderEvidence> {
   const one = (v: unknown): ProviderEvidence => {
     if (typeof v !== "object" || v === null) return emptyEvidence;
     const o = v as Record<string, unknown>;
@@ -86,13 +86,18 @@ export function parseEvidence(raw: string | null): Record<"email" | "sms" | "lin
   };
   try {
     const v = raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
-    return { email: one(v?.["email"]), sms: one(v?.["sms"]), linkedin: one(v?.["linkedin"]) };
+    return perChannel((c) => one(v?.[c]));
   } catch {
-    return { email: emptyEvidence, sms: emptyEvidence, linkedin: emptyEvidence };
+    return perChannel(() => emptyEvidence);
   }
 }
 
-export async function providerEvidence(store: Pick<EngineStore, "meta">): Promise<Record<"email" | "sms" | "linkedin", ProviderEvidence>> {
+/** A record with one entry per provider channel (ADR 0004 13.2): a new channel can never be left out of one. */
+export function perChannel<T>(of: (channel: ProviderChannel) => T): Record<ProviderChannel, T> {
+  return Object.fromEntries(PROVIDER_CHANNELS.map((c) => [c, of(c)])) as Record<ProviderChannel, T>;
+}
+
+export async function providerEvidence(store: Pick<EngineStore, "meta">): Promise<Record<ProviderChannel, ProviderEvidence>> {
   return parseEvidence(await store.meta(PROVIDERS_KEY));
 }
 
@@ -107,7 +112,7 @@ export async function sendingInterrupted(
   // From evidence, not timing (council G): a tick that threw and none ended since; a provider read that failed since the
   // heartbeat; otherwise the worker has not been running (stopped, asleep, or a tick that never ends).
   const evidence = await providerEvidence(store);
-  const failures = (["email", "sms", "linkedin"] as const).flatMap((channel) => {
+  const failures = PROVIDER_CHANNELS.flatMap((channel) => {
     const e = evidence[channel];
     return e.failedAt !== null && e.failedPart !== null && e.failedAt > heartbeat ? [{ channel, part: e.failedPart, at: e.failedAt }] : [];
   });

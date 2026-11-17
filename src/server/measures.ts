@@ -1,3 +1,4 @@
+import { isSocialChannel, messageRequestRecord, SOCIAL_CHANNEL_LIST, type MessageRequestChannel, type SocialChannel } from "../domain/social-channels.ts";
 import { isOutreachStatus, STATUS_GROUPS, statusGroup, type OutreachStatus, type StatusGroup } from "../domain/outreach-status.ts";
 import type { TrackChannel } from "../domain/sequence/definition.ts";
 import { CALL_OUTCOMES, callbackPending } from "../domain/sequence/calls.ts";
@@ -55,9 +56,9 @@ export function callCounts(outcome: CallOutcome): { readonly made: boolean; read
 
 const outcomeOf = (value: string): CallOutcome | null => CALL_OUTCOMES.find((o) => o === value) ?? null;
 const statusOf = (value: string): OutreachStatus | null => (isOutreachStatus(value) ? value : null);
-const channelOfReply = (value: string | null): ReplyChannel | null => (value === "email" || value === "sms" || value === "linkedin" ? value : null);
-/** A reply's channel: detected on email and SMS, marked by the user on LinkedIn (ADR 0004 section 7). */
-type ReplyChannel = MessageChannel | "linkedin";
+const channelOfReply = (value: string | null): ReplyChannel | null => (value === "email" || value === "sms" || isSocialChannel(value) ? value : null);
+/** A reply's channel: detected on email and SMS, marked by the user on a social channel (ADR 0004 7, 13.8). */
+type ReplyChannel = MessageChannel | SocialChannel;
 
 /**
  * A figure and its test share, from one pass over the same rows (the principal's decision of 15 November 2026: test runs
@@ -121,6 +122,8 @@ export interface MeasureRules {
   replies(facts: MeasureFacts, channel: MessageChannel): Tally;
   /** LinkedIn (ADR 0004 section 8): invites sent and accepted, messages sent, failures and replies marked. */
   linkedin(facts: MeasureFacts): { readonly invitesSent: Tally; readonly invitesAccepted: Tally; readonly inmailsSent: Tally; readonly messagesSent: Tally; readonly failed: Tally; readonly replies: Tally };
+  /** A message-request channel (ADR 0004 13.8): messages sent, failures and replies marked. */
+  messageRequests(facts: MeasureFacts, channel: MessageRequestChannel): { readonly messagesSent: Tally; readonly failed: Tally; readonly replies: Tally };
   callsMade(facts: MeasureFacts): Tally;
   callsConnected(facts: MeasureFacts): Tally;
   callsInterested(facts: MeasureFacts): Tally;
@@ -159,11 +162,19 @@ export const MEASURE_RULES: MeasureRules = {
     return {
       invitesSent: each(sent.filter((a) => a.action === "invite")),
       invitesAccepted: tally(facts.acceptances ?? [], (a) => `${a.subjectId}\u0000${a.trackId}`),
-      // InMails apart from messages (ADR 0004 13.6): an InMail is message work, counted by what it was sent as.
+      // InMails apart from messages (ADR 0004 14.6): an InMail is message work, counted by what it was sent as.
       inmailsSent: each(sent.filter((a) => a.action === "inmail")),
       messagesSent: each(sent.filter((a) => a.action === "message")),
       failed: tally(facts.failures.filter((f) => f.channel === "linkedin"), (m) => `${m.subjectId}\u0000${m.stepId}`),
       replies: each(repliedSubjects(facts, "linkedin")),
+    };
+  },
+
+  messageRequests(facts, channel) {
+    return {
+      messagesSent: each(sentAttempts(facts).filter((a) => a.channel === channel)),
+      failed: tally(facts.failures.filter((f) => f.channel === channel), (m) => `${m.subjectId}\u0000${m.stepId}`),
+      replies: each(repliedSubjects(facts, channel)),
     };
   },
 
@@ -195,8 +206,8 @@ export const MEASURE_RULES: MeasureRules = {
  * recorded activity, so a figure whose track a draft deleted is still shown (review bot on b8a8361).
  */
 function channelsOf(facts: MeasureFacts): CampaignMeasures["channels"] {
-  const order: readonly TrackChannel[] = ["email", "sms", "linkedin", "call"];
-  const recorded = new Set<TrackChannel>([...facts.attempts, ...facts.failures, ...facts.bounces, ...facts.replies].flatMap((r) => (r.channel === "linkedin" ? ["linkedin" as const] : (messageChannel(r.channel) ?? []))));
+  const order: readonly TrackChannel[] = ["email", "sms", ...SOCIAL_CHANNEL_LIST, "call"];
+  const recorded = new Set<TrackChannel>([...facts.attempts, ...facts.failures, ...facts.bounces, ...facts.replies].flatMap((r) => (isSocialChannel(r.channel) ? [r.channel] : (messageChannel(r.channel) ?? []))));
   if (facts.calls.length > 0) recorded.add("call");
   return order.filter((c) => recorded.has(c) || facts.definition.tracks.some((t) => t.channel === c));
 }
@@ -232,6 +243,10 @@ export function measuresOf(facts: MeasureFacts, overrides: Partial<MeasureRules>
       replies: li.replies.all,
       fromTests: { invitesSent: li.invitesSent.test, invitesAccepted: li.invitesAccepted.test, inmailsSent: li.inmailsSent.test, messagesSent: li.messagesSent.test, failed: li.failed.test, replies: li.replies.test },
     },
+    messageRequests: messageRequestRecord((ch) => {
+      const m = rules.messageRequests(facts, ch);
+      return { messagesSent: m.messagesSent.all, failed: m.failed.all, replies: m.replies.all, fromTests: { messagesSent: m.messagesSent.test, failed: m.failed.test, replies: m.replies.test } };
+    }),
     calls: {
       made: made.all,
       connected: connected.all,

@@ -1,3 +1,5 @@
+import { SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
+import type { TrackChannelApi } from "../../shared/api.ts";
 import { Link } from "wouter";
 import type { CampaignListItem, LeadOutcome } from "../../shared/api.ts";
 import { PageTitle, QuickSearch } from "../App.tsx";
@@ -11,7 +13,7 @@ import { whenImported } from "../importText.tsx";
 import { useNow } from "../time.ts";
 import { LaunchBadge, campaignPath } from "./CampaignPage.tsx";
 
-const TRACK_NAME = { email: "Email track", sms: "SMS track", call: "Phone track", linkedin: "LinkedIn track" } as const;
+const TRACK_NAME = (channel: TrackChannelApi): string => (channel === "email" ? "Email track" : channel === "sms" ? "SMS track" : channel === "call" ? "Phone track" : `${SOCIAL_CHANNELS[channel].name} track`);
 
 /** Campaigns: the list, with New campaign and Import again (guided import, chosen 12 November 2026). */
 export function CampaignsPage() {
@@ -116,12 +118,12 @@ function CampaignRow({ campaign, controls }: { campaign: CampaignListItem; contr
             {campaign.sequence.tracks.map((channel, i) => (
               <span key={i} className="flex items-center gap-1.5">
                 {i > 0 && <span className="w-2 border-t border-line-strong" aria-hidden="true" />}
-                <span className="grid size-7 place-items-center rounded-[7px] border border-line-strong bg-base-100 text-ink-2" title={TRACK_NAME[channel]}>
+                <span className="grid size-7 place-items-center rounded-[7px] border border-line-strong bg-base-100 text-ink-2" title={TRACK_NAME(channel)}>
                   <Icon name={channel === "call" ? "call" : channel} className="size-4" />
                 </span>
               </span>
             ))}
-            <span className="sr-only">Sequence: {campaign.sequence.tracks.map((c) => TRACK_NAME[c]).join(", ")}</span>
+            <span className="sr-only">Sequence: {campaign.sequence.tracks.map((c) => TRACK_NAME(c)).join(", ")}</span>
           </p>
         )}
         {campaign.pause.paused && (

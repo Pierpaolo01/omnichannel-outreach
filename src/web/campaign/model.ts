@@ -1,4 +1,6 @@
 /** The campaign editor's draft helpers (ticket 12c). Pure: no React, no requests. */
+import { isMessageRequestChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
+import type { TrackChannelApi } from "../../shared/api.ts";
 import { mergeUses, rewriteMergeUses, type MergeUse } from "../../domain/sequence/copy.ts";
 import { ownSubject } from "../../domain/sequence/definition.ts";
 import { trackLabel, trackPhrase } from "../../shared/track-label.ts";
@@ -35,7 +37,7 @@ export const DEFAULT_SKIP_LIMIT_DAYS = 2;
  * which has no copy, and the default skip limit (ADR 0003, ticket 14c). In the win-back branch
  * (ticket 16b) it starts when the lead enters the branch, which is what `entry` means there.
  */
-export function newTrack(channel: "email" | "sms" | "call" | "linkedin", branch: TrackDefinition["branch"] = "main"): TrackDefinition {
+export function newTrack(channel: TrackChannelApi, branch: TrackDefinition["branch"] = "main"): TrackDefinition {
   return {
     id: newId("track"),
     channel,
@@ -48,6 +50,8 @@ export function newTrack(channel: "email" | "sms" | "call" | "linkedin", branch:
     removed: false,
     ...(channel === "call" ? { callSkipLimitDays: DEFAULT_SKIP_LIMIT_DAYS } : {}),
     ...(channel === "linkedin" ? { acceptWaitDays: DEFAULT_ACCEPT_WAIT_DAYS } : {}),
+    // A message-request track starts with no sender chosen: the user chooses (ADR 0004 13.5); none is launch blocker 3.
+    ...(isMessageRequestChannel(channel) ? { senders: [] } : {}),
   };
 }
 
@@ -65,6 +69,8 @@ export const emailTrackOf = (def: CampaignDefinition): TrackDefinition | undefin
 
 /** What one step of a track on this channel is called: Email 1, Text 1, Call 1 (a LinkedIn step by its role: `stepTitle`). */
 export const STEP_NOUN = { email: "Email", sms: "Text", call: "Call", linkedin: "LinkedIn step" } as const;
+/** A step's noun on any track channel: a message-request channel's step is a "Message" (ADR 0004 13.3). */
+export const stepNounOf = (channel: TrackChannelApi): string => (isMessageRequestChannel(channel) ? "Message" : STEP_NOUN[channel]);
 
 /**
  * A track's name in messages, from its own channel and never its position among all tracks: "the
@@ -82,11 +88,16 @@ export function trackSummary(track: TrackDefinition): string {
   if (track.channel === "call") return "One call";
   // A LinkedIn track: the invite, then the messages it opens (ADR 0004 3.1).
   if (track.channel === "linkedin") {
-    // The InMail fallback is said apart (ADR 0004 13.2): it goes only if the invite isn't accepted.
+    // The InMail fallback is said apart (ADR 0004 14.2): it goes only if the invite isn't accepted.
     const live = liveSteps(track);
     const messages = Math.max(0, live.filter((s) => s.role !== "inmail").length - 1);
     const inmail = live.some((s) => s.role === "inmail") ? ", InMail if not accepted" : "";
     return `Invite, then ${messages} ${messages === 1 ? "message" : "messages"}${inmail}`;
+  }
+  // A message-request track: the message request, then its follow-ups (ADR 0004 13.3).
+  if (isMessageRequestChannel(track.channel)) {
+    const follow = Math.max(0, liveSteps(track).length - 1);
+    return follow === 0 ? "Message request" : `Message request, then ${follow} ${follow === 1 ? "follow-up" : "follow-ups"}`;
   }
   const steps = liveSteps(track);
   const days = steps.reduce((sum, s) => sum + (Number.isFinite(s.waitDays) ? s.waitDays : 0), 0);
@@ -183,5 +194,6 @@ export function sendsOnItsOwn(def: CampaignDefinition): string {
     : channels.has("email") ? "Email goes out on its own, inside each lead’s sending window."
     : "";
   const linkedin = channels.has("linkedin") ? "LinkedIn invites and messages go out from a LinkedIn session, inside each lead’s sending window." : "";
-  return [own, linkedin, calls].filter(Boolean).join(" ");
+  const requests = MESSAGE_REQUEST_CHANNELS.filter((c) => channels.has(c)).map((c) => `${SOCIAL_CHANNELS[c].name} messages go out from ${SOCIAL_CHANNELS[c].aName} session, inside each lead’s sending window.`);
+  return [own, linkedin, ...requests, calls].filter(Boolean).join(" ");
 }

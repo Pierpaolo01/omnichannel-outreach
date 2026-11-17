@@ -14,6 +14,7 @@ const m = (fields: Partial<CampaignMeasures> = {}): CampaignMeasures => ({
   email: msg(40, 2, 3),
   sms: msg(12, 1, 1),
   linkedin: { invitesSent: 0, invitesAccepted: 0, inmailsSent: 0, messagesSent: 0, failed: 0, replies: 0, fromTests: { invitesSent: 0, invitesAccepted: 0, inmailsSent: 0, messagesSent: 0, failed: 0, replies: 0 } },
+  messageRequests: { instagram: { messagesSent: 0, failed: 0, replies: 0, fromTests: { messagesSent: 0, failed: 0, replies: 0 } } },
   calls: { made: 9, connected: 4, interested: 1, declined: 2, callbacksPending: 1, fromTests: NO_CALL_TESTS },
   replyRate: r(4, 16, 25),
   connectRate: r(4, 9, 44),

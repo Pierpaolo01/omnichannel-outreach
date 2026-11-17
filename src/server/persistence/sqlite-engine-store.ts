@@ -7,11 +7,11 @@ import type { SenderAccountView } from "../../domain/sequence/blockers.ts";
 import { isTimeZone, localDayNumber, prospectZone, resetDayOf, startOfLocalDay, type WindowRule } from "../../domain/sequence/clock.ts";
 import { defaultGap } from "../../domain/sequence/dispatch.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
-import { emptyDefinition, poolOf, type CampaignDefinition, type DeclinedPath } from "../../domain/sequence/definition.ts";
+import { emptyDefinition, poolOf, type CampaignDefinition, type ConversationChannel, type DeclinedPath, type SendChannel } from "../../domain/sequence/definition.ts";
 import { callableOnDay, skipDeadlineOf, skipLimitOf } from "../../domain/sequence/calls.ts";
 import { bindingUnsent, deriveStatus, releaseUnsentBindings } from "../../domain/sequence/progress.ts";
 import { maySend, occupyingKeys } from "../../domain/sequence/attempt.ts";
-import type { ConversationCause, InmailStanding, InmailState, LinkedinSkipCause } from "../../domain/sequence/state.ts";
+import type { ConversationCause, ImportedAddress, InmailStanding, InmailState, LeadFacts, LinkedinSkipCause } from "../../domain/sequence/state.ts";
 import type {
   AccountState,
   Attempt,
@@ -36,12 +36,13 @@ import type {
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
 import type { RunTestFacts } from "../../domain/sequence/test-runs.ts";
-import { CONTACT_IS_A_LEAD } from "../../domain/sequence/test-runs.ts";
+import { accountIsALead, CONTACT_IS_A_LEAD } from "../../domain/sequence/test-runs.ts";
 import type { TestContact, TestContacts } from "../../domain/test-contacts.ts";
 import type { StoredTestContacts, TestRunRecord, TestStop } from "../engine/engine-store.ts";
 import type { SocialAllowances, BounceEvent, CallNoteRecord, MeasureFacts, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, RunningSave, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 import { linkedinProfileKey } from "../../domain/linkedin-profile.ts";
+import { accountDetailId, accountOfDetailId, isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, MESSAGE_REQUEST_COLUMNS, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel, type SocialSenderKind } from "../../domain/social-channels.ts";
 import { holdsLeaseOn, releaseLeaseOn, takeLeaseOn } from "./lease-table.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -63,7 +64,7 @@ const machineZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
  * and each of them moves the conversations' version by trigger (migration 23); the others it reads only for a name or to
  * find the lead's destinations. A test reads both lists.
  */
-export const CONVERSATION_PAIRS_QUERY = `SELECT b.sender_number, b.recipient_key, b.owner_subject, COALESCE(e.campaign_id, tr.campaign_id) AS owner_campaign, c.name AS owner_campaign_name,
+export const CONVERSATION_PAIRS_QUERY = `SELECT b.sender_number, b.recipient_key, b.owner_subject, COALESCE(e.campaign_id, tr.campaign_id) AS owner_campaign, c.name AS owner_campaign_name, CASE WHEN e.id IS NULL THEN NULL ELSE COALESCE(op.display_name, oc.name) END AS owner_lead_name,
                 tr.id IS NOT NULL AS owner_is_test, COALESCE(e.ended, tr.ended) AS owner_ended,
                 (EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = b.owner_subject AND w.account_id = b.sender_number AND w.destination = b.recipient_key
                   AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL))
@@ -81,6 +82,8 @@ export const CONVERSATION_PAIRS_QUERY = `SELECT b.sender_number, b.recipient_key
          LEFT JOIN enrollments e ON e.id = b.owner_subject
          LEFT JOIN test_runs tr ON tr.id = b.owner_subject
          LEFT JOIN campaigns c ON c.id = COALESCE(e.campaign_id, tr.campaign_id)
+         LEFT JOIN people op ON op.id = e.person_id
+         LEFT JOIN companies oc ON oc.id = e.company_id
          WHERE b.released_at IS NULL
            AND (b.recipient_key IN (SELECT key FROM live_contact_details WHERE owner_kind = :kind AND owner_id = :owner AND channel = 'phone')
              OR b.recipient_key IN (SELECT value FROM json_each(:own))
@@ -101,8 +104,11 @@ export const CONVERSATION_INPUTS = {
   reply_events: ["event_id", "state", "inbox", "address", "received_wall"],
 } as const;
 export const CONVERSATION_INPUT_TABLES = Object.keys(CONVERSATION_INPUTS) as (keyof typeof CONVERSATION_INPUTS)[];
-/** What the ownership query reads that is no fact of ownership: the owner's campaign's name, and the lead's destinations. */
-export const CONVERSATION_LOOKUP_TABLES = ["campaigns", "live_contact_details", "attempts", "json_each"] as const;
+/**
+ * What the ownership query reads that is no fact of ownership: the owner's campaign's name, the owning lead's name (`people`,
+ * `companies`: said when the owner is a lead of the same campaign, the verifier on f2824d4 item 9), and the lead's destinations.
+ */
+export const CONVERSATION_LOOKUP_TABLES = ["campaigns", "people", "companies", "live_contact_details", "attempts", "json_each"] as const;
 
 export class SqliteEngineStore implements EngineStore {
   private readonly db: DatabaseSync;
@@ -409,15 +415,30 @@ export class SqliteEngineStore implements EngineStore {
       return raw === null ? null : (JSON.parse(raw) as TestContact);
     };
     const linkedin = c["test_linkedin"] === undefined ? null : contact("test_linkedin");
-    const contacts: TestContacts = { email: contact("test_email"), mobile: contact("test_mobile"), ...(linkedin ? { linkedin } : {}) };
+    const social = socialContactsOf(strOrNull(c, "test_social"));
+    const contacts: TestContacts = { email: contact("test_email"), mobile: contact("test_mobile"), ...(linkedin ? { linkedin } : {}), ...social };
     return {
       contacts,
       leadHas: {
         email: contacts.email !== null && this.leadHasKey("email", contacts.email.key),
         mobile: contacts.mobile !== null && this.leadHasKey("phone", contacts.mobile.key),
         ...(linkedin ? { linkedin: this.leadHasProfile(linkedin.key) } : {}),
+        ...Object.fromEntries(MESSAGE_REQUEST_CHANNELS.flatMap((ch) => (social[ch] ? [[ch, this.leadHasAccount(ch, social[ch].key)]] : []))),
       },
     };
+  }
+
+  /**
+   * Whether some person's or company's record holds this account on a message-request channel (ADR 0004 13.8's boundary),
+   * read from the import's cells by the channel's one normaliser.
+   */
+  private leadHasAccount(channel: MessageRequestChannel, key: string): boolean {
+    const columns = MESSAGE_REQUEST_COLUMNS[channel];
+    const cells = [
+      ...this.sql("SELECT json_extract(source_row, '$.' || ?) AS cell FROM people WHERE json_extract(source_row, '$.' || ?) <> ''").all(columns.people, columns.people),
+      ...this.sql("SELECT json_extract(source_row, '$.' || ?) AS cell FROM companies WHERE json_extract(source_row, '$.' || ?) <> ''").all(columns.businesses, columns.businesses),
+    ];
+    return cells.some((r) => SOCIAL_CHANNELS[channel].accountKey(String(r["cell"] ?? "")) === key);
   }
 
   /** Whether some person's record holds this LinkedIn profile (ADR 0004 section 8's boundary), read by the one key rule. */
@@ -426,11 +447,11 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   async testContacts(campaignId: string): Promise<StoredTestContacts | null> {
-    const c = this.sql("SELECT test_email, test_mobile, test_linkedin FROM campaigns WHERE id = ?").get(campaignId);
+    const c = this.sql("SELECT test_email, test_mobile, test_linkedin, test_social FROM campaigns WHERE id = ?").get(campaignId);
     return c ? this.storedTestContacts(c) : null;
   }
 
-  async saveTestContacts(campaignId: string, contacts: TestContacts): Promise<{ readonly ok: true } | { readonly ok: false; readonly field: "email" | "mobile" | "linkedin"; readonly message: string } | { readonly ok: false; readonly missing: true }> {
+  async saveTestContacts(campaignId: string, contacts: TestContacts): Promise<{ readonly ok: true } | { readonly ok: false; readonly field: "email" | "mobile" | SocialChannel; readonly message: string } | { readonly ok: false; readonly missing: true }> {
     return this.transaction(() => {
       if (!this.sql("SELECT 1 FROM campaigns WHERE id = ?").get(campaignId)) return { ok: false as const, missing: true as const };
       // The boundary, read in the saving transaction: a contact a lead's record has is refused.
@@ -438,7 +459,18 @@ export class SqliteEngineStore implements EngineStore {
       if (contacts.mobile !== null && this.leadHasKey("phone", contacts.mobile.key)) return { ok: false as const, field: "mobile" as const, message: CONTACT_IS_A_LEAD.mobile };
       const linkedin = contacts.linkedin ?? null;
       if (linkedin !== null && this.leadHasProfile(linkedin.key)) return { ok: false as const, field: "linkedin" as const, message: CONTACT_IS_A_LEAD.linkedin };
-      this.run("UPDATE campaigns SET test_email = ?, test_mobile = ?, test_linkedin = ? WHERE id = ?", [contacts.email ? JSON.stringify(contacts.email) : null, contacts.mobile ? JSON.stringify(contacts.mobile) : null, linkedin ? JSON.stringify(linkedin) : null, campaignId]);
+      for (const channel of MESSAGE_REQUEST_CHANNELS) {
+        const account = contacts[channel] ?? null;
+        if (account !== null && this.leadHasAccount(channel, account.key)) return { ok: false as const, field: channel, message: accountIsALead(channel) };
+      }
+      const social = Object.fromEntries(MESSAGE_REQUEST_CHANNELS.flatMap((ch) => (contacts[ch] ? [[ch, contacts[ch]]] : [])));
+      this.run("UPDATE campaigns SET test_email = ?, test_mobile = ?, test_linkedin = ?, test_social = ? WHERE id = ?", [
+        contacts.email ? JSON.stringify(contacts.email) : null,
+        contacts.mobile ? JSON.stringify(contacts.mobile) : null,
+        linkedin ? JSON.stringify(linkedin) : null,
+        Object.keys(social).length > 0 ? JSON.stringify(social) : null,
+        campaignId,
+      ]);
       return { ok: true as const };
     });
   }
@@ -479,10 +511,11 @@ export class SqliteEngineStore implements EngineStore {
       this.run("INSERT INTO subjects (id, kind) VALUES (?, 'test_run')", [id]);
       this.run(
         `INSERT INTO test_runs (id, campaign_id, render_as, email_value, email_key, mobile_value, mobile_key, definition_version, definition_edited_at,
-           started_wall, request_id, status, frozen_since, frozen_total, linkedin_value, linkedin_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`,
+           started_wall, request_id, status, frozen_since, frozen_total, linkedin_value, linkedin_key, social_contacts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`,
         [id, campaignId, request.renderAs, contacts.email?.value ?? null, contacts.email?.key ?? null, contacts.mobile?.value ?? null, contacts.mobile?.key ?? null,
-          num(c, "definition_version"), strOrNull(c, "definition_edited_at"), now, request.id, now, now, contacts.linkedin?.value ?? null, contacts.linkedin?.key ?? null],
+          num(c, "definition_version"), strOrNull(c, "definition_edited_at"), now, request.id, now, now, contacts.linkedin?.value ?? null, contacts.linkedin?.key ?? null,
+          socialContactsColumn(contacts)],
       );
       this.run("INSERT INTO freezes (subject_id, from_wall, to_wall) VALUES (?, ?, NULL)", [id, now]);
       const base = this.load(id, now);
@@ -782,14 +815,15 @@ export class SqliteEngineStore implements EngineStore {
     this.transaction(() => {
       for (const a of accounts) {
         this.run(
-          `INSERT INTO sender_accounts (id, channel, label, capacity, gap_ms, k, healthy, problem, reset_zone, daily_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO sender_accounts (id, channel, label, capacity, gap_ms, k, healthy, problem, reset_zone, daily_limit, social_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET label = excluded.label, capacity = excluded.capacity, daily_limit = excluded.daily_limit,
-             gap_ms = excluded.gap_ms, k = excluded.k, healthy = excluded.healthy, problem = excluded.problem, reset_zone = excluded.reset_zone
+             gap_ms = excluded.gap_ms, k = excluded.k, healthy = excluded.healthy, problem = excluded.problem, reset_zone = excluded.reset_zone,
+             social_kind = excluded.social_kind
            -- Never another channel's account: an account's identity is its channel and its id (the re-check of e261ffa, item 3).
            WHERE sender_accounts.channel = excluded.channel`,
-          [a.id, a.channel, a.label, a.capacity, a.gapMs, a.k, a.healthy ? 1 : 0, a.healthy ? null : (a.problem ?? "unhealthy"), a.resetZone, a.dailyLimit],
+          [a.id, a.channel, a.label, a.capacity, a.gapMs, a.k, a.healthy ? 1 : 0, a.healthy ? null : (a.problem ?? "unhealthy"), a.resetZone, a.dailyLimit, isMessageRequestChannel(a.channel) ? (a.socialKind ?? null) : null],
         );
-        // A LinkedIn session's InMail report (ADR 0004 13.5), with when it was read: kept until the session reports again.
+        // A LinkedIn session's InMail report (ADR 0004 14.5), with when it was read: kept until the session reports again.
         if (a.channel === "linkedin" && a.inmail !== undefined) {
           const report = a.inmail;
           this.run(
@@ -801,7 +835,7 @@ export class SqliteEngineStore implements EngineStore {
     });
   }
 
-  async disconnectUnlisted(channel: "email" | "sms", listed: readonly string[]): Promise<void> {
+  async disconnectUnlisted(channel: SendChannel, listed: readonly string[]): Promise<void> {
     this.transaction(() => {
       for (const r of this.sql("SELECT id FROM sender_accounts WHERE channel = ? AND (healthy = 1 OR problem IS NOT 'not_listed')").all(channel)) {
         if (!listed.includes(str(r, "id"))) this.run("UPDATE sender_accounts SET healthy = 0, problem = 'not_listed' WHERE id = ?", [str(r, "id")]);
@@ -1134,9 +1168,9 @@ export class SqliteEngineStore implements EngineStore {
            (SELECT COUNT(*) FROM provider_work WHERE account_id = :id AND sent_day = :today) AS sent_today,
            (SELECT COUNT(*) FROM provider_work WHERE account_id = :id AND settled IS NULL AND sent_wall IS NULL) AS reserved`,
       ).get({ id, today: resetDayOf(now, resetZone) }) ?? {};
-    const channel = str(a, "channel") === "sms" ? ("sms" as const) : str(a, "channel") === "linkedin" ? ("linkedin" as const) : ("email" as const);
-    // A social account's room is the user's allowances, never the port's number (ADR 0004 1.2): none set, no room.
-    const social = channel === "linkedin" ? this.socialRoom(id, now, resetZone) : null;
+    const channel = sendChannelOf(str(a, "channel"));
+    // A social account's room is the user's allowances, never the port's number (ADR 0004 1.2, 13.7): none set, no room.
+    const social = isSocialChannel(channel) ? this.socialRoom(id, channel, now, resetZone) : null;
     const capacity = social ? social.kinds.invite.capacity + social.kinds.message.capacity : num(a, "capacity");
     const dailyLimit = social ? capacity : num(a, "daily_limit");
     return {
@@ -1145,6 +1179,7 @@ export class SqliteEngineStore implements EngineStore {
       capacity,
       dailyLimit,
       ...(social ? { kinds: social.kinds, notes: social.notes, inmail: this.inmailStanding(id, a) } : {}),
+      ...(isMessageRequestChannel(channel) && a["social_kind"] != null ? { socialKind: str(a, "social_kind") as SocialSenderKind } : {}),
       // From the daily limit, not today's room: a day other senders used up does not change the pacing (council on PR 63).
       gapMs: numOrNull(a, "gap_ms") ?? defaultGap(this.windowsServedBy(id, channel), dailyLimit),
       k: num(a, "k"),
@@ -1166,7 +1201,7 @@ export class SqliteEngineStore implements EngineStore {
    * reset day plus its reservations; the notes, invites handed over with a note this calendar month whose work was sent or
    * is unsettled. No allowance row: no room for anything.
    */
-  private socialRoom(id: string, now: number, resetZone: string): { kinds: NonNullable<AccountState["kinds"]>; notes: NonNullable<AccountState["notes"]> } {
+  private socialRoom(id: string, channel: SocialChannel, now: number, resetZone: string): { kinds: NonNullable<AccountState["kinds"]>; notes: NonNullable<AccountState["notes"]> } {
     const allowance = this.sql("SELECT * FROM social_allowances WHERE account_id = ?").get(id);
     const today = resetDayOf(now, resetZone);
     const usedOf = (kind: "invite" | "message") =>
@@ -1185,7 +1220,8 @@ export class SqliteEngineStore implements EngineStore {
       ).get({ id, month }) ?? {},
       "used",
     );
-    const cap = (column: string) => (allowance ? num(allowance, column) : 0);
+    // A message-request session has one allowance, messages per day (ADR 0004 13.7): no invite and no note is ever its.
+    const cap = (column: string) => (allowance && (channel === "linkedin" || column === "messages_per_day") ? num(allowance, column) : 0);
     return {
       kinds: { invite: { capacity: cap("invites_per_day"), used: usedOf("invite") }, message: { capacity: cap("messages_per_day"), used: usedOf("message") } },
       notes: { capacity: cap("notes_per_month"), used: notesUsed },
@@ -1193,7 +1229,7 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   /**
-   * A LinkedIn session's InMail standing (ADR 0004 13.5): its last report, the InMails that report cannot include yet (work
+   * A LinkedIn session's InMail standing (ADR 0004 14.5): its last report, the InMails that report cannot include yet (work
    * unsettled, or sent at or after the report: a claim's reservation, work handed and not settled, a send since), and the
    * InMails running tracks chose on it whose work is not out (none yet, or only work that settled not sent).
    */
@@ -1203,7 +1239,7 @@ export class SqliteEngineStore implements EngineStore {
     const credits = numOrNull(account, "inmail_credits") ?? 0;
     // A session that never reported, or reports no plan, can back no InMail: no holding to count.
     if (plan !== "premium" && plan !== "sales_navigator") return { plan, credits, reportedWall, holdings: [] };
-    // Every credit held on the session (13.5), earliest acquired first, but those the report already includes: an InMail sent
+    // Every credit held on the session (14.5), earliest acquired first, but those the report already includes: an InMail sent
     // before the report was read.
     const holdings = this.sql(
       `SELECT t.subject_id, t.track_id, t.inmail_hold_wall FROM track_progress t
@@ -1222,10 +1258,13 @@ export class SqliteEngineStore implements EngineStore {
     return r ? { invitesPerDay: num(r, "invites_per_day"), messagesPerDay: num(r, "messages_per_day"), notesPerMonth: num(r, "notes_per_month") } : null;
   }
 
-  async setAllowances(accountId: string, a: SocialAllowances, now: number): Promise<"set" | "not_social"> {
+  async setAllowances(accountId: string, given: SocialAllowances, now: number): Promise<"set" | "not_social"> {
+    let a = given;
     return this.transaction(() => {
       const account = this.sql("SELECT channel FROM sender_accounts WHERE id = ?").get(accountId);
-      if (!account || str(account, "channel") !== "linkedin") return "not_social";
+      if (!account || !isSocialChannel(str(account, "channel"))) return "not_social";
+      // A message-request session's invite and note allowances are zero and never read (ADR 0004 13.7).
+      if (isMessageRequestChannel(str(account, "channel"))) a = { ...a, invitesPerDay: 0, notesPerMonth: 0 };
       this.run(
         `INSERT INTO social_allowances (account_id, invites_per_day, messages_per_day, notes_per_month, updated_wall) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(account_id) DO UPDATE SET invites_per_day = excluded.invites_per_day, messages_per_day = excluded.messages_per_day,
@@ -1247,13 +1286,42 @@ export class SqliteEngineStore implements EngineStore {
       .flatMap((r) => (r["work_key"] == null ? [] : [{ subjectId: str(r, "subject_id"), trackId: str(r, "track_id"), workKey: str(r, "work_key"), progress: toTrack(r) }]));
   }
 
-  /** The windows of every live track on the account's channel whose pool includes it (ADR 0003 4.1's default gap). */
-  private windowsServedBy(accountId: string, channel: "email" | "sms" | "linkedin"): WindowRule[][] {
-    return this.sql("SELECT * FROM campaigns WHERE definition IS NOT NULL")
+  /**
+   * The windows of the tracks that pace this account (ADR 0003 4.1's default gap): the tracks with leads running on it (the
+   * council on 5a30b9f, item 2). On a message-request channel, the live tracks that chose the session; on LinkedIn, the live
+   * LinkedIn tracks of a campaign whose pool holds it; on either, also every track a running lead fixed to this account has
+   * started and not finished, a removed or unticked one included, and only while it has. Email and SMS keep their rule: the
+   * live tracks of a campaign whose pool holds it.
+   */
+  private windowsServedBy(accountId: string, channel: SendChannel): WindowRule[][] {
+    const campaigns = this.sql("SELECT * FROM campaigns WHERE definition IS NOT NULL")
       .all()
-      .map((c) => this.definitionOf(c))
-      .filter((d) => poolOf(d, channel).includes(accountId))
-      .flatMap((d) => d.tracks.filter((t) => !t.removed && t.channel === channel).map((t) => [...t.window]));
+      .map((c) => ({ id: str(c, "id"), def: this.definitionOf(c) }));
+    if (channel !== "linkedin" && !isMessageRequestChannel(channel)) {
+      return campaigns.filter(({ def }) => poolOf(def, channel).includes(accountId)).flatMap(({ def }) => def.tracks.filter((t) => !t.removed && t.channel === channel).map((t) => [...t.window]));
+    }
+    // The tracks running leads are fixed to this account on: started, not finished, their lead not ended.
+    const fixed = new Set(
+      (channel === "linkedin"
+        ? this.sql(
+            `SELECT s.campaign_id, t.track_id FROM (SELECT id, campaign_id FROM enrollments WHERE linkedin_sender = :acc AND ended IS NULL
+               UNION ALL SELECT id, campaign_id FROM test_runs WHERE linkedin_sender = :acc AND ended IS NULL) s
+             JOIN track_progress t ON t.subject_id = s.id AND t.started_at IS NOT NULL AND t.finished_at IS NULL`,
+          ).all({ acc: accountId })
+        : this.sql(
+            `SELECT s.campaign_id, j.key AS track_id FROM (SELECT id, campaign_id, social_senders FROM enrollments WHERE social_senders IS NOT NULL AND ended IS NULL
+               UNION ALL SELECT id, campaign_id, social_senders FROM test_runs WHERE social_senders IS NOT NULL AND ended IS NULL) s, json_each(s.social_senders) j
+             JOIN track_progress t ON t.subject_id = s.id AND t.track_id = j.key AND t.started_at IS NOT NULL AND t.finished_at IS NULL
+             WHERE j.value = :acc`,
+          ).all({ acc: accountId })
+      ).map((r) => `${str(r, "campaign_id")}|${str(r, "track_id")}`),
+    );
+    return campaigns.flatMap(({ id, def }) =>
+      def.tracks
+        .filter((t) => t.channel === channel)
+        .filter((t) => fixed.has(`${id}|${t.id}`) || (!t.removed && (channel === "linkedin" ? poolOf(def, channel).includes(accountId) : (t.senders ?? []).includes(accountId))))
+        .map((t) => [...t.window]),
+    );
   }
 
   /** Parsed definitions, by campaign and definition version: a version is never rewritten. */
@@ -1305,7 +1373,7 @@ export class SqliteEngineStore implements EngineStore {
     // A test run (ADR 0003 "Ticket 21") reaches its own test contacts and nothing else, renders as the lead it names, and
     // keeps the campaign's zone (question Q2's interim); every other part of its state is loaded as a lead's is.
     const reach = test ? this.testReach(test, definition) : this.leadReach(e, definition);
-    const { details, phones, resolved, zone, mergeData, owner, importedProfile } = reach;
+    const { details, phones, resolved, zone, mergeData, owner, importedProfile, importedAccounts } = reach;
 
     const tracks = this.sql("SELECT * FROM track_progress WHERE subject_id = ? ORDER BY track_id").all(subjectId).map(toTrack);
     const attempts = this.sql("SELECT * FROM attempts WHERE subject_id = ? ORDER BY claimed_wall, rowid").all(subjectId).map(toAttempt);
@@ -1314,7 +1382,8 @@ export class SqliteEngineStore implements EngineStore {
       .map((r): CallAttempt => ({ id: str(r, "id"), requestId: str(r, "request_id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, redial: num(r, "redial") === 1, callbackAt: numOrNull(r, "callback_at"), declinedPath: declinedPathOrNull(strOrNull(r, "declined_path")), numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") }));
     if (!test) this.resolveReferenced(resolved, owner, [...tracks.map((t) => t.destinationDetailId), ...attempts.map((a) => a.destinationDetailId), ...callAttempts.map((c) => c.numberDetailId)]);
     if (!test) this.resolveProfiles(resolved, strOrNull(e, "person_id"), details, [...tracks.map((t) => t.destinationDetailId), ...attempts.map((a) => a.destinationDetailId)]);
-    return this.assemble(subjectId, test ? "test_run" : "enrollment", e, c, definition, now, { details, phones, resolved, zone, mergeData, owner, tracks, attempts, callAttempts, ...(importedProfile ? { importedProfile } : {}) });
+    if (!test) this.resolveAccounts(resolved, details, [...tracks.map((t) => t.destinationDetailId), ...attempts.map((a) => a.destinationDetailId)]);
+    return this.assemble(subjectId, test ? "test_run" : "enrollment", e, c, definition, now, { details, phones, resolved, zone, mergeData, owner, tracks, attempts, callAttempts, ...(importedProfile ? { importedProfile } : {}), ...(importedAccounts ? { importedAccounts } : {}) });
   }
 
   /** The reach of a test run: its test contacts, as details of its own (ids `test:<run>:email|mobile`), never a CRM record's. */
@@ -1350,6 +1419,16 @@ export class SqliteEngineStore implements EngineStore {
       details.push({ id: detail, channel: "linkedin", ownEmail: false, mobile: false, key: linkedinKey, value: strOrNull(t, "linkedin_value") ?? linkedinKey, bad, order: 0 });
       resolved[detail] = { liveId: detail, bad, owned: true };
     }
+    // The user's own test accounts on the message-request channels (ADR 0004 13.8): bad when a record holds the same account.
+    const social = testRunSocialOf(strOrNull(t, "social_contacts"));
+    for (const channel of MESSAGE_REQUEST_CHANNELS) {
+      const contact = social[channel];
+      if (!contact) continue;
+      const detail = testDetailId(id, channel);
+      const bad = contact.bad === true || this.leadHasAccount(channel, contact.key);
+      details.push({ id: detail, channel, ownEmail: false, mobile: false, key: contact.key, value: contact.value, bad, order: 0 });
+      resolved[detail] = { liveId: detail, bad, owned: true };
+    }
     const lead = this.sql("SELECT * FROM enrollments WHERE id = ?").get(str(t, "render_as"));
     return { details, phones, resolved, zone: definition.timezone, mergeData: lead ? this.mergeDataOf(lead) : {}, owner: null };
   }
@@ -1362,6 +1441,52 @@ export class SqliteEngineStore implements EngineStore {
     if (key === null) return null;
     const bad = this.sql("SELECT 1 FROM linkedin_profile_marks WHERE key = ?").get(key) !== undefined;
     return { id: profileDetailId(personId, key), channel: "linkedin", ownEmail: false, mobile: false, key, value: url.trim(), bad, order: 0 };
+  }
+
+  /**
+   * The lead's accounts on every message-request channel (ADR 0004 13.4), from the import's cells by the channel's one
+   * normaliser: the decision maker's own (order 1) and the company's (order 0), each bad by its key's mark; and what each
+   * cell held, for a skip's cause.
+   */
+  private accountsOf(personId: string | null, companyId: string): { details: LeadDetail[]; imported: NonNullable<LeadFacts["importedAccounts"]> } {
+    const personRow = personId === null ? null : this.cellsOf("people", personId);
+    const companyRow = this.cellsOf("companies", companyId);
+    const details: LeadDetail[] = [];
+    const imported: Partial<Record<MessageRequestChannel, { person: ImportedAddress | null; company: ImportedAddress }>> = {};
+    for (const channel of MESSAGE_REQUEST_CHANNELS) {
+      const columns = MESSAGE_REQUEST_COLUMNS[channel];
+      const read = (cell: string | undefined): ImportedAddress => ((cell ?? "").trim() === "" ? "none" : SOCIAL_CHANNELS[channel].accountKey(cell ?? "") === null ? "not_account" : "account");
+      imported[channel] = { person: personRow === null ? null : read(personRow[columns.people]), company: read(companyRow[columns.businesses]) };
+      const add = (belongsTo: "person" | "company", ownerId: string, cell: string | undefined, order: number) => {
+        const key = SOCIAL_CHANNELS[channel].accountKey(cell ?? "");
+        if (key === null) return;
+        const bad = this.sql("SELECT 1 FROM social_destination_marks WHERE channel = ? AND key = ?").get(channel, key) !== undefined;
+        details.push({ id: accountDetailId(channel, belongsTo, ownerId, key), channel, belongsTo, ownEmail: false, mobile: false, key, value: (cell ?? "").trim(), bad, order });
+      };
+      if (personId !== null && personRow !== null) add("person", personId, personRow[columns.people], 1);
+      add("company", companyId, companyRow[columns.businesses], 0);
+    }
+    return { details, imported };
+  }
+
+  /** A person's or company's latest source row, where the import keeps every cell (ADR 0004 13.4). */
+  private cellsOf(table: "people" | "companies", id: string): Readonly<Record<string, string>> {
+    const raw = strOrNull(this.sql(`SELECT source_row FROM ${table} WHERE id = ?`).get(id) ?? {}, "source_row");
+    return raw === null ? {} : (JSON.parse(raw) as Record<string, string>);
+  }
+
+  /**
+   * Every message-request account id the lead's progress names (ADR 0004 13.4): owned while it is that person's or company's
+   * account now (a re-import that changes the cell makes the old one no longer theirs), bad by its key's mark.
+   */
+  private resolveAccounts(resolved: Record<string, { liveId: string; bad: boolean; owned: boolean }>, details: readonly LeadDetail[], recorded: readonly (string | null)[]): void {
+    const current = new Set(details.filter((d) => isMessageRequestChannel(d.channel)).map((d) => d.id));
+    for (const id of new Set([...current, ...recorded])) {
+      const account = id === null ? null : accountOfDetailId(id);
+      if (!account || id === null) continue;
+      const bad = this.sql("SELECT 1 FROM social_destination_marks WHERE channel = ? AND key = ?").get(account.channel, account.key) !== undefined;
+      resolved[id] = { liveId: id, bad, owned: current.has(id) };
+    }
   }
 
   /**
@@ -1419,11 +1544,15 @@ export class SqliteEngineStore implements EngineStore {
     // The decision maker's LinkedIn profile from the import (ADR 0004 section 5): a company lead has none (question Q35).
     const profile = personId === null ? null : this.profileOf(personId);
     if (profile) details.push(profile);
+    // The message-request accounts (ADR 0004 13.4): the decision maker's own, newer, and the company's.
+    const accounts = this.accountsOf(personId, companyId);
+    details.push(...accounts.details);
     const importedUrl = personId === null ? null : (strOrNull(this.sql("SELECT linkedin_url FROM people WHERE id = ?").get(personId) ?? {}, "linkedin_url") ?? "").trim();
 
     return {
       details,
       ...(importedUrl === null ? {} : { importedProfile: importedUrl === "" ? ("none" as const) : linkedinProfileKey(importedUrl) === null ? ("not_member" as const) : ("member" as const) }),
+      importedAccounts: accounts.imported,
       phones,
       resolved: {},
       zone: prospectZone([strOrNull(person ?? {}, "timezone"), company ? strOrNull(company, "timezone") : null], definition.timezone),
@@ -1476,7 +1605,7 @@ export class SqliteEngineStore implements EngineStore {
     now: number,
     p: Reach & { readonly tracks: TrackProgress[]; readonly attempts: Attempt[]; readonly callAttempts: CallAttempt[] },
   ): SubjectState {
-    const { details, phones, resolved, zone, mergeData, owner, tracks, attempts, callAttempts, importedProfile } = p;
+    const { details, phones, resolved, zone, mergeData, owner, tracks, attempts, callAttempts, importedProfile, importedAccounts } = p;
     const accountIds = new Set([
       ...definition.emailPool,
       ...poolOf(definition, "sms"),
@@ -1485,6 +1614,10 @@ export class SqliteEngineStore implements EngineStore {
       ...(e["sms_sender"] == null ? [] : [str(e, "sms_sender")]),
       ...poolOf(definition, "linkedin"),
       ...(e["linkedin_sender"] == null ? [] : [str(e, "linkedin_sender")]),
+      // Every track's chosen sessions, a removed track's too: a lead that started it before the edit still runs it (ADR 0003's
+      // running edits), and before its first claim nothing else names its sessions (the review bot on 0922582).
+      ...definition.tracks.flatMap((t) => t.senders ?? []),
+      ...Object.values(socialSendersOf(strOrNull(e, "social_senders"))),
     ]);
     const accounts: Record<string, AccountState> = {};
     for (const id of accountIds) {
@@ -1513,6 +1646,7 @@ export class SqliteEngineStore implements EngineStore {
         emailSender: strOrNull(e, "email_sender"),
         smsSender: strOrNull(e, "sms_sender"),
         ...(e["linkedin_sender"] == null ? {} : { linkedinSender: str(e, "linkedin_sender") }),
+        ...(e["social_senders"] == null ? {} : { socialSenders: socialSendersOf(strOrNull(e, "social_senders")) }),
         stopReply: e["stop_reply_channel"] == null ? null : { channel: replyChannelOf(str(e, "stop_reply_channel")), atWall: num(e, "stop_reply_at") },
       },
       campaign: {
@@ -1557,9 +1691,10 @@ export class SqliteEngineStore implements EngineStore {
         CONVERSATION_PAIRS_QUERY,
       )
         // The lead's LinkedIn profile is a destination of conversations too (ADR 0004, question Q41): its session's pairs.
-        .all({ kind: owner?.kind ?? "", owner: owner?.id ?? "", own: JSON.stringify(owner ? [] : details.filter((d) => d.mobile).map((d) => d.key)), profiles: JSON.stringify(details.filter((d) => d.channel === "linkedin").map((d) => d.key)), subject: subjectId })
-        .map((b) => ({ channel: strOrNull(b, "pair_channel") === "linkedin" ? ("linkedin" as const) : ("sms" as const), sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, ownerSent: Number(b["owner_sent"]) === 1, ownerAnswered: Number(b["owner_answered"]) === 1 })),
-      lead: { zone, details, resolved, mergeData, phones, ...(importedProfile ? { importedProfile } : {}) },
+        // Its message-request accounts too (ADR 0004 13.6): every social destination is one.
+        .all({ kind: owner?.kind ?? "", owner: owner?.id ?? "", own: JSON.stringify(owner ? [] : details.filter((d) => d.mobile).map((d) => d.key)), profiles: JSON.stringify(details.filter((d) => isSocialChannel(d.channel)).map((d) => d.key)), subject: subjectId })
+        .map((b) => ({ channel: conversationChannelOf(strOrNull(b, "pair_channel")), sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerLeadName: strOrNull(b, "owner_lead_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, ownerSent: Number(b["owner_sent"]) === 1, ownerAnswered: Number(b["owner_answered"]) === 1 })),
+      lead: { zone, details, resolved, mergeData, phones, ...(importedProfile ? { importedProfile } : {}), ...(importedAccounts ? { importedAccounts } : {}) },
       markBad: [],
       accounts,
       callTasks: this.sql("SELECT * FROM call_tasks WHERE subject_id = ? ORDER BY placed_wall, rowid").all(subjectId).map(toCallTask),
@@ -1616,7 +1751,7 @@ export class SqliteEngineStore implements EngineStore {
       if ((was?.connection ?? null) !== null && was?.connection !== t.connection) throw new Error(`a track's connection is set once (${t.trackId})`);
       // The deadline is stored once: it moves only with the wait it was resolved from (an edit), never on its own.
       if (was?.acceptBy != null && t.acceptBy !== was.acceptBy && t.acceptByDays === was.acceptByDays) throw new Error(`an acceptance deadline moves only with an edit of its wait (${t.trackId})`);
-      // The InMail state too (ADR 0004 13.10): null to any, then only from `chosen`, and never back to null.
+      // The InMail state too (ADR 0004 14.10): null to any, then only from `chosen`, and never back to null.
       if ((was?.inmail ?? null) !== null && t.inmail !== was?.inmail && (was?.inmail !== "chosen" || (t.inmail ?? null) === null)) throw new Error(`a track's InMail state only moves forward (${t.trackId})`);
       const order = { wanted: 1, withdrawn: 2, accepted_first: 2, kept_by_user: 2 } as const;
       if (was?.inviteWithdrawal && (!t.inviteWithdrawal || order[t.inviteWithdrawal] < order[was.inviteWithdrawal] || (order[was.inviteWithdrawal] === 2 && t.inviteWithdrawal !== was.inviteWithdrawal))) throw new Error(`an invite's withdrawal only moves forward (${t.trackId})`);
@@ -1671,7 +1806,7 @@ export class SqliteEngineStore implements EngineStore {
           a.id, id, a.trackId, a.stepId, a.accountId, a.destinationDetailId, a.destination, a.state, a.copy ? JSON.stringify(a.copy) : null, a.threading, a.threadRef,
           a.retryable ? 1 : 0, a.notSentIsFinal ? 1 : 0, a.idempotencyKey, a.calls, a.claimedWall, a.handedAt, a.handedWall, a.lastCallWall, a.presendCheckedWall,
           a.presendFoundReply ? 1 : 0, a.endedBy, a.withdrawRequested ? 1 : 0, a.withdrawCalled ? 1 : 0, a.awaitingAnswer ? 1 : 0, a.retry, a.rejectReason,
-          // An InMail is message work marked as one (ADR 0004 13.10): the action column keeps the allowance it counts on.
+          // An InMail is message work marked as one (ADR 0004 14.10): the action column keeps the allowance it counts on.
           a.action === undefined ? null : a.action === "inmail" ? "message" : a.action, a.action === "inmail" ? 1 : 0,
         ],
       );
@@ -1761,6 +1896,15 @@ export class SqliteEngineStore implements EngineStore {
         if (detailId === testDetailId(id, "email")) this.run("UPDATE test_runs SET email_bad = 1 WHERE id = ?", [id]);
         if (detailId === testDetailId(id, "mobile")) this.run("UPDATE test_runs SET mobile_bad = 1 WHERE id = ?", [id]);
         if (detailId === testDetailId(id, "linkedin")) this.run("UPDATE test_runs SET linkedin_bad = 1 WHERE id = ?", [id]);
+        for (const channel of MESSAGE_REQUEST_CHANNELS) {
+          if (detailId === testDetailId(id, channel)) this.run(`UPDATE test_runs SET social_contacts = json_set(social_contacts, '$.${channel}.bad', json('true')) WHERE id = ?`, [id]);
+        }
+        continue;
+      }
+      // A message-request account is marked by its channel and key (ADR 0004 13.4), never cleared.
+      const account = accountOfDetailId(detailId);
+      if (account) {
+        this.run("INSERT OR IGNORE INTO social_destination_marks (channel, key, marked_wall) VALUES (?, ?, ?)", [account.channel, account.key, now]);
         continue;
       }
       // A LinkedIn profile is marked by its key (ADR 0004 section 5), never cleared.
@@ -1814,8 +1958,8 @@ export class SqliteEngineStore implements EngineStore {
     this.run(
       `UPDATE ${table} SET version = ?, status = ?, ended = ?, ended_at = ?, ended_wall = ?, lead_paused = ?, branch = ?, branch_entered_at = ?,
          touched = ?, no_more_calls = ?, frozen_since = ?, frozen_total = ?, email_sender = ?, sms_sender = ?,
-         stop_reply_channel = ?, stop_reply_at = ?, linkedin_sender = ? WHERE id = ? AND version = ?`,
-      [version, status, s.ended, s.endedAt, s.endedWall, s.leadPaused ? 1 : 0, s.branch, s.branchEnteredAt, s.touched ? 1 : 0, s.noMoreCalls ? 1 : 0, s.clock.frozenSince, s.clock.frozenTotal, s.emailSender, s.smsSender, s.stopReply?.channel ?? null, s.stopReply?.atWall ?? null, s.linkedinSender ?? null, id, base.subject.version],
+         stop_reply_channel = ?, stop_reply_at = ?, linkedin_sender = ?, social_senders = ? WHERE id = ? AND version = ?`,
+      [version, status, s.ended, s.endedAt, s.endedWall, s.leadPaused ? 1 : 0, s.branch, s.branchEnteredAt, s.touched ? 1 : 0, s.noMoreCalls ? 1 : 0, s.clock.frozenSince, s.clock.frozenTotal, s.emailSender, s.smsSender, s.stopReply?.channel ?? null, s.stopReply?.atWall ?? null, s.linkedinSender ?? null, s.socialSenders && Object.keys(s.socialSenders).length > 0 ? JSON.stringify(s.socialSenders) : null, id, base.subject.version],
     );
     return { ...next, subject: { ...s, status, version } };
   }
@@ -2035,6 +2179,45 @@ interface Reach {
   readonly owner: Owner | null;
   /** What the import holds for a decision maker's LinkedIn address (ticket 24b); absent for a company lead or a test run. */
   readonly importedProfile?: "member" | "not_member" | "none";
+  /** What the import holds in each message-request channel's cells (ADR 0004 13.4); absent for a test run. */
+  readonly importedAccounts?: LeadFacts["importedAccounts"];
+}
+
+/** A stored sending channel (the CHECKs of migrations 22 and 25 allow exactly these). */
+function sendChannelOf(raw: string): SendChannel {
+  return raw === "sms" ? "sms" : isSocialChannel(raw) ? raw : "email";
+}
+
+/** A stored pair's channel (`sms_bindings.channel`). */
+function conversationChannelOf(raw: string | null): ConversationChannel {
+  return isSocialChannel(raw) ? raw : "sms";
+}
+
+/** A subject's fixed senders on its message-request tracks, by track id, as stored (`social_senders`). */
+function socialSendersOf(raw: string | null): Record<string, string> {
+  if (raw === null) return {};
+  const parsed = JSON.parse(raw) as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(parsed).flatMap(([track, session]) => (typeof session === "string" ? [[track, session]] : [])));
+}
+
+/** A campaign's test accounts on the message-request channels, as stored (`campaigns.test_social`). */
+function socialContactsOf(raw: string | null): Partial<Record<MessageRequestChannel, TestContact>> {
+  if (raw === null) return {};
+  const parsed = JSON.parse(raw) as Record<string, TestContact | undefined>;
+  return Object.fromEntries(MESSAGE_REQUEST_CHANNELS.flatMap((ch) => (parsed[ch] ? [[ch, { value: parsed[ch].value, key: parsed[ch].key }]] : [])));
+}
+
+/** A test run's test accounts with their bad marks, as stored (`test_runs.social_contacts`). */
+function testRunSocialOf(raw: string | null): Partial<Record<MessageRequestChannel, TestContact & { readonly bad?: boolean }>> {
+  if (raw === null) return {};
+  const parsed = JSON.parse(raw) as Record<string, (TestContact & { bad?: boolean }) | undefined>;
+  return Object.fromEntries(MESSAGE_REQUEST_CHANNELS.flatMap((ch) => (parsed[ch] ? [[ch, parsed[ch]]] : [])));
+}
+
+/** A test run's `social_contacts` from the campaign's contacts at its start: null when it has none. */
+function socialContactsColumn(contacts: TestContacts): string | null {
+  const social = Object.fromEntries(MESSAGE_REQUEST_CHANNELS.flatMap((ch) => (contacts[ch] ? [[ch, { value: contacts[ch].value, key: contacts[ch].key, bad: false }]] : [])));
+  return Object.keys(social).length > 0 ? JSON.stringify(social) : null;
 }
 
 /** A test contact's detail id on its run (ADR 0003 "Ticket 21"): names no CRM record, and the triggers of migration 18 accept it only for a test run. */
@@ -2058,12 +2241,12 @@ export function monthStartOf(now: number, zone: string): number {
   return startOfLocalDay(localDayNumber(now, zone) - (dayOfMonth - 1), zone);
 }
 
-/** A stored reply channel (the CHECK of migration 22 allows exactly these). */
-function replyChannelOf(raw: string): "email" | "sms" | "linkedin" {
-  return raw === "sms" ? "sms" : raw === "linkedin" ? "linkedin" : "email";
+/** A stored reply channel (the CHECKs of migrations 22 and 25 allow exactly these). */
+function replyChannelOf(raw: string): "email" | "sms" | SocialChannel {
+  return sendChannelOf(raw);
 }
 
-export function testDetailId(runId: string, channel: "email" | "mobile" | "linkedin"): string {
+export function testDetailId(runId: string, channel: "email" | "mobile" | SocialChannel): string {
   return `test:${runId}:${channel}`;
 }
 
@@ -2074,7 +2257,12 @@ function toTestRun(r: Row): TestRunRecord {
     campaignId: str(r, "campaign_id"),
     renderAs: str(r, "render_as"),
     // The test profile too (ticket 24b: the Test run tab read it as none, a part a omission); `linkedin` absent when none.
-    contacts: { email: contact("email_value", "email_key"), mobile: contact("mobile_value", "mobile_key"), ...(r["linkedin_key"] == null ? {} : { linkedin: contact("linkedin_value", "linkedin_key") }) },
+    contacts: {
+      email: contact("email_value", "email_key"),
+      mobile: contact("mobile_value", "mobile_key"),
+      ...(r["linkedin_key"] == null ? {} : { linkedin: contact("linkedin_value", "linkedin_key") }),
+      ...Object.fromEntries(Object.entries(testRunSocialOf(strOrNull(r, "social_contacts"))).map(([ch, c]) => [ch, { value: c.value, key: c.key }])),
+    },
     startedWall: num(r, "started_wall"),
     definitionVersion: num(r, "definition_version"),
     definitionEditedAt: strOrNull(r, "definition_edited_at"),

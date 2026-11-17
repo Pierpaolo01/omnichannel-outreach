@@ -4,9 +4,13 @@
  * otherwise "Email track 2". The editor, Before launch and Activity all name tracks this way. A track
  * of the win-back branch is counted within that branch and named for it: "Win-back email track" (ticket 16).
  */
+import type { SendChannelApi, TrackChannelApi } from "./api.ts";
+import { isMessageRequestChannel, SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS } from "../domain/social-channels.ts";
 import type { CampaignDefinition, TrackDefinition } from "../domain/sequence/definition.ts";
 
-const WORD = { email: "Email", sms: "SMS", call: "Phone", linkedin: "LinkedIn" } as const;
+const WORD = (channel: TrackChannelApi): string => (channel === "email" ? "Email" : channel === "sms" ? "SMS" : channel === "call" ? "Phone" : SOCIAL_CHANNELS[channel].name);
+/** The channel words that keep their capital mid-sentence: product names and SMS. */
+const PROPER = new Set(["SMS", ...SOCIAL_CHANNEL_LIST.map((c) => SOCIAL_CHANNELS[c].name)]);
 
 export interface TrackLabel {
   readonly label: string;
@@ -19,7 +23,7 @@ export interface TrackLabel {
 export function trackLabel(def: CampaignDefinition, track: Pick<TrackDefinition, "id" | "channel">): TrackLabel {
   const branch = def.tracks.find((t) => t.id === track.id)?.branch ?? "main";
   const same = def.tracks.filter((t) => t.channel === track.channel && t.branch === branch && (!t.removed || t.id === track.id));
-  const word = branch === "win_back" ? `Win-back ${WORD[track.channel] === "SMS" || WORD[track.channel] === "LinkedIn" ? WORD[track.channel] : WORD[track.channel].toLowerCase()}` : WORD[track.channel];
+  const word = branch === "win_back" ? `Win-back ${PROPER.has(WORD(track.channel)) ? WORD(track.channel) : WORD(track.channel).toLowerCase()}` : WORD(track.channel);
   if (same.length <= 1) return { label: `${word} track`, several: false, branch };
   return { label: `${word} track ${same.findIndex((t) => t.id === track.id) + 1}`, several: true, branch };
 }
@@ -28,8 +32,8 @@ export function trackLabel(def: CampaignDefinition, track: Pick<TrackDefinition,
  * What one step of a track is called in a title (council on 4fd9ca4, item 5): "Email" or "Text" in the main sequence,
  * "Win-back email" or "Win-back text" in the win-back branch, so a step of the branch never reads as the main sequence's.
  */
-export function stepNoun(track: Pick<TrackLabel, "branch">, channel: "email" | "sms" | "linkedin"): string {
-  const noun = channel === "sms" ? "Text" : channel === "linkedin" ? "LinkedIn step" : "Email";
+export function stepNoun(track: Pick<TrackLabel, "branch">, channel: SendChannelApi): string {
+  const noun = channel === "sms" ? "Text" : channel === "linkedin" ? "LinkedIn step" : channel === "email" ? "Email" : `${SOCIAL_CHANNELS[channel].name} message`;
   switch (track.branch) {
     case "main":
       return noun;
@@ -43,7 +47,7 @@ export function stepNoun(track: Pick<TrackLabel, "branch">, channel: "email" | "
 }
 
 /**
- * A LinkedIn step's role (ADR 0004 3.1, 13.9): an InMail step by its role, which reads carry with the step; any other by its
+ * A LinkedIn step's role (ADR 0004 3.1, 14.9): an InMail step by its role, which reads carry with the step; any other by its
  * number among the track's live steps that are not InMail steps, counted from 1 (`stepNumber`), as the engine's
  * `linkedinStepKind` decides it. A test holds the two equal at every position, with the fallback on and off.
  */
@@ -51,18 +55,35 @@ export const LINKEDIN_STEP_KIND_AT = (number: number, role?: "inmail"): "invite"
   role === "inmail" ? "inmail" : number <= 1 ? "invite" : number === 2 ? "first_message" : "follow_up";
 
 /**
+ * A message-request step's role by its number among the track's live steps (ADR 0004 13.3): the engine's
+ * `messageRequestStepKind` decides it by position, and a test holds the two equal at every position.
+ */
+export const MESSAGE_REQUEST_STEP_KIND_AT = (number: number): "message_request" | "follow_up" => (number <= 1 ? "message_request" : "follow_up");
+
+/**
  * What one step is called in a title (ticket 24b): "Email 2", "Text 1", "Win-back email 1"; a LinkedIn step by its role,
  * "Connection invite", "First message", "Follow-up 1" (CONTEXT.md's "connection invite"), "Win-back first message".
  */
-export function stepTitle(track: Pick<TrackLabel, "branch">, channel: "email" | "sms" | "linkedin", number: number, stepRole?: "inmail"): string {
-  if (channel !== "linkedin") return `${stepNoun(track, channel)} ${number}`;
+export function stepTitle(track: Pick<TrackLabel, "branch">, channel: SendChannelApi, number: number, stepRole?: "inmail"): string {
+  if (channel !== "linkedin" && !isMessageRequestChannel(channel)) return `${stepNoun(track, channel)} ${number}`;
   const kind = LINKEDIN_STEP_KIND_AT(number, stepRole);
-  const role = kind === "invite" ? "Connection invite" : kind === "inmail" ? "InMail" : kind === "first_message" ? "First message" : `Follow-up ${number - 2}`;
+  const role = isMessageRequestChannel(channel)
+    ? MESSAGE_REQUEST_STEP_KIND_AT(number) === "message_request"
+      ? "Message request"
+      : `Follow-up ${number - 1}`
+    : kind === "invite"
+      ? "Connection invite"
+      : kind === "inmail"
+        ? "InMail"
+        : kind === "first_message"
+          ? "First message"
+          : `Follow-up ${number - 2}`;
   return track.branch === "win_back" ? `Win-back ${role.charAt(0).toLowerCase()}${role.slice(1)}` : role;
 }
 
 /** A label's first word lower case mid-sentence, but "SMS" and "LinkedIn" keep their capitals. */
-export const lowerLabel = (label: string): string => (label.startsWith("SMS") || label.startsWith("LinkedIn") || label.startsWith("InMail") ? label : label.charAt(0).toLowerCase() + label.slice(1));
+/** "InMail" keeps its capitals too (ADR 0004 13.9). */
+export const lowerLabel = (label: string): string => ([...PROPER, "InMail"].some((w) => label.startsWith(w)) ? label : label.charAt(0).toLowerCase() + label.slice(1));
 
 /** A track's name inside a sentence: "the email track", "the SMS track", "email track 2", "SMS track 2", "the phone track", "the win-back SMS track". */
 export function trackPhrase(def: CampaignDefinition, track: Pick<TrackDefinition, "id" | "channel">): string {

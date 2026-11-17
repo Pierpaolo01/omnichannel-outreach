@@ -9,13 +9,14 @@
  * one it refuses (ADR 0003 7.1): a cycle, a start after a missing track, a negative or fractional
  * delay. `arrangement.generated.test.ts` asserts the rule's invariants after every operation.
  */
+import type { TrackChannelApi } from "../../shared/api.ts";
 import { definitionIssues, definitionProblems, issueKey, type Branch, type DeclinedPath } from "../../domain/sequence/definition.ts";
 import type { CampaignDefinition, StartRule, TrackDefinition } from "../../shared/api.ts";
 import { newTrack, trackName } from "./model.ts";
 
 export type ArrangeOperation =
   /** A new track, in the main sequence unless `branch` names the win-back branch. */
-  | { readonly kind: "add"; readonly channel: "email" | "sms" | "call" | "linkedin"; readonly branch?: Branch }
+  | { readonly kind: "add"; readonly channel: TrackChannelApi; readonly branch?: Branch }
   /** A phone track's declined path (ticket 16b): what a declined call on it does. */
   | { readonly kind: "declined"; readonly trackId: string; readonly path: DeclinedPath }
   /** `mark`: on a running campaign the track is marked removed, never deleted, so its id keeps its meaning (ticket 19). */

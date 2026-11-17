@@ -6,11 +6,20 @@ import type { Channel, PhoneKind } from "../domain/contact-details.ts";
 import type { DetailNote, ImportSummary, LeadOutcome, NotEnrolledReason } from "../domain/import-plan.ts";
 import type { FileCheck } from "../domain/scraper-export.ts";
 import type { OutreachStatus, StatusGroup } from "../domain/outreach-status.ts";
+import type { MessageRequestChannel, SocialChannel, SocialSenderKind } from "../domain/social-channels.ts";
 
 export type { DetailNote, EvidenceKind, ImportSummary, LeadOutcome, NotEnrolledReason, SummaryEntry } from "../domain/import-plan.ts";
 export type { ContactRoute } from "../domain/reach.ts";
 export type { FileCheck } from "../domain/scraper-export.ts";
 export type { OutreachStatus, StatusGroup } from "../domain/outreach-status.ts";
+export type { MessageRequestChannel, SocialChannel, SocialSenderKind } from "../domain/social-channels.ts";
+
+/** Every channel a track can be on (ADR 0004 13.2): a new social channel joins here, and every exhaustive mapping must take it. */
+export type TrackChannelApi = "email" | "sms" | "call" | SocialChannel;
+/** Every channel a sender account serves: a track's channel but calls. */
+export type SendChannelApi = "email" | "sms" | SocialChannel;
+/** Every channel whose sends are a conversation between one sender account and one destination (ADR 0004 13.6). */
+export type ConversationChannelApi = "sms" | SocialChannel;
 
 export interface Campaign {
   readonly id: string;
@@ -23,7 +32,7 @@ export interface Campaign {
 /** Whether a campaign has launched, and the channels of its live main-sequence tracks, in order. */
 export interface CampaignSequenceSummary {
   readonly launchedAt: string | null;
-  readonly tracks: readonly ("email" | "sms" | "call" | "linkedin")[];
+  readonly tracks: readonly (TrackChannelApi)[];
 }
 
 /** A campaign's pause as its read says it (ticket 17a): served on the campaign's page and, since ticket 17b, on each row of the list. */
@@ -95,12 +104,23 @@ export interface MessageMeasures {
 export interface LinkedinMeasures {
   readonly invitesSent: number;
   readonly invitesAccepted: number;
-  /** InMails the session reported sent, by the fallback (ADR 0004 13.6). Not among `messagesSent`. */
+  /** InMails the session reported sent, by the fallback (ADR 0004 14.6). Not among `messagesSent`. */
   readonly inmailsSent: number;
   readonly messagesSent: number;
   readonly failed: number;
   readonly replies: number;
   readonly fromTests: { readonly invitesSent: number; readonly invitesAccepted: number; readonly inmailsSent: number; readonly messagesSent: number; readonly failed: number; readonly replies: number };
+}
+
+/**
+ * A message-request channel (ADR 0004 13.8): messages the session reported sent, steps that failed, and the leads (or test
+ * runs) the user marked replied there. Nothing here claims a message was delivered, accepted or read.
+ */
+export interface MessageRequestMeasures {
+  readonly messagesSent: number;
+  readonly failed: number;
+  readonly replies: number;
+  readonly fromTests: { readonly messagesSent: number; readonly failed: number; readonly replies: number };
 }
 
 /** The calls the user logged (ticket 22), test calls included; `fromTests` is how many of each came from test runs. */
@@ -121,10 +141,12 @@ export interface CampaignMeasures {
   readonly launched: boolean;
   readonly leads: number;
   readonly groups: Readonly<Record<StatusGroup, number>>;
-  readonly channels: readonly ("email" | "sms" | "call" | "linkedin")[];
+  readonly channels: readonly (TrackChannelApi)[];
   readonly email: MessageMeasures;
   readonly sms: MessageMeasures;
   readonly linkedin: LinkedinMeasures;
+  /** Each message-request channel (ADR 0004 13.8), whether or not the campaign has a track on it; `channels` says which to show. */
+  readonly messageRequests: { readonly [C in MessageRequestChannel]: MessageRequestMeasures };
   readonly calls: CallMeasures;
   readonly replyRate: MeasureRate;
   readonly connectRate: MeasureRate;
@@ -171,7 +193,7 @@ export type StepWaitApi =
    */
   | "no_allowance"
   /**
-   * An InMail the acceptance expiry chose whose session cannot send it now by its own report (ADR 0004 13.3): `inmail` on
+   * An InMail the acceptance expiry chose whose session cannot send it now by its own report (ADR 0004 14.3): `inmail` on
    * the read says whether it no longer reports Premium or Sales Navigator, or has no credit free. No time.
    */
   | "inmail_unavailable";
@@ -187,7 +209,7 @@ export type StepWhenView =
   | { readonly kind: "at"; readonly at: string }
   /** `channel` names the step's channel where the reason depends on it (no transport). */
   /** `channel`: the track's, so a reason is worded in its channel's words (council on b21af02, item 1). */
-  | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel: "email" | "sms" | "call" | "linkedin"; readonly until?: string; readonly inmail?: "no_plan" | "stale_report" | "no_holding" | "unbacked"; readonly reportedAt?: string }
+  | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel: TrackChannelApi; readonly until?: string; readonly inmail?: "no_plan" | "stale_report" | "no_holding" | "unbacked"; readonly reportedAt?: string }
   /**
    * A call not yet placed: the user's day (YYYY-MM-DD) it goes on the list, with no time of day; `today` when that is the
    * read's day; `now` when it is ready for the list (due, calling hours open today, room on today's list), with no instant promised.
@@ -206,10 +228,10 @@ export interface ControlStepView {
    * whether it is a callback the prospect asked for. Null for an email or a text.
    */
   readonly call: { readonly attempts: number; readonly callback: boolean } | null;
-  readonly channel: "email" | "sms" | "call" | "linkedin";
+  readonly channel: TrackChannelApi;
   readonly branch: "main" | "win_back";
   readonly stepId: string;
-  /** A LinkedIn InMail fallback step, named by its role (ADR 0004 13.9). */
+  /** A LinkedIn InMail fallback step, named by its role (ADR 0004 14.9). */
   readonly role?: "inmail";
   /** Its place among the track's steps, from 1, and how many there are. */
   readonly number: number;
@@ -250,15 +272,18 @@ export interface EnrollmentRead extends EnrollmentProgress {
    */
   readonly mayStillSend: number;
   /**
-   * Whether the user may mark this lead replied on LinkedIn now (ADR 0004 section 7), by the engine's own rule
-   * (`markRepliedRefusal`), with its reason when refused; null when the campaign has no LinkedIn track (ticket 24b).
+   * Whether the user may mark this lead replied on each social channel the campaign has a track on (ADR 0004 7, 13.8), by
+   * the engine's own rule (`markRepliedRefusal`), with its reason when refused; a channel with no track is absent.
    */
-  readonly linkedinReply: LinkedinReplyMark | null;
+  readonly replyMarks: ReplyMarks;
 }
 
-/** The LinkedIn reply mark as a read allows it: allowed, or refused with the engine's reason (ticket 24b). */
-export type LinkedinReplyMark =
-  /** `work`: the LinkedIn work that lets the mark be made (review bot on c20c8f0), its kind and whether it is recorded sent. */
+/** The reply marks a read allows, by social channel: present only for a channel the campaign has a track on. */
+export type ReplyMarks = { readonly [C in SocialChannel]?: ReplyMark };
+
+/** A social reply mark as a read allows it: allowed, or refused with the engine's reason (ticket 24b; ADR 0004 13.8). */
+export type ReplyMark =
+  /** `work`: the work on that channel that lets the mark be made (review bot on c20c8f0), its kind and whether it is recorded sent. */
   | { readonly allowed: true; readonly work: { readonly kind: "invite" | "message"; readonly state: "sent" | "handed" } }
   | { readonly allowed: false; readonly reason: string };
 
@@ -470,7 +495,7 @@ import type { TrackLabel } from "./track-label.ts";
 export interface SenderAccountViewApi {
   readonly id: string;
   readonly label: string;
-  readonly channel: "email" | "sms" | "linkedin";
+  readonly channel: SendChannelApi;
   readonly healthy: boolean;
   readonly capacity: number;
   /** The pacing gap between two sends from this account, in seconds. */
@@ -484,6 +509,8 @@ export interface SenderAccountViewApi {
    * day, each with what is used today. `capacity` and `usedToday` above add the two and are not said for a session.
    */
   readonly kinds?: SessionKinds;
+  /** What a message-request session reports of itself (ADR 0004 13.5): personal or business. Absent on other channels. */
+  readonly socialKind?: SocialSenderKind;
 }
 
 /** A LinkedIn session's daily allowances, each with its use today (sent on the reset day plus reservations). */
@@ -548,6 +575,11 @@ export interface ConversationOwnerView {
   readonly name: string;
   /** The conversation belongs to that campaign's test run, not to one of its leads. */
   readonly test: boolean;
+  /**
+   * A lead of the same campaign owns it (verifier on f2824d4, item 9): that lead's name ("" if the stored cause has none),
+   * said instead of the campaign. Null when the owner is another campaign or a test run.
+   */
+  readonly lead: string | null;
 }
 /**
  * Why a track waits for the user (ADR 0003 5.4). A mobile whose conversation is taken on every number is not a hold: its
@@ -576,7 +608,7 @@ export interface SendView {
 export interface StepProgressView {
   readonly stepId: string;
   readonly number: number;
-  /** A LinkedIn InMail fallback step, named by its role; its number then counts nothing (ADR 0004 13.9). */
+  /** A LinkedIn InMail fallback step, named by its role; its number then counts nothing (ADR 0004 14.9). */
   readonly role?: "inmail";
   readonly removed: boolean;
   readonly result: "sent" | "skipped" | "failed" | null;
@@ -620,17 +652,35 @@ export interface LinkedinTrackView {
   /** An invite already pending on LinkedIn that this application did not send, first seen then (question Q42). */
   readonly pendingElsewhereSince: string | null;
   /**
-   * The InMail fallback (ticket 27; ADR 0004 13.3), from stored facts: `on`, the track has a live InMail step now; `state`,
+   * The InMail fallback (ticket 27; ADR 0004 14.3), from stored facts: `on`, the track has a live InMail step now; `state`,
    * what the acceptance expiry judged and what became of it (null before the expiry, or with the fallback off then); `work`,
    * the InMail's own work, `sent` once recorded sent, `handed` while with the session and not known to have gone; `sentAt`,
    * its send's instant once recorded.
    */
-  readonly inmail: { readonly on: boolean; readonly state: import("../domain/sequence/state.ts").InmailState | null; readonly work: "sent" | "handed" | null; readonly sentAt: string | null; /** The instant of the session's report the expiry judged on (13.5). */ readonly reportedAt: string | null };
+  readonly inmail: { readonly on: boolean; readonly state: import("../domain/sequence/state.ts").InmailState | null; readonly work: "sent" | "handed" | null; readonly sentAt: string | null; /** The instant of the session's report the expiry judged on (14.5). */ readonly reportedAt: string | null };
+}
+
+/**
+ * What the engine stores of a message-request track (ADR 0004 13.3, 13.4), for the record's sentences: whose account it
+ * messages and which, the first message's work, the session, and a skip's recorded cause. Nothing about acceptance or
+ * reading: the platform tells the sender nothing of either.
+ */
+export interface MessageRequestTrackView {
+  /** Whose account the track started with: the decision maker's own or the company's; null before it started or when skipped. */
+  readonly destination: "own" | "company" | null;
+  /** That account's address as the import gave it; null when none. */
+  readonly address: string | null;
+  /** The first message's work: `sent` once recorded sent; `handed` while with the session and not known to have gone; null before. */
+  readonly firstMessage: "sent" | "handed" | null;
+  /** The session the track goes from, once fixed, by its account id, with its kind; null before its first handover. */
+  readonly sender: { readonly id: string; readonly kind: SocialSenderKind | null } | null;
+  /** Why the track was skipped as a missing channel, as recorded at the skip; null for any other finish. */
+  readonly skipCause: import("../domain/sequence/state.ts").SocialSkipCause | "unrecorded" | null;
 }
 
 export interface TrackProgressView {
   readonly trackId: string;
-  readonly channel: string;
+  readonly channel: TrackChannelApi;
   /** The main sequence, or the campaign's win-back branch (ticket 16). */
   readonly branch: "main" | "win_back";
   readonly started: boolean;
@@ -640,6 +690,8 @@ export interface TrackProgressView {
   readonly conversationOwners: readonly ConversationOwnerView[];
   /** A LinkedIn track's own facts (ADR 0004 section 9; council on 194fc44, items 4 and 6); null on any other track. */
   readonly linkedin: LinkedinTrackView | null;
+  /** A message-request track's own facts (ADR 0004 13.3, 13.4); null on any other track. */
+  readonly messageRequest: MessageRequestTrackView | null;
   readonly hold: HoldReasonApi | null;
   /** For `sms_conversation_unsettled`: the campaigns whose first text the track waits on. Empty otherwise. */
   readonly holdOwners: readonly ConversationOwnerView[];
@@ -670,7 +722,7 @@ export interface EnrollmentProgress {
   readonly status: OutreachStatus;
   readonly endedAt: string | null;
   /** "replied, automation stopped" with channel and date only. */
-  readonly reply: { readonly channel: "email" | "sms" | "linkedin"; readonly at: string } | null;
+  readonly reply: { readonly channel: SendChannelApi; readonly at: string } | null;
   /** The lead's email inbox, fixed at its first email. */
   readonly sender: string | null;
   /** The lead's SMS number, fixed at its first text (ticket 13). */
@@ -720,7 +772,7 @@ export interface NeedsAttention {
    * LinkedIn action left unknown is unresolved work, listed with the other unresolved work (ADR 0003 5.4).
    */
   readonly inviteWithdrawalsUnknown?: readonly (AttentionLead & { readonly enrollmentId: string; readonly trackId: string; readonly unknownAnswers: number })[];
-  readonly heldTracks: readonly (AttentionLead & { readonly enrollmentId: string; readonly trackId: string; readonly channel: "email" | "sms" | "call" | "linkedin"; readonly reason: HoldReasonApi; readonly owners: readonly ConversationOwnerView[] })[];
+  readonly heldTracks: readonly (AttentionLead & { readonly enrollmentId: string; readonly trackId: string; readonly channel: TrackChannelApi; readonly reason: HoldReasonApi; readonly owners: readonly ConversationOwnerView[] })[];
   readonly accountWaits: readonly { readonly accountId: string; readonly reason: "quota" | "rate_limited"; readonly until: string | null }[];
   /**
    * Sender accounts on any channel that cannot send, each listed once (ticket 13; spec "Needs
@@ -729,7 +781,7 @@ export interface NeedsAttention {
    * `not_listed` when the provider no longer lists the account, or `unhealthy` when no reason was
    * given. Their leads wait on them; nothing is dropped. (Replaces 12b's `unhealthyInboxes`.)
    */
-  readonly senderProblems: readonly { readonly accountId: string; readonly channel: "email" | "sms" | "linkedin"; readonly label: string; readonly problem: string }[];
+  readonly senderProblems: readonly { readonly accountId: string; readonly channel: SendChannelApi; readonly label: string; readonly problem: string }[];
   /**
    * Inboxes some of whose daily sends are held by unresolved provider work (ADR 0003 4.2): how
    * many, and the work holding them, until the provider or the user settles it.
@@ -737,7 +789,7 @@ export interface NeedsAttention {
   readonly heldCapacity: readonly {
     readonly accountId: string;
     /** The account's channel: a LinkedIn session's held work is said apart from a summed capacity (council on dee365d, item 4). */
-    readonly channel: "email" | "sms" | "linkedin";
+    readonly channel: SendChannelApi;
     readonly held: number;
     readonly capacity: number;
     /** Sends already counted on the inbox's current reset day. */
@@ -763,7 +815,7 @@ export interface NeedsAttention {
     readonly campaignId: string;
     readonly trackId: string;
     readonly stepId: string;
-    readonly channel: "email" | "sms" | "linkedin";
+    readonly channel: SendChannelApi;
     readonly dueAt: string;
     readonly accountIds: readonly string[];
     readonly resetsAt: string;
@@ -781,20 +833,20 @@ export interface NeedsAttention {
     readonly campaignId: string;
     readonly endedAt: string;
     /** `conversation_taken`: its SMS track was skipped because `owners` hold the conversation (question Q7 answered); `owners` is empty for every other reason. */
-    readonly channels: readonly { readonly channel: "email" | "sms" | "call" | "linkedin"; readonly why: "missing" | "bad" | "declined" | "conversation_taken"; readonly owners: readonly ConversationOwnerView[] }[];
+    readonly channels: readonly { readonly channel: TrackChannelApi; readonly why: "missing" | "bad" | "declined" | "conversation_taken"; readonly owners: readonly ConversationOwnerView[] }[];
   })[];
   /**
    * While sending is interrupted, the providers the dispatch gate waits on (ticket 20a, council B): each not answering,
    * since its last contact, and how many due sends wait on it, decided by the gate's own function (`waitingOn`).
    */
-  readonly waitingOnProvider: readonly { readonly channel: "email" | "sms" | "linkedin"; readonly since: string | null; readonly sends: number }[];
+  readonly waitingOnProvider: readonly { readonly channel: SendChannelApi; readonly since: string | null; readonly sends: number }[];
   /**
    * Sending interrupted now, as GET /api/today gives it, judged at this read's own instant (ticket 20b, council on
    * 7622b8b), so every Needs attention entry comes from one read.
    */
   readonly sendingInterrupted: SendingInterruptedView | null;
   /** Due steps waiting for a transport the provider cannot use yet, such as continue-thread follow-ups (follow-up 42 item 12). */
-  readonly waitingOnTransport: readonly { readonly enrollmentId: string; readonly trackId: string; readonly stepId: string; readonly channel: "email" | "sms" | "linkedin"; readonly dueAt: string }[];
+  readonly waitingOnTransport: readonly { readonly enrollmentId: string; readonly trackId: string; readonly stepId: string; readonly channel: SendChannelApi; readonly dueAt: string }[];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -818,6 +870,11 @@ export interface PreviewLead {
   readonly phone: boolean;
   /** A usable LinkedIn member profile of the decision maker's (ADR 0004 section 5); a company lead has none (Q35). */
   readonly linkedin: boolean;
+  /**
+   * Per message-request channel, whose account a track would message (ADR 0004 13.4): the decision maker's own, the
+   * company's, or none usable.
+   */
+  readonly social: { readonly [C in MessageRequestChannel]: "own" | "company" | null };
   /** Merge fields the live copy uses that this lead has no value for. */
   readonly lacks: readonly string[];
 }
@@ -827,7 +884,18 @@ export interface BeforeLaunchView {
   readonly campaignId: string;
   readonly leads: readonly PreviewLead[];
   /** Spec "Before launch": how many leads have an email, a mobile, a phone number or a LinkedIn member profile (ticket 24b). */
-  readonly coverage: { readonly leads: number; readonly email: number; readonly mobile: number; readonly phone: number; readonly linkedin: number };
+  readonly coverage: {
+    readonly leads: number;
+    readonly email: number;
+    readonly mobile: number;
+    readonly phone: number;
+    readonly linkedin: number;
+    /**
+     * Per message-request channel: leads with an account of their own, and leads that would use their company's (ADR 0004
+     * 13.4); and of those company accounts, the ones two or more leads would share, with how many leads share them (Q46).
+     */
+    readonly social: { readonly [C in MessageRequestChannel]: { readonly own: number; readonly company: number; readonly shared: { readonly accounts: number; readonly leads: number } } };
+  };
   /** Every merge field the live copy uses, with how many leads lack it and the fallbacks written for it. */
   readonly mergeFields: readonly {
     readonly field: string;
@@ -860,7 +928,7 @@ export interface LoadProjectionView {
   readonly accounts: readonly {
     readonly id: string;
     readonly label: string;
-    readonly channel: "email" | "sms" | "linkedin";
+    readonly channel: SendChannelApi;
     readonly capacity: number;
     /** Sends already counted or reserved today on this account, across every campaign. */
     readonly usedToday: number;
@@ -887,7 +955,7 @@ export interface LoadProjectionView {
   readonly cannotProject: readonly {
     readonly accountId: string;
     readonly label: string;
-    readonly channel: "email" | "sms" | "linkedin";
+    readonly channel: SendChannelApi;
     /**
      * `unsettled_work`: work whose outcome only the provider or the user can settle holds some of its
      * sends (Needs attention lists it); `reply_being_matched`: a reply to it is being matched to its
@@ -953,10 +1021,10 @@ export interface CopyPreview {
   readonly steps: readonly {
     readonly trackId: string;
     readonly stepId: string;
-    readonly channel: "email" | "sms" | "linkedin";
+    readonly channel: SendChannelApi;
     /** Its number within its track: Email 2, Text 1. */
     readonly number: number;
-    /** A LinkedIn InMail fallback, named by its role (ADR 0004 13.9). */
+    /** A LinkedIn InMail fallback, named by its role (ADR 0004 14.9). */
     readonly role?: "inmail";
     /** The day the projection sends it to this lead, counting launch day as day 1; null with `noDay` otherwise. */
     readonly day: number | null;
@@ -997,7 +1065,7 @@ export interface CopyPreview {
 
 /** One line of a person's or company lead's timeline (GET /api/people/:id/activity). Newest first. */
 export type ActivityEntry = { readonly campaign: { readonly id: string; readonly name: string }; readonly at: string } & (
-  | ({ readonly channel: "email" | "sms" | "linkedin"; readonly track: TrackLabel; /** A LinkedIn InMail, named by its role (ADR 0004 13.9). */ readonly role?: "inmail" } & (
+  | ({ readonly channel: SendChannelApi; readonly track: TrackLabel; /** A LinkedIn InMail, named by its role (ADR 0004 13.9). */ readonly role?: "inmail" } & (
       | {
           readonly kind: "sent";
           readonly stepNumber: number;
@@ -1020,7 +1088,7 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
       /** The track started after `after`, which was skipped or failed for this lead (ticket 13b). */
       | { readonly kind: "released"; readonly after: TrackLabel; readonly because: "skipped" | "failed" | "unworked" }
     ))
-  | { readonly kind: "replied"; readonly channel: "email" | "sms" | "linkedin" }
+  | { readonly kind: "replied"; readonly channel: SendChannelApi }
   /**
    * A control the user applied to this lead (ticket 17b), from the engine's record of accepted requests: pause, resume, skip,
    * stop, or a restart. `step` is the step a skip skipped, or the step a restart named as next then; null otherwise.
@@ -1028,7 +1096,7 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
   | {
       readonly kind: "control";
       readonly action: LeadControlApi;
-      readonly step: { readonly channel: "email" | "sms" | "call" | "linkedin"; readonly track: TrackLabel; readonly number: number; readonly call: ControlStepView["call"] } | null;
+      readonly step: { readonly channel: TrackChannelApi; readonly track: TrackLabel; readonly number: number; readonly call: ControlStepView["call"] } | null;
     }
   /** The lead's campaign was paused or resumed while they were enrolled (ticket 17b), from the same record. */
   | { readonly kind: "campaign_paused" }
@@ -1104,7 +1172,7 @@ export type ActivityEntry = { readonly campaign: { readonly id: string; readonly
 export type DependentTrackState =
   | { readonly state: "waiting"; readonly startsAt: string }
   /** Skipped because its mobile's SMS conversation belongs to `owners` (question Q7 answered). */
-  | { readonly state: "skipped_conversation_taken"; readonly startsAt: null; readonly owners: readonly ConversationOwnerView[]; readonly channel: "sms" | "linkedin" }
+  | { readonly state: "skipped_conversation_taken"; readonly startsAt: null; readonly owners: readonly ConversationOwnerView[]; readonly channel: ConversationChannelApi }
   | {
       readonly state:
         | "started"
@@ -1181,6 +1249,12 @@ export interface LinkedinProviderStatus {
   readonly provider: "none" | "test-simulator";
   readonly message: string;
 }
+
+/**
+ * GET /api/social-providers (ADR 0004 13.1): for each message-request channel, `none` in the running application, where no
+ * session is connected; `test-simulator` only in tests, which drive a simulated session that is not a real one.
+ */
+export type SocialProvidersStatus = { readonly [C in MessageRequestChannel]: LinkedinProviderStatus };
 
 /** Why a sender inbox of the email provider cannot send now. */
 export type InboxHoldReasonApi = "sending_off" | "not_active" | "no_daily_limit" | "stale" | "invalid_report";
@@ -1364,7 +1438,7 @@ export interface RecordCalls {
 /** A track whose channel has no connected sender, so the load is not projected (Before launch). */
 export interface WithheldTrack {
   readonly trackId: string;
-  readonly channel: "email" | "sms" | "call" | "linkedin";
+  readonly channel: TrackChannelApi;
   /** As the canvas names it: "the SMS track", "email track 2". */
   readonly label: string;
   /**
@@ -1445,7 +1519,7 @@ export interface SendingInterruptedView {
   readonly since: string;
   readonly cause: "ticks_failing" | "providers_unreachable" | "not_running";
   /** The provider read that failed last since then, and which part of the round: a partial answer is not contact. */
-  readonly lastFailedRead: { readonly channel: "email" | "sms" | "linkedin"; readonly part: "accounts" | "observation" | "call"; readonly at: string } | null;
+  readonly lastFailedRead: { readonly channel: SendChannelApi; readonly part: "accounts" | "observation" | "call"; readonly at: string } | null;
   /**
    * The last instant a sending round threw since `since` (ticket 20b), else null. Rounds may have ended in between, so
    * `ticks_failing` says the latest round failed, not that every round since `since` did.
@@ -1492,8 +1566,8 @@ export interface CallOutcomeAnswer {
 
 /** One earlier touch on the lead in this campaign. Replies show channel and date only. */
 export type TouchView =
-  | { readonly kind: "email" | "sms" | "linkedin"; readonly at: string; readonly stepId: string; readonly copy: { readonly subject: string; readonly body: string } | null }
-  | { readonly kind: "reply"; readonly channel: "email" | "sms" | "linkedin"; readonly at: string }
+  | { readonly kind: SendChannelApi; readonly at: string; readonly stepId: string; readonly copy: { readonly subject: string; readonly body: string } | null }
+  | { readonly kind: "reply"; readonly channel: SendChannelApi; readonly at: string }
   | ({ readonly kind: "call" } & CallRecordView);
 
 /**
@@ -1758,6 +1832,11 @@ export interface TestRunTab {
     /** The user's own test LinkedIn profile (ADR 0004 section 8), and whether a person's record now has it. */
     readonly linkedin: string | null;
     readonly linkedinIsALead: boolean;
+    /**
+     * The user's own test account on each message-request channel (ADR 0004 13.8), and whether a person's or company's
+     * record now has it; every channel is present, null when none is set.
+     */
+    readonly social: { readonly [C in MessageRequestChannel]: { readonly address: string | null; readonly isALead: boolean } };
   };
   readonly noTestSinceEdit: boolean;
   /** The leads a test may render its copy for, by name. */
@@ -1785,15 +1864,19 @@ export interface TestRunRead {
   readonly mobile: string | null;
   /** The test LinkedIn profile it sends to (ADR 0004 section 8). */
   readonly linkedin: string | null;
+  /** The test account it sends to on each message-request channel (ADR 0004 13.8); null when none. */
+  readonly social: { readonly [C in MessageRequestChannel]: string | null };
   /** Its messages still with a provider, which may still be sent after it ended. */
   readonly mayStillSend: number;
   readonly steps: readonly TestStepRow[];
+  /** The channel of the reply that stopped the run, as stored when it stopped (ticket 25): a social one is the user's mark. */
+  readonly stopReply: SendChannelApi | null;
   /** The run's outreach status at the read, which a reply mark's confirmation sends back as its expectation (ticket 24b). */
   readonly status: OutreachStatus;
   /** Each LinkedIn track's own facts for this run, as a lead's read gives them (council on dee365d, items 2 and 3). */
   readonly linkedinTracks: readonly { readonly trackId: string; readonly view: LinkedinTrackView }[];
   /** Whether the user may mark this test replied on LinkedIn now, by the engine's rule; null with no LinkedIn track (ticket 24b). */
-  readonly linkedinReply: LinkedinReplyMark | null;
+  readonly replyMarks: ReplyMarks;
 }
 
 /** What happened to one step of the canvas in a test run, from its stored facts only. */
@@ -1820,7 +1903,7 @@ export type TestStepState =
 export interface TestStepRow {
   readonly trackId: string;
   readonly stepId: string;
-  readonly channel: "email" | "sms" | "call" | "linkedin";
+  readonly channel: TrackChannelApi;
   readonly branch: "main" | "win_back";
   /** "Email 2", "Text 1", "Call", "Win-back email 1". */
   readonly name: string;
@@ -1850,5 +1933,5 @@ export interface TestStepRow {
 
 /** A test contact refused: malformed (400), or a lead's (409), by field. */
 export interface TestContactsRefusal {
-  readonly error: { readonly code: "invalid_test_contact" | "test_contact_is_a_lead"; readonly message: string; readonly field: "email" | "mobile" | "linkedin" };
+  readonly error: { readonly code: "invalid_test_contact" | "test_contact_is_a_lead"; readonly message: string; readonly field: "email" | "mobile" | SocialChannel };
 }

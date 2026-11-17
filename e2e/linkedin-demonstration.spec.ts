@@ -26,7 +26,7 @@ async function shot(page: Page, name: string): Promise<void> {
   if (!dir) return;
   for (const theme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: theme });
-    await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished)));
+    await page.evaluate(() => Promise.allSettled(document.getAnimations().map((a) => a.finished)));
     await page.screenshot({ path: `${dir}/linkedin-${name}-${theme}.png`, fullPage: true });
   }
   await page.emulateMedia({ colorScheme: null });

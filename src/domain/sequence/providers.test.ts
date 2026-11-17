@@ -1,14 +1,15 @@
 import { describe, expect, test } from "vitest";
 import { MOBILE, multiTrackState, step, track } from "../../../test/support/sequence-state.ts";
-import { providerFresh, relevantChannels, waitingOn, type ProviderEvidence } from "./providers.ts";
+import { providerFresh, relevantChannels, waitingOn, type ProviderChannel, type ProviderEvidence } from "./providers.ts";
 
 /** Which providers a lead's send waits on (ADR 0003 "Ticket 20a", after the council on 13dad92). Data is fictitious. */
 
 const T = Date.parse("2026-11-02T09:00:00Z");
-const evidence = (email: number | null, sms: number | null, linkedin: number | null = T): Record<"email" | "sms" | "linkedin", ProviderEvidence> => ({
+const evidence = (email: number | null, sms: number | null, linkedin: number | null = T): Record<ProviderChannel, ProviderEvidence> => ({
   email: { contactAt: email, freshForMs: 60_000, failedAt: null, failedPart: null },
   sms: { contactAt: sms, freshForMs: 60_000, failedAt: null, failedPart: null },
   linkedin: { contactAt: linkedin, freshForMs: 60_000, failedAt: null, failedPart: null },
+  instagram: { contactAt: T, freshForMs: 60_000, failedAt: null, failedPart: null },
 });
 
 describe("a provider is fresh while its last contact stands", () => {

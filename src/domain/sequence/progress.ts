@@ -7,9 +7,10 @@ import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, maySend, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, waitSpan, wallOfLead, windowOpensAt, type Freeze, type LeadClock } from "./clock.ts";
 import { render } from "./copy.ts";
-import { holdsConversations, inmailStepOf, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import { holdsConversations, inmailStepOf, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, trackPool, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import { isMessageRequestChannel, type MessageRequestChannel, type SocialChannel } from "../social-channels.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
-import type { AccountState, Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, InmailNotSent, LeadDetail, LinkedinSkipCause, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
+import type { AccountState, Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, InmailNotSent, LeadDetail, LinkedinSkipCause, SocialSkipCause, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Running, status and reach.
@@ -92,9 +93,28 @@ export function goodProfile(details: readonly LeadDetail[]): LeadDetail | null {
   return [...details].filter((d) => d.channel === "linkedin" && !d.bad).sort((a, b) => b.order - a.order)[0] ?? null;
 }
 
+/**
+ * A message-request channel's destination (ADR 0004 13.4): the decision maker's own usable account, else the company's. The
+ * store gives the own account the newer order, so the newest one not marked bad is that rule.
+ */
+export function goodAccount(details: readonly LeadDetail[], channel: MessageRequestChannel): LeadDetail | null {
+  return [...details].filter((d) => d.channel === channel && !d.bad).sort((a, b) => b.order - a.order)[0] ?? null;
+}
+
 /** The detail a track on `channel` starts with: the newest good one the lead may be sent to on it. */
 export function destinationFor(details: readonly LeadDetail[], channel: TrackChannel): LeadDetail | null {
-  return channel === "email" ? goodEmail(details) : channel === "sms" ? goodMobile(details) : channel === "linkedin" ? goodProfile(details) : null;
+  switch (channel) {
+    case "email":
+      return goodEmail(details);
+    case "sms":
+      return goodMobile(details);
+    case "linkedin":
+      return goodProfile(details);
+    case "call":
+      return null;
+    default:
+      return goodAccount(details, channel);
+  }
 }
 
 /** Whether the user has a good number to dial for the lead: its own, or the company main line (ADR 0001 "Usable channels"). */
@@ -121,7 +141,7 @@ export const smsConversationLost = (state: SubjectState): boolean => conversatio
  * live SMS track of its branch has finished, one of them skipped for a taken conversation, and none of them texted it.
  * While an SMS track of the branch is still to run, SMS still reaches the lead: a free number may join the pool first.
  */
-export function conversationLost(state: SubjectState, channel: "sms" | "linkedin"): boolean {
+export function conversationLost(state: SubjectState, channel: ConversationChannel): boolean {
   const sms = liveTracksFor(state).filter((t) => t.channel === channel);
   const progress = sms.map((t) => progressOf(state, t.id));
   if (progress.some((p) => !p || p.finishedAt === null)) return false;
@@ -217,17 +237,25 @@ export function finishTrack(state: SubjectState, trackId: string, reason: Finish
   if (!progress || progress.finishedAt !== null) return state;
   // A LinkedIn track skipped as a missing channel records why, as the facts stand at its finish (ticket 24b): a read never
   // works it out again from today's import, marks or decision makers.
-  const cause = reason === "skipped_missing_channel" && channelOf(state, trackId) === "linkedin" ? { skipCause: linkedinSkipCauseOf(state, progress.destinationDetailId) } : {};
+  const channel = channelOf(state, trackId);
+  const cause =
+    reason !== "skipped_missing_channel"
+      ? {}
+      : channel === "linkedin"
+        ? { skipCause: linkedinSkipCauseOf(state, progress.destinationDetailId) }
+        : isMessageRequestChannel(channel)
+          ? { skipCause: accountSkipCauseOf(state, channel, progress.destinationDetailId) }
+          : {};
   const finished = withTrack(state, trackId, (t) => ({ ...t, finishedAt: at, finishedWall: atWall, finishReason: reason, ...cause }));
   const closed = { ...finished, callTasks: finished.callTasks.map((t) => (t.trackId === trackId && t.open ? { ...t, open: false, closedWall: atWall } : t)) };
-  // A track finishing without its InMail having gone releases the credit it held (ADR 0004 13.5).
+  // A track finishing without its InMail having gone releases the credit it held (ADR 0004 14.5).
   return quiesce(releaseInmailHold(closed, trackId), trackId);
 }
 
 /** Ends the lead in this campaign: its outreach quiesces and its clock freezes. */
 export function end(state: SubjectState, reason: EndReason, now: number): SubjectState {
   let ended: SubjectState = { ...state, subject: { ...state.subject, ended: reason, endedAt: leadNow(state.subject.clock, now), endedWall: now } };
-  // A lead stopped or ended releases the credits its InMails held and had not used (ADR 0004 13.5; council on 8b0c846, item
+  // A lead stopped or ended releases the credits its InMails held and had not used (ADR 0004 14.5; council on 8b0c846, item
   // 7): a restart acquires again, and never takes back what another lead holds by then.
   for (const p of state.tracks) ended = releaseInmailHold(ended, p.trackId);
   return synced(quiesce(ended), now);
@@ -260,7 +288,7 @@ export function nextStepOf(state: SubjectState, track: TrackDefinition): string 
 
 /**
  * The steps still ahead of the lead in a track, in order (5.1): live, after its last resolved step, with no result. A LinkedIn
- * InMail step is ahead only once the acceptance expiry chose it (ADR 0004 13.3): until then the walk passes over it, so a lead
+ * InMail step is ahead only once the acceptance expiry chose it (ADR 0004 14.3): until then the walk passes over it, so a lead
  * waiting for acceptance waits at its first message, as with the fallback off.
  */
 export function remainingSteps(state: SubjectState, track: TrackDefinition): string[] {
@@ -302,7 +330,7 @@ export const rules = {
    */
   conversationKeysOwnOnly: false,
   /**
-   * Whether the step must wait (ADR 0004 3.5, 13.4): the invite never; the InMail until the expiry chose it, and for good once
+   * Whether the step must wait (ADR 0004 3.5, 14.4): the invite never; the InMail until the expiry chose it, and for good once
    * connected; the first message until connected; a follow-up until connected or an InMail is known sent.
    */
   connectionGate: (track: TrackDefinition, stepId: string, progress: TrackProgress): boolean => {
@@ -326,10 +354,10 @@ export const rules = {
       }
     }
   },
-  /** The expiry judges the session's InMail standing (ADR 0004 13.5); false only for the mutation that takes every session as eligible. */
+  /** The expiry judges the session's InMail standing (ADR 0004 14.5); false only for the mutation that takes every session as eligible. */
   inmailJudgesStanding: true,
   /**
-   * The InMail fallback's seams for the generated runs' mutations (ADR 0004 13.11), each true but in its mutation: the InMail
+   * The InMail fallback's seams for the generated runs' mutations (ADR 0004 14.11), each true but in its mutation: the InMail
    * waits for the expiry's choice; an acceptance before it is handed over skips it; a refusal ends the track; switching the
    * fallback off reaches a chosen InMail (and a removed InMail step is off); the InMail takes the first message's place.
    */
@@ -340,13 +368,13 @@ export const rules = {
   inmailOffWhenRemoved: true,
   inmailTakesFirstPlace: true,
   /**
-   * A restart acquires a credit only if one is free (13.5); false only for the mutation "a restart restores a commitment
+   * A restart acquires a credit only if one is free (14.5); false only for the mutation "a restart restores a commitment
    * without acquiring", which re-takes it at the place it had (its InMail's due time), ahead of a lead that chose since.
    */
   restartAcquires: true,
-  /** The handover re-reads the session's report (13.5, predicate 20); false only for the mutation that does not. */
+  /** The handover re-reads the session's report (14.5, predicate 20); false only for the mutation that does not. */
   handoverRechecksBacking: true,
-  /** The replaced first message is named at the choice (13.15); false only for the mutation that finds it among the live steps at the send. */
+  /** The replaced first message is named at the choice (14.15); false only for the mutation that finds it among the live steps at the send. */
   replacedNamedAtChoice: true,
 };
 
@@ -369,7 +397,7 @@ export function advanceTrack(state: SubjectState, track: TrackDefinition, at: nu
   // step's, so a skip, an edit or a restart cannot reach a message before it. Until then the step is pending with no due time.
   if (rules.connectionGate(track, stepId, progress)) {
     // The InMail the expiry chose resolved without going (skipped by the user; refused is recorded by its refusal): nothing
-    // else can make the track's messages due, so it takes the withdrawal path now (ADR 0004 13.3).
+    // else can make the track's messages due, so it takes the withdrawal path now (ADR 0004 14.3).
     if (progress.inmail === "chosen") {
       const im = state.results.find((r) => r.trackId === track.id && linkedinStepKind(track, r.stepId) === "inmail");
       if (im && im.result !== "sent") return inmailNotSent(state, track.id, im.reason === "by_user" ? "skipped_by_user" : "refused", at, atWall);
@@ -471,7 +499,7 @@ export function evaluate(
     if (awaitingAcceptance(s, track.id) && (progressOf(s, track.id)?.acceptBy ?? Infinity) <= lead) s = (options.inviteExpired ?? inviteExpired)(s, track.id, now);
   }
 
-  // A restarted lead's chosen InMail acquires a credit again, if one is free (ADR 0004 13.5).
+  // A restarted lead's chosen InMail acquires a credit again, if one is free (ADR 0004 14.5).
   s = reacquireInmailHolds(s, now);
 
   // Next steps for started tracks with no pending step and no live attempt.
@@ -846,7 +874,7 @@ function recordSent(
   // A sent LinkedIn invite starts its acceptance wait, resolved once from the send point (ADR 0004 3.2).
   const kind = linkedinStepKind(track, attempt.stepId);
   if (kind === "invite") s = withTrack(s, track.id, (t) => ({ ...t, ...acceptDeadline(s, track, point.at, point.atWall) }));
-  // The InMail went (ADR 0004 13.3): the follow-ups may go without a connection, and the first message is not sent, since
+  // The InMail went (ADR 0004 14.3): the follow-ups may go without a connection, and the first message is not sent, since
   // the InMail took its place (question Q52); the next follow-up resolves from the InMail's send.
   if (kind === "inmail") {
     s = withTrack(s, track.id, (t) => ({ ...t, inmail: "sent" }));
@@ -860,7 +888,8 @@ function recordSent(
   return advanceTrack(s, track, point.at, point.atWall);
 }
 
-const failedReasonOf = (channel: TrackChannel | undefined): string => (channel === "sms" ? "invalid number" : channel === "linkedin" ? "profile unreachable" : "invalid address");
+const failedReasonOf = (channel: TrackChannel | undefined): string =>
+  channel === "sms" ? "invalid number" : channel === "linkedin" ? "profile unreachable" : isMessageRequestChannel(channel) ? "account unreachable" : "invalid address";
 
 function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["rejectReason"], now: number): SubjectState {
   const progress = progressOf(state, attempt.trackId);
@@ -889,7 +918,7 @@ function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["
       : { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: "not connected", at, atWall, attemptId: attempt.id }] };
     return checkEndings(finishTrack(failed, attempt.trackId, "failed_bad_destination", at, atWall), now);
   }
-  // LinkedIn refused the InMail for this recipient (ADR 0004 13.3, question Q55): a failure with its own cause, the profile
+  // LinkedIn refused the InMail for this recipient (ADR 0004 14.3, question Q55): a failure with its own cause, the profile
   // kept good, and the track takes the withdrawal path at the refusal.
   if (reason === "inmail_refused" && rules.refusedInmailEndsTrack) {
     if (!progress || progress.finishedAt !== null) return state;
@@ -897,6 +926,15 @@ function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["
       ? state
       : { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: "inmail refused", at, atWall, attemptId: attempt.id }] };
     return checkEndings(inmailNotSent(failed, attempt.trackId, "refused", at, atWall), now);
+  }
+  // A message the platform does not let this session send to this account (ADR 0004 13.3, question Q44): requests turned
+  // off, or a sender that cannot start a conversation there. The track fails, the account stays good (it is still theirs).
+  if (reason === "not_allowed") {
+    if (!progress || progress.finishedAt !== null) return state;
+    const failed = state.results.some((r) => r.stepId === attempt.stepId)
+      ? state
+      : { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: "not allowed", at, atWall, attemptId: attempt.id }] };
+    return checkEndings(finishTrack(failed, attempt.trackId, "failed_bad_destination", at, atWall), now);
   }
   // 402 and 429 wait at the account; an unexplained provider skip holds the track (5.4).
   return state;
@@ -969,7 +1007,7 @@ export function alignPending(state: SubjectState, now: number): SubjectState {
     if (p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.basisAt === null || p.basisWall === null) continue;
     const track = s.campaign.definition.tracks.find((t) => t.id === p.trackId);
     if (!track || inFlight(s, p.trackId)) continue;
-    // The InMail the expiry chose, switched off before it was handed over (ADR 0004 13.8): it is not sent, and the track takes
+    // The InMail the expiry chose, switched off before it was handed over (ADR 0004 14.8): it is not sent, and the track takes
     // the withdrawal path at the edit's instant.
     if (rules.switchOffReachesChosen && rules.inmailOffWhenRemoved && p.inmail === "chosen" && linkedinStepKind(track, p.nextStepId) === "inmail" && !track.steps.some((x) => x.id === p.nextStepId && !x.removed)) {
       s = inmailNotSent(s, track.id, "switched_off", leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now));
@@ -1005,7 +1043,7 @@ export function renderStep(state: SubjectState, trackId: string, stepId: string)
   if (!step) return null;
   // A text has no subject; an email renders only a subject it starts (a continuing one has none).
   const channel = channelOf(state, trackId);
-  const subject = render(channel === "sms" || channel === "linkedin" ? "" : ownSubject(step), state.lead.mergeData);
+  const subject = render(channel === "email" ? ownSubject(step) : "", state.lead.mergeData);
   const body = render(step.body, state.lead.mergeData);
   return subject.ok && body.ok ? { subject: subject.text, body: body.text } : null;
 }
@@ -1023,10 +1061,24 @@ export function lacksThread(state: SubjectState, trackId: string, stepId: string
   return channelOf(state, trackId) === "email" && stepDef(state, trackId, stepId)?.threading === "continue_thread" && threadOf(state, trackId) === null;
 }
 
-/** The subject's fixed sender on a channel (1.3). */
-export function senderOf(state: SubjectState, channel: TrackChannel): string | null {
-  if (channel === "linkedin") return linkedinSessionOf(state);
-  return channel === "sms" ? state.subject.smsSender : channel === "email" ? state.subject.emailSender : null;
+/**
+ * The fixed sender of this track (1.3): per subject and channel for email, SMS and LinkedIn, whose senders come from one
+ * campaign-wide pool; per track on a message-request channel, whose tracks each choose their own (ADR 0004 13.5; the review
+ * bot on 0922582).
+ */
+export function senderOf(state: SubjectState, channel: TrackChannel, trackId: string): string | null {
+  switch (channel) {
+    case "linkedin":
+      return linkedinSessionOf(state);
+    case "sms":
+      return state.subject.smsSender;
+    case "email":
+      return state.subject.emailSender;
+    case "call":
+      return null;
+    default:
+      return messageSessionOf(state, trackId);
+  }
 }
 
 /**
@@ -1055,8 +1107,8 @@ function recipientOf(state: SubjectState, trackId: string): string | null {
  */
 export function candidatesFor(state: SubjectState, trackId: string): string[] {
   const channel = channelOf(state, trackId) ?? "email";
-  const fixed = senderOf(state, channel);
-  const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];
+  const fixed = senderOf(state, channel, trackId);
+  const ids = fixed !== null ? [fixed] : [...trackPoolOf(state, trackId)];
   if (!holdsConversations(channel)) return ids;
   const recipient = recipientOf(state, trackId);
   return recipient === null ? ids : ids.filter((id) => pairFree(state, id, recipient, channel));
@@ -1101,9 +1153,15 @@ export function claimRefusal(state: SubjectState, item: { readonly trackId: stri
 }
 
 /** The numbers an SMS track may text from: the subject's fixed sender, else its pool as the definition holds it now. */
-function usableNumbers(state: SubjectState, channel: "sms" | "linkedin"): readonly string[] {
-  const fixed = senderOf(state, channel);
-  return fixed !== null ? [fixed] : poolOf(state.campaign.definition, channel);
+function usableNumbers(state: SubjectState, trackId: string, channel: ConversationChannel): readonly string[] {
+  const fixed = senderOf(state, channel, trackId);
+  return fixed !== null ? [fixed] : trackPoolOf(state, trackId);
+}
+
+/** The sender accounts a track of this subject may use (ADR 0004 13.5): its own chosen senders, or its channel's pool. */
+export function trackPoolOf(state: SubjectState, trackId: string): readonly string[] {
+  const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
+  return track ? trackPool(state.campaign.definition, track) : [];
 }
 
 /** Another subject's binding of `sender` with the track's mobile, if any. */
@@ -1121,7 +1179,7 @@ function blockedNumbers(state: SubjectState, trackId: string, now: number): SmsB
   if (!holdsConversations(channel)) return null;
   const stepId = progressOf(state, trackId)?.nextStepId;
   if (!stepId || claimRefusal(state, { trackId, stepId }, now) !== null) return null;
-  const numbers = usableNumbers(state, channel);
+  const numbers = usableNumbers(state, trackId, channel);
   const recipient = recipientOf(state, trackId);
   if (numbers.length === 0 || recipient === null || candidatesFor(state, trackId).length > 0) return null;
   return numbers.flatMap((n) => otherBinding(state, n, recipient, channel) ?? []);
@@ -1194,7 +1252,20 @@ export interface ConversationOwner {
   readonly name: string;
   /** The owner is that campaign's test run. */
   readonly test: boolean;
+  /**
+   * A lead of this same campaign owns it (verifier on f2824d4, item 9): its name as stored with the cause, "" when a cause
+   * stored before names were kept has none. Null when the owner is another campaign or a test run: the campaign is named.
+   */
+  readonly lead: string | null;
 }
+
+/** The owner as said: a lead of the subject's own campaign by its name, else the owner's campaign (item 9). */
+function ownerOf(state: SubjectState, c: { readonly owner: string; readonly ownerCampaignId: string | null; readonly ownerCampaignName: string | null; readonly ownerIsTest: boolean; readonly ownerLeadName?: string | null }): ConversationOwner | null {
+  if (c.ownerCampaignId === null || c.ownerCampaignName === null) return null;
+  const lead = !c.ownerIsTest && c.ownerCampaignId === state.campaign.id ? (c.ownerLeadName ?? "") : null;
+  return { campaignId: c.ownerCampaignId, name: c.ownerCampaignName, test: c.ownerIsTest, lead };
+}
+const sameOwnerAs = (a: ConversationOwner, b: ConversationOwner): boolean => a.campaignId === b.campaignId && a.test === b.test && a.lead === b.lead;
 
 /**
  * Who owned the conversation a track was skipped for (ADR 0003, question Q7 answered), once each, in the order the skip
@@ -1207,8 +1278,8 @@ export function conversationOwnersOf(state: SubjectState, trackId: string): Conv
   if (p?.finishReason !== "skipped_conversation_taken") return [];
   const owners: ConversationOwner[] = [];
   for (const c of p.conversationOwners ?? []) {
-    if (c.ownerCampaignId === null || c.ownerCampaignName === null) continue;
-    if (!owners.some((o) => o.campaignId === c.ownerCampaignId && o.test === c.ownerIsTest)) owners.push({ campaignId: c.ownerCampaignId, name: c.ownerCampaignName, test: c.ownerIsTest });
+    const o = ownerOf(state, c);
+    if (o && !owners.some((x) => sameOwnerAs(x, o))) owners.push(o);
   }
   return owners;
 }
@@ -1220,8 +1291,8 @@ export function conversationOwnersOf(state: SubjectState, trackId: string): Conv
 export function unsettledOwnersOf(state: SubjectState, trackId: string, now: number): ConversationOwner[] {
   const owners: ConversationOwner[] = [];
   for (const b of (blockedNumbers(state, trackId, now) ?? []).filter((x) => !isConversation(x))) {
-    if (b.ownerCampaignId === null || b.ownerCampaignName === null) continue;
-    if (!owners.some((o) => o.campaignId === b.ownerCampaignId && o.test === b.ownerIsTest)) owners.push({ campaignId: b.ownerCampaignId, name: b.ownerCampaignName, test: b.ownerIsTest });
+    const o = ownerOf(state, b);
+    if (o && !owners.some((x) => sameOwnerAs(x, o))) owners.push(o);
   }
   return owners;
 }
@@ -1283,7 +1354,7 @@ export function conversationKeysOf(state: SubjectState): string[] {
   return [...new Set([...state.lead.details.map((d) => d.key), ...state.attempts.map((a) => a.destination), ...standing])].sort();
 }
 
-/** The InMail standings a subject's chosen InMails read (13.5): each one's session, by its version key. */
+/** The InMail standings a subject's chosen InMails read (14.5): each one's session, by its version key. */
 function inmailStandingKeys(state: SubjectState): string[] {
   const keys = state.tracks.filter(waitsOnStanding).map((p) => `inmail:${p.inmailSession}`);
   // An expiry waiting for its session's next report (an old one, the session signed in) reads that session's standing too.
@@ -1293,7 +1364,7 @@ function inmailStandingKeys(state: SubjectState): string[] {
 }
 const waitsOnStanding = (p: TrackProgress): boolean => p.inmail === "chosen" && p.finishedAt === null && (p.inmailSession ?? null) !== null;
 
-/** When a chosen InMail's session report grows too old to back it (13.5): its standing changes with time alone. */
+/** When a chosen InMail's session report grows too old to back it (14.5): its standing changes with time alone. */
 function inmailStandingHorizons(state: SubjectState): number[] {
   return state.tracks.filter(waitsOnStanding).flatMap((p) => {
     const reported = state.accounts[p.inmailSession ?? ""]?.inmail?.reportedWall ?? null;
@@ -1360,6 +1431,7 @@ export function skipTakenConversations(state: SubjectState, now: number): Subjec
       ownerCampaignId: b.ownerCampaignId,
       ownerCampaignName: b.ownerCampaignName,
       ownerIsTest: b.ownerIsTest,
+      ownerLeadName: b.ownerLeadName ?? null,
     }));
     s = withTrack(finishTrack(s, track.id, "skipped_conversation_taken", leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now)), track.id, (t) => ({ ...t, conversationOwners: cause }));
   }
@@ -1400,7 +1472,7 @@ export function awaitingAcceptance(state: SubjectState, trackId: string): boolea
   const p = progressOf(state, trackId);
   const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
   if (!p || !track || track.channel !== "linkedin" || p.startedAt === null || p.finishedAt !== null) return false;
-  // Once the expiry judged the InMail fallback, the wait is over (ADR 0004 13.3), whatever it chose.
+  // Once the expiry judged the InMail fallback, the wait is over (ADR 0004 14.3), whatever it chose.
   return (p.connection ?? null) === null && (p.acceptBy ?? null) !== null && (p.inmail ?? null) === null;
 }
 
@@ -1441,7 +1513,7 @@ export function recordAcceptance(state: SubjectState, trackId: string, providerT
   const p = progressOf(state, trackId);
   if (!p) return state;
   const s = (p.acceptedWall ?? null) === null ? withTrack(state, trackId, (t) => ({ ...t, acceptedWall: Math.min(Math.max(providerTime, handedWall), now) })) : state;
-  // The expiry chose the InMail and it has not been handed over (ADR 0004 13.3, question Q56): a person who accepted is a
+  // The expiry chose the InMail and it has not been handed over (ADR 0004 14.3, question Q56): a person who accepted is a
   // connection, so the InMail is not sent, and the first message follows the connection.
   if (p.inmail === "chosen" && p.finishedAt === null && (p.connection ?? null) === null && rules.acceptanceSkipsInmail) {
     const track = s.campaign.definition.tracks.find((t) => t.id === trackId);
@@ -1474,7 +1546,7 @@ export function inviteExpired(state: SubjectState, trackId: string, now: number)
   if (!p || !track || (p.acceptBy ?? null) === null) return state;
   const at = p.acceptBy ?? 0;
   const atWall = wallAtLead(state.subject.clock, state.freezes, at, now);
-  // The InMail fallback (ADR 0004 13.3): on (a live InMail step with no result), the track's own session judged once, now,
+  // The InMail fallback (ADR 0004 14.3): on (a live InMail step with no result), the track's own session judged once, now,
   // by its own report. Eligible: the InMail is the pending step, due at the deadline, and the invite is left open (Q50).
   const im = rules.inmailOffWhenRemoved ? inmailStepOf(track) : (track.steps.find((s) => s.role === "inmail") ?? null);
   if (im && !state.results.some((r) => r.stepId === im.id)) {
@@ -1496,7 +1568,7 @@ export function inviteExpired(state: SubjectState, trackId: string, now: number)
 }
 
 /**
- * The withdrawal path when the InMail fallback did not go (ADR 0004 13.3): its cause stored, the track's claims withdrawn,
+ * The withdrawal path when the InMail fallback did not go (ADR 0004 14.3): its cause stored, the track's claims withdrawn,
  * the invite to be withdrawn, and the track finished `invite_not_accepted` at `at` (the deadline at the expiry; the instant of
  * a refusal, an edit or a skip otherwise), so what waits on it starts from then.
  */
@@ -1508,7 +1580,7 @@ export function inmailNotSent(state: SubjectState, trackId: string, cause: Inmai
 }
 
 /**
- * The sessions whose InMail standing an evaluation read to make a judgment (ADR 0004 13.5; review bot on b49a71b): every
+ * The sessions whose InMail standing an evaluation read to make a judgment (ADR 0004 14.5; review bot on b49a71b): every
  * session of a track whose InMail state the evaluation set. The evaluation's write is refused when any of their standings
  * changed since its snapshot (another lead's commitment, a new report), so a credit is never committed twice.
  */
@@ -1526,17 +1598,17 @@ export function inmailJudgedSessions(before: SubjectState, after: SubjectState):
   return [...sessions];
 }
 
-/** How long a session's report stays fresh enough to judge eligibility on (ADR 0004 13.5, question Q58's interim). */
+/** How long a session's report stays fresh enough to judge eligibility on (ADR 0004 14.5, question Q58's interim). */
 export const INMAIL_REPORT_MAX_AGE = 24 * 60 * 60_000;
 
-/** A holding's key: its subject and track (13.5). */
+/** A holding's key: its subject and track (14.5). */
 export const holdingKey = (subjectId: string, trackId: string): string => `${subjectId}|${trackId}`;
 
 const planned = (s: AccountState["inmail"]) => s !== undefined && (s.plan === "premium" || s.plan === "sales_navigator");
 const reportFresh = (s: NonNullable<AccountState["inmail"]>, now: number) => s.reportedWall !== null && now - s.reportedWall <= INMAIL_REPORT_MAX_AGE;
 
 /**
- * Whether a session can give one more credit now (ADR 0004 13.5), from its latest report and every holding on it: no plan
+ * Whether a session can give one more credit now (ADR 0004 14.5), from its latest report and every holding on it: no plan
  * reported, a report too old, no credit free beyond the holdings, or free. The one test every acquisition reads.
  */
 export function inmailAvailability(account: AccountState | undefined, now: number): "free" | "no_plan" | "stale_report" | "no_credit" {
@@ -1547,7 +1619,7 @@ export function inmailAvailability(account: AccountState | undefined, now: numbe
 }
 
 /**
- * Whether the track's InMail may go now, by the credit it holds (ADR 0004 13.5): backed while its holding ranks, earliest
+ * Whether the track's InMail may go now, by the credit it holds (ADR 0004 14.5): backed while its holding ranks, earliest
  * acquired first, below the credits the session reports now; otherwise why not. The one function dispatch's selection, the
  * handover's predicate and every read of an InMail's wait derive from.
  */
@@ -1567,7 +1639,7 @@ export function inmailBacking(state: SubjectState, trackId: string, now: number)
 
 const byAcquisition = (a: { key: string; acquiredWall: number }, b: { key: string; acquiredWall: number }) => a.acquiredWall - b.acquiredWall || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 
-/** Acquires a credit for the track's InMail on its session (13.5): the holding stored, and counted on the account in this state. */
+/** Acquires a credit for the track's InMail on its session (14.5): the holding stored, and counted on the account in this state. */
 function acquireInmailHold(state: SubjectState, trackId: string, session: string, now: number): SubjectState {
   const s = withTrack(state, trackId, (t) => ({ ...t, inmailHoldWall: now }));
   const account = s.accounts[session];
@@ -1578,7 +1650,7 @@ function acquireInmailHold(state: SubjectState, trackId: string, session: string
 }
 
 /**
- * Releases the credit the track's InMail holds (13.5), unless its InMail may have gone: work handed over and unsettled, or
+ * Releases the credit the track's InMail holds (14.5), unless its InMail may have gone: work handed over and unsettled, or
  * sent, whose credit the session may have spent and its next report will show.
  */
 export function releaseInmailHold(state: SubjectState, trackId: string): SubjectState {
@@ -1596,7 +1668,7 @@ export function releaseInmailHold(state: SubjectState, trackId: string): Subject
 
 /**
  * A lead running again with its InMail chosen and no credit held (restarted after a stop) acquires one, only if one is free
- * (13.5; council on 8b0c846, item 7): it never takes back what another lead holds, and waits with its reason otherwise.
+ * (14.5; council on 8b0c846, item 7): it never takes back what another lead holds, and waits with its reason otherwise.
  */
 export function reacquireInmailHolds(state: SubjectState, now: number): SubjectState {
   let s = state;
@@ -1768,6 +1840,22 @@ export function linkedinSessionOf(state: SubjectState): string | null {
 }
 
 /**
+ * The session a message-request track goes from (ADR 0004 13.5): the one stored at that track's own first handover, fixed
+ * then and never reassigned. Null before it: the track's first claim chooses from its own chosen sessions, never from another
+ * track's (the review bot on 0922582). Two tracks of one lead to one account from two sessions are two conversations (13.6).
+ */
+export function messageSessionOf(state: SubjectState, trackId: string): string | null {
+  return state.subject.socialSenders?.[trackId] ?? null;
+}
+
+/** The subject with its sender on a social track fixed, if it had none (ADR 0004 6, 13.5): the one write of it. */
+export function withSocialSender(state: SubjectState, channel: SocialChannel, trackId: string, session: string): SubjectState {
+  if (channel === "linkedin") return { ...state, subject: { ...state.subject, linkedinSender: state.subject.linkedinSender ?? session } };
+  if (state.subject.socialSenders?.[trackId] !== undefined) return state;
+  return { ...state, subject: { ...state.subject, socialSenders: { ...state.subject.socialSenders, [trackId]: session } } };
+}
+
+/**
  * A running edit of a LinkedIn track's acceptance wait (ADR 0004 3.2; council on 194fc44, item 3): every track still waiting
  * for acceptance has its deadline re-resolved from its invite's send point with the wait in force, in the zone it was
  * resolved in. A new deadline already passed is the lead's present instant, so it expires at the next evaluation, once, and
@@ -1875,6 +1963,22 @@ export function inviteOpenOn(state: SubjectState, trackId: string): boolean {
 
 /** Whether any LinkedIn track of the subject has an invite still open on LinkedIn (`inviteOpenOn`). */
 export const anyInviteOpen = (state: SubjectState): boolean => state.tracks.some((t) => inviteOpenOn(state, t.trackId));
+
+/**
+ * Why a message-request track is skipped as a missing channel, from the facts at its finish (ADR 0004 13.4): an account it
+ * started with that is no longer theirs (replaced by another, or emptied by a re-import); every account it could use marked
+ * bad; an address that is not an account; or no address in either file.
+ */
+export function accountSkipCauseOf(state: SubjectState, channel: MessageRequestChannel, startedWith: string | null): SocialSkipCause {
+  const imported = state.lead.importedAccounts?.[channel];
+  const cells = imported ? [imported.person, imported.company].filter((c): c is NonNullable<typeof c> => c !== null) : [];
+  if (startedWith !== null) {
+    const ownerCell = startedWith.startsWith(`${channel}:p:`) ? imported?.person : imported?.company;
+    return ownerCell === "account" ? "replaced" : "removed_by_import";
+  }
+  if (state.lead.details.some((d) => d.channel === channel && d.bad)) return "marked_bad";
+  return cells.includes("not_account") ? "not_a_member_profile" : "no_profile";
+}
 
 /**
  * Why a LinkedIn track is skipped as a missing channel, from the facts at its finish (ticket 24b): a profile it started with

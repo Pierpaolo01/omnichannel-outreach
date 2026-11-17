@@ -7,7 +7,7 @@ import { random } from "./generated-sequences.ts";
 import { dueAfter, firstOpen, local, type Hours } from "./sequence-model.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../src/domain/sequence/definition.ts";
-import type { LeadSearchResult } from "../../src/shared/api.ts";
+import type { EnrollmentRead, LeadSearchResult } from "../../src/shared/api.ts";
 
 /**
  * The generated LinkedIn runs (ticket 24, ADR 0004 section 10). The real HTTP app, SQLite store and engine run one or two
@@ -141,7 +141,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   // The events the review of 194fc44 added (council item 2) draw from a stream of their own, so the first stream's draws
   // are unchanged: two campaigns sharing people, stops, campaign pauses, skips, a crash, a session signing out, running edits.
   const rnd2 = random(seed * 7 + 13);
-  // The InMail fallback (ticket 27, ADR 0004 13.11) draws from a third stream: the first two streams' draws are unchanged.
+  // The InMail fallback (ticket 27, ADR 0004 14.11) draws from a third stream: the first two streams' draws are unchanged.
   const rnd3 = random(seed * 11 + 29);
   // A fourth stream schedules an early switch-off (L19's case): the other streams' draws are unchanged.
   const rnd4 = random(seed * 13 + 31);
@@ -176,7 +176,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     allowances.set(THIRD_SESSION, { invites: Math.floor(rnd2() * 3), messages: Math.floor(rnd2() * 3) + 1, notes: Math.floor(rnd2() * 3) });
     features.add("a-third-session");
   }
-  // Each session's InMail standing as it reports it (13.5): Premium, Sales Navigator, no plan, or no report at all, with
+  // Each session's InMail standing as it reports it (14.5): Premium, Sales Navigator, no plan, or no report at all, with
   // credits from 0 to 3. The record keeps its own copy (`standingOf`); the simulated session spends one per InMail sent.
   const inmailPlans = new Map<string, { plan: "premium" | "sales_navigator" | "none"; credits: number } | null>();
   for (const s of sessions) {
@@ -331,7 +331,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const userWithdrawn = new Map<string, number>();
   const campaignHeld = new Map<string, { from: number; to: number | null }[]>();
   const waitEdits = new Map<number, { at: number; days: number }[]>();
-  /** Each campaign's InMail fallback through the run's edits (13.8): on while its LinkedIn track has a live InMail step. */
+  /** Each campaign's InMail fallback through the run's edits (14.8): on while its LinkedIn track has a live InMail step. */
   const fallbackOn = (d: CampaignDefinition, ci: number) => d.tracks.some((t) => t.id === campaigns[ci]!.li.id && t.steps.some((s) => s.role === "inmail" && !s.removed));
   const switches = new Map<number, { at: number; on: boolean }[]>(campaigns.map((c, i) => [i, [{ at: -Infinity, on: fallbackOn(c.definition, i) }]]));
   const fallbackAt = (ci: number, at: number) => (switches.get(ci) ?? []).filter((x) => x.at <= at).at(-1)?.on ?? false;
@@ -415,7 +415,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     return { span, clampedAt };
   };
   /**
-   * A session's credits as the engine can know them at `at` (13.5): the last report the session gave by then (a signed-out
+   * A session's credits as the engine can know them at `at` (14.5): the last report the session gave by then (a signed-out
    * session reports nothing, so its last report stands; seed 24016), less the InMails it delivered at or after that report.
    */
   /** The report the tick at `at` began with (its first at that instant), else the last before it (seed 24024). */
@@ -431,7 +431,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     return Math.max(0, report.credits - since);
   };
   /**
-   * The deadline the expiry judged at (13.3): an edit of the wait moves it only while the lead still waits, so an edit at or
+   * The deadline the expiry judged at (14.3): an edit of the wait moves it only while the lead still waits, so an edit at or
    * after the deadline it would have had is not applied (the InMail already judged; seed 24016).
    */
   const judgedDeadline = (lead: Lead, sentAt: number): number => {
@@ -443,12 +443,12 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     }
     return deadlineWall(lead, sentAt, until);
   };
-  /** Whether the session's report at `at` says Premium or Sales Navigator (its plan can change: the draws of 13.5). */
+  /** Whether the session's report at `at` says Premium or Sales Navigator (its plan can change: the draws of 14.5). */
   const planned = (session: string, at: number = h.clock) => {
     const plan = reportAt(session, at)?.plan;
     return plan === "premium" || plan === "sales_navigator";
   };
-  /** Whether that report is fresh enough to judge on (13.5, question Q58's interim: a day). */
+  /** Whether that report is fresh enough to judge on (14.5, question Q58's interim: a day). */
   const freshAt = (session: string, at: number) => {
     const report = reportAt(session, at);
     return report !== undefined && at - report.at <= DAY;
@@ -503,6 +503,24 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   };
 
   // --- Events.
+  // The review bot on 0922582, from a stream of its own so every other draw is unchanged: right after the launch, in half
+  // the runs, the user removes the LinkedIn track where every lead has started it, at least one has had nothing of it handed
+  // over (its window is closed) and another live track remains with none after it. Each lead that started it runs it to its
+  // end (ADR 0003's running edits), so the record's predictions stand, and a track stranded by the removal fails them.
+  if (random(seed ^ 0x7e3f)() < 0.5) {
+    for (const [ci, c] of campaigns.entries()) {
+      const others = [c.email, c.sms].filter((t): t is TrackDefinition => t !== null);
+      if (others.length === 0 || others.some((t) => t.start.kind === "after")) continue;
+      const mine = leads.filter((l) => l.campaign === ci);
+      const reads = await Promise.all(mine.map(async (l) => (await h.request<EnrollmentRead>("GET", `/api/enrollments/${l.id}`)).body.tracks.find((t) => t.trackId === c.li.id)));
+      const waiting = mine.some((l, i) => reads[i]?.finishedAt === null && !h.linkedin.handoverLog.some((x) => x.subjectId === l.id));
+      if (!reads.every((t) => t?.started === true || t?.finishedAt != null) || !waiting) continue;
+      const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
+      const r = await h.request<{ error?: { code?: string } }>("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, tracks: stored.tracks.map((t) => (t.id === c.li.id ? { ...t, removed: true } : t)) });
+      if (r.status === 200) features.add("a-started-linkedin-track-removed-before-its-first-claim");
+      else if (r.body.error?.code !== "blocked") problem(`setup: removing ${c.li.id}, which every lead had started, was refused: ${JSON.stringify(r.body).slice(0, 200)}`);
+    }
+  }
   const end = START + 12 * DAY;
   let requestNo = 0;
   while (h.clock < end && !bounded()) {
@@ -620,7 +638,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     return h.linkedin;
   }
 
-  /** L18 to L25 (ADR 0004 13.11), from the record's own model of the switch, the deadline, the acceptances and the credits. */
+  /** L18 to L25 (ADR 0004 14.11), from the record's own model of the switch, the deadline, the acceptances and the credits. */
   async function checkInmail(drained: boolean): Promise<void> {
     const li = h.linkedin;
     const now = h.clock;
@@ -753,7 +771,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   }
 
   /**
-   * L26 and L27 (ADR 0004 13.5; council on 8b0c846, items 2 and 7), after the drain, from the record's reports and logs.
+   * L26 and L27 (ADR 0004 14.5; council on 8b0c846, items 2 and 7), after the drain, from the record's reports and logs.
    * L26: with c credits reported and n InMails chosen on a session, min(c, n) go: none waits for want of sharing while the
    * session reports a credit free. L27: a lead stopped with its InMail chosen and restarted after another lead's expiry chose
    * on the same session never takes that credit back: it does not go while the other's waits for ever.
@@ -930,7 +948,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   }
 
   /**
-   * The InMail fallback's events (13.11), from the third stream: the switch turned off (its step removed) or on again (a new
+   * The InMail fallback's events (14.11), from the third stream: the switch turned off (its step removed) or on again (a new
    * InMail step after the invite), the InMail's text changed, and a session's credits spent by the user by hand.
    */
   async function inmailEvent(roll: number): Promise<void> {
@@ -1154,7 +1172,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
             const t = st?.tracks.find((x) => x.trackId === c.li.id);
             const invite = h.linkedin.deliveryLog.find((x) => x.subjectId === l.id && x.action === "invite" && x.visibleAt !== Infinity);
             const sent = st?.results.find((r) => r.trackId === c.li.id && r.stepId === c.li.steps[0]!.id && r.result === "sent");
-            // A lead whose InMail fallback the expiry already judged waits no more (13.3): its deadline is spent. An ended lead's
+            // A lead whose InMail fallback the expiry already judged waits no more (14.3): its deadline is spent. An ended lead's
             // clock stopped with it, so its deadline is not the record's to work out (seeds 24044, 24049: a reply marked).
             if (!st || st.subject.ended !== null || !t || !invite || !sent || t.finishedAt !== null || (t.connection ?? null) !== null || t.acceptBy == null || (t.inmail ?? null) !== null) continue;
             const { span } = deadlineOf(l, invite.at, h.clock);
@@ -1322,7 +1340,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       const invite = li.deliveryLog.find((x) => x.subjectId === d.subjectId && x.trackId === d.trackId && x.action === "invite");
       const accepted = invite ? li.acceptanceLog.find((a) => a.key === invite.key && a.at <= d.at) : undefined;
       const connected = li.presendLog.some((p) => p.destination === d.destination && p.sender === d.sender && p.answer === "connected" && p.at <= d.at) && !invite;
-      // L23: a follow-up goes without a connection only after an InMail delivered from that session to that profile (13.4).
+      // L23: a follow-up goes without a connection only after an InMail delivered from that session to that profile (14.4).
       const afterInmail = li.deliveryLog.some((x) => x.subjectId === d.subjectId && x.action === "inmail" && x.sender === d.sender && x.destination === d.destination && x.at <= d.at && x.visibleAt <= d.at);
       if (!accepted && !connected && !afterInmail) problem(`${invite && li.deliveryLog.some((x) => x.subjectId === d.subjectId && x.action === "inmail") ? "L23" : "L2"}: ${d.subjectId}'s ${d.stepId} was handed over at ${iso(d.at)} before any connection or InMail known sent`);
       if (afterInmail && !accepted) features.add("a-follow-up-after-an-inmail");
@@ -1379,7 +1397,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     const notesPerMonth = new Map<string, number>();
     for (const d of li.deliveryLog) {
       const day = local(d.at, "Europe/London").day;
-      // An InMail spends one of the session's messages (13.5).
+      // An InMail spends one of the session's messages (14.5).
       const bucket = d.action === "invite" ? "invite" : "message";
       const k = `${d.sender}|${bucket}|${day}`;
       perDay.set(k, (perDay.get(k) ?? 0) + 1);
@@ -1423,7 +1441,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           // A LinkedIn step whose kind every pool session allows none of (the user's zero) waits, said so: no room.
           const kind = p.trackId === c.li.id ? (p.nextStepId === c.li.steps[0]!.id ? "invites" : "messages") : null;
           // A chosen InMail's time has come by the expiry, not a connection, and it goes only from the session that sent the
-          // invite, by its messages per day (13.5; seeds 24071, 24084: its session had none, the pool's others had some).
+          // invite, by its messages per day (14.5; seeds 24071, 24084: its session had none, the pool's others had some).
           const inmailPending = p.trackId === c.li.id && st.campaign.definition.tracks.find((t) => t.id === c.li.id)?.steps.find((s) => s.id === p.nextStepId)?.role === "inmail";
           // Only a step whose time has come by its connection: a message still waiting for acceptance says that first.
           const awaiting = (p.acceptBy ?? null) !== null && (p.connection ?? null) === null && !inmailPending;
@@ -1433,7 +1451,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           const noRoom = kind !== null && !awaiting && fromWhich.length > 0 && fromWhich.every((id) => (allowances.get(id)?.[kind] ?? 0) === 0);
           // The read says no allowance exactly when the record finds none on any session the step may use (zero or never
           // set), and full for the day only where an allowance exists and is used up (ticket 24b, item 15).
-          // A chosen InMail with no credit backing it says that first: its credit, then its session's room (13.5).
+          // A chosen InMail with no credit backing it says that first: its credit, then its session's room (14.5).
           if (noRoom && (shown?.hold ?? null) === null && !(inmailPending && shown?.nextStep?.when.why === "inmail_unavailable")) {
             if (shown?.nextStep?.when.why !== "no_allowance") problem(`L13: ${lead.id}'s ${p.nextStepId} has no allowance on any session and its read does not say so (${JSON.stringify(shown?.nextStep?.when)})`);
             else features.add("a-step-waiting-on-a-zero-allowance");
@@ -1455,11 +1473,11 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           }
           if (hold !== null && !derivable(lead, p.trackId, p.nextStepId, hold) && !(hold === "invite_pending_elsewhere" && soleOwnerOf(lead))) problem(`L13: ${lead.id}'s ${p.nextStepId} is held (${hold}) for no reason the record can find`);
           if (p.dueAt === null && (p.acceptBy ?? null) === null && hold === null) problem(`L13: ${lead.id}'s ${p.nextStepId} is pending with nothing that can make it due`);
-          // A chosen InMail whose session the record finds out of credit, or with no plan, waits, said so (13.3).
+          // A chosen InMail whose session the record finds out of credit, or with no plan, waits, said so (14.3).
           const inmailBlocked = p.inmail === "chosen" && shown?.nextStep?.when.why === "inmail_unavailable";
           if (inmailBlocked) {
             const session = li.deliveryLog.find((x) => x.subjectId === lead.id && x.action === "invite")?.sender ?? "";
-            // Whether it should have gone is L26's, from every lead's InMail on the session together (13.5: credits are shared).
+            // Whether it should have gone is L26's, from every lead's InMail on the session together (14.5: credits are shared).
             features.add(planned(session, now) && creditsAt(session, now) >= 1 ? "an-inmail-waiting-behind-earlier-holdings" : "an-inmail-waiting-for-a-credit");
             continue;
           }
@@ -1503,7 +1521,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       if (lastEdit) features.add("an-edit-of-the-wait-while-waiting");
       const acceptance = li.acceptanceLog.find((a) => a.key === invite.key);
       const reportedBy = acceptance ? acceptance.at + (lead.script?.acceptReportDelayMs ?? 0) : Infinity;
-      // The withdrawal path at the expiry itself, or later: a refused InMail, the switch turned off, or the user's skip (13.3).
+      // The withdrawal path at the expiry itself, or later: a refused InMail, the switch turned off, or the user's skip (14.3).
       const atExpiry = tp.inmail == null || tp.inmail === "no_plan" || tp.inmail === "no_credit";
       const endedAt = atExpiry ? deadline : (tp.finishedWall ?? deadline);
       if (tp.finishReason === "invite_not_accepted") {

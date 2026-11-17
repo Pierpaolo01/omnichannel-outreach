@@ -2,6 +2,7 @@
  * When a pending step goes, as the HTTP reads say it (ADR 0003 "Reads that say when"): the engine's `stepWhen` at the
  * read's instant, mapped once. Every read that states when a step goes uses this, so none does arithmetic beside it.
  */
+import type { TrackChannelApi } from "../../shared/api.ts";
 import type { StepWait, StepWhen } from "../../domain/sequence/dispatch.ts";
 import type { StepWaitApi, StepWhenView } from "../../shared/api.ts";
 import { dateOfDay } from "./call-views.ts";
@@ -21,7 +22,7 @@ export function readWait(why: StepWait, state: SubjectState, trackId: string, no
 }
 
 /** A track's channel in the subject's definition in force (a removed track keeps its channel). */
-export function channelOfTrack(state: SubjectState, trackId: string): "email" | "sms" | "call" | "linkedin" {
+export function channelOfTrack(state: SubjectState, trackId: string): TrackChannelApi {
   return state.campaign.definition.tracks.find((t) => t.id === trackId)?.channel ?? "email";
 }
 
@@ -68,7 +69,7 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
  * A wait carries its track's channel, so every reason is worded in that channel's words (council on b21af02, item 1): a
  * transport's wait names the transport's channel, which is the track's.
  */
-export function stepWhenView(when: StepWhen, now: number, today: number, channel: "email" | "sms" | "call" | "linkedin", at?: { readonly state: SubjectState; readonly trackId: string }): StepWhenView {
+export function stepWhenView(when: StepWhen, now: number, today: number, channel: TrackChannelApi, at?: { readonly state: SubjectState; readonly trackId: string }): StepWhenView {
   switch (when.kind) {
     case "waits":
       return {

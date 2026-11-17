@@ -405,7 +405,7 @@ describe("the review bot on 82cf16d: a test run's invitation handed over and not
     await h.advanceTo(MONDAY_9 + 2 * MIN);
     const run = (await h.request<TestRunTab>("GET", `/api/campaigns/${id}/test-runs`)).body.run;
     expect(run?.linkedinTracks[0]?.view.invite).toBe("handed");
-    expect(run?.linkedinReply).toEqual({ allowed: true, work: { kind: "invite", state: "handed" } });
+    expect(run?.replyMarks.linkedin).toEqual({ allowed: true, work: { kind: "invite", state: "handed" } });
   });
 });
 
@@ -449,10 +449,10 @@ describe("the review bot on c20c8f0: the read names the work that allows the rep
   test("an already-connected test profile, the first message's answer unknown: the invitation was skipped, the message is handed", async () => {
     const run = await connectedTest({ loseAnswer: 50 });
     expect(run?.linkedinTracks[0]?.view.invite).toBeNull();
-    expect(run?.linkedinReply).toEqual({ allowed: true, work: { kind: "message", state: "handed" } });
+    expect(run?.replyMarks.linkedin).toEqual({ allowed: true, work: { kind: "message", state: "handed" } });
   });
   test("an already-connected test profile, the first message sent", async () => {
     const run = await connectedTest({});
-    expect(run?.linkedinReply).toEqual({ allowed: true, work: { kind: "message", state: "sent" } });
+    expect(run?.replyMarks.linkedin).toEqual({ allowed: true, work: { kind: "message", state: "sent" } });
   });
 });

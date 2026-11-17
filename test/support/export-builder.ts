@@ -29,7 +29,11 @@ export interface ExportRows {
 
 /** The two CSV files, as a user would upload them. */
 export function csvOf(rows: ExportRows): { businessesCsv: string; peopleCsv: string } {
-  return { businessesCsv: csv(BUSINESS_HEADER, rows.businesses), peopleCsv: csv(PEOPLE_HEADER, rows.people ?? []) };
+  // A column outside the verified header (the people file's `instagram`, ADR 0004 Q43) is added only when a row gives it,
+  // so every export written before ticket 25 is the same file byte for byte.
+  const extra = (header: readonly string[], all: readonly Row[]) => [...new Set(all.flatMap((r) => Object.keys(r)))].filter((c) => !header.includes(c));
+  const people = rows.people ?? [];
+  return { businessesCsv: csv([...BUSINESS_HEADER, ...extra(BUSINESS_HEADER, rows.businesses)], rows.businesses), peopleCsv: csv([...PEOPLE_HEADER, ...extra(PEOPLE_HEADER, people)], people) };
 }
 
 export function exportOf(rows: ExportRows): ScraperExport {
