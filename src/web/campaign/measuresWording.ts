@@ -1,4 +1,5 @@
-import type { CallMeasures, CampaignMeasures, LinkedinMeasures, MeasureRate, MessageMeasures } from "../../shared/api.ts";
+import { isMessageRequestChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
+import type { CallMeasures, CampaignMeasures, LinkedinMeasures, MeasureRate, MessageMeasures, MessageRequestMeasures } from "../../shared/api.ts";
 
 /**
  * The campaign measures in words (ticket 22; ADR 0003 "Ticket 22"): one function per measure, each saying a figure the
@@ -23,6 +24,13 @@ export function linkedinLine(m: LinkedinMeasures): string {
   if (m.invitesSent === 0 && m.messagesSent === 0 && m.failed === 0 && m.replies === 0) return "None sent yet";
   const t = m.fromTests;
   return `${m.invitesSent} ${m.invitesSent === 1 ? "invite" : "invites"} sent${fromTests(t.invitesSent)} · ${m.invitesAccepted} accepted${fromTests(t.invitesAccepted)} · ${m.messagesSent} ${m.messagesSent === 1 ? "message" : "messages"} sent${fromTests(t.messagesSent)} · ${m.failed} failed${fromTests(t.failed)} · ${t.replies > 0 ? `${m.replies} marked replied${fromTests(t.replies)}` : `${plural(m.replies, "lead", "leads")} marked replied`}`;
+}
+
+/** A message-request channel (ADR 0004 13.8): messages sent, failures, and replies the user marked; nothing about acceptance. */
+export function messageRequestLine(m: MessageRequestMeasures): string {
+  if (m.messagesSent === 0 && m.failed === 0 && m.replies === 0) return "None sent yet";
+  const t = m.fromTests;
+  return `${m.messagesSent} ${m.messagesSent === 1 ? "message" : "messages"} sent${fromTests(t.messagesSent)} · ${m.failed} failed${fromTests(t.failed)} · ${t.replies > 0 ? `${m.replies} marked replied${fromTests(t.replies)}` : `${plural(m.replies, "lead", "leads")} marked replied`}`;
 }
 
 /** The calls logged, test calls included: made, connected, interested, declined, and callbacks pending. */
@@ -60,6 +68,8 @@ export function measureRows(m: CampaignMeasures): { channel: CampaignMeasures["c
       case "linkedin":
         return { channel, label: "LinkedIn", line: linkedinLine(m.linkedin) };
       default: {
+        // Every message-request channel, by the registry (ADR 0004 13.8).
+        if (isMessageRequestChannel(channel)) return { channel, label: SOCIAL_CHANNELS[channel].name, line: messageRequestLine(m.messageRequests[channel]) };
         const never: never = channel;
         return never;
       }
@@ -81,7 +91,15 @@ export const MEASURE_NOTES: readonly string[] = [
 export const LINKEDIN_MEASURE_NOTE =
   "On LinkedIn, an invite or message counts once your session reports it sent; nothing shows whether it was seen. Accepted counts every acceptance recorded, also one after a track had ended. Replied counts the leads you marked replied on LinkedIn: the app detects no LinkedIn reply.";
 
-/** The notes for a campaign's channels: the LinkedIn note only when it has a LinkedIn track. */
+/** How a message-request channel's figures are counted (ADR 0004 13.8). A message request's acceptance is never reported. */
+export const messageRequestMeasureNote = (name: string): string =>
+  `On ${name}, a message counts once your session reports it sent; a first message arrives as a message request, and nothing shows whether it was accepted or seen. Replied counts the leads you marked replied on ${name}: the app detects no ${name} reply.`;
+
+/** The notes for a campaign's channels: each social channel's note only when it has a track on it. */
 export function measureNotes(channels: CampaignMeasures["channels"]): readonly string[] {
-  return channels.includes("linkedin") ? [...MEASURE_NOTES, LINKEDIN_MEASURE_NOTE] : MEASURE_NOTES;
+  return [
+    ...MEASURE_NOTES,
+    ...(channels.includes("linkedin") ? [LINKEDIN_MEASURE_NOTE] : []),
+    ...MESSAGE_REQUEST_CHANNELS.filter((c) => channels.includes(c)).map((c) => messageRequestMeasureNote(SOCIAL_CHANNELS[c].name)),
+  ];
 }

@@ -1,3 +1,5 @@
+import type { SendChannel } from "../../domain/sequence/definition.ts";
+import type { SocialChannel, SocialSenderKind } from "../../domain/social-channels.ts";
 import type { StoredReplyId } from "../../domain/sequence/reply-identity.ts";
 import type { LaunchCheck, SenderAccountView } from "../../domain/sequence/blockers.ts";
 import type { MergeData } from "../../domain/sequence/copy.ts";
@@ -25,7 +27,7 @@ export interface TestRunRecord {
 /** A campaign's test contacts, and whether a lead's record now has either (the boundary). */
 export interface StoredTestContacts {
   readonly contacts: TestContacts;
-  readonly leadHas: { readonly email: boolean; readonly mobile: boolean; readonly linkedin?: boolean };
+  readonly leadHas: { readonly email: boolean; readonly mobile: boolean } & { readonly [C in SocialChannel]?: boolean };
 }
 
 /** A sender account as the provider port reports it. */
@@ -54,7 +56,7 @@ export interface SocialAllowances {
 
 export interface SenderAccountConfig {
   readonly id: string;
-  readonly channel: "email" | "sms" | "linkedin";
+  readonly channel: SendChannel;
   readonly label: string;
   /** Today's room: the sends it may still make on its current reset day, a whole number, 0 when there is none (`storableAccount`). */
   readonly capacity: number;
@@ -71,6 +73,8 @@ export interface SenderAccountConfig {
   /** Why the provider says it cannot send, when not healthy, in the provider's own words (such as Instantly's "sending_off"). */
   readonly problem?: string | null;
   readonly resetZone: string;
+  /** What a message-request session reports of itself (ADR 0004 13.5); absent on every other channel. */
+  readonly socialKind?: SocialSenderKind;
 }
 
 /**
@@ -82,7 +86,7 @@ export interface SenderAccountConfig {
  * A report that fails any of them holds that one account as `invalid_report`, with no room and storable defaults, so it
  * never fails the sync of the others. A report with no usable id names no account: it is left out (null).
  */
-export function storableAccount<T extends SenderAccountConfig>(reported: T, channel: "email" | "sms" | "linkedin"): T | null {
+export function storableAccount<T extends SenderAccountConfig>(reported: T, channel: SendChannel): T | null {
   // A port's answer is read as data from outside: any field may be missing or of another type.
   const value: unknown = reported;
   if (typeof value !== "object" || value === null) return null;
@@ -286,7 +290,7 @@ export interface EngineStore {
   /** The campaign's test contacts and whether a lead's record has either now; null for no such campaign. */
   testContacts(campaignId: string): Promise<StoredTestContacts | null>;
   /** Stores the contacts in one transaction, refusing one a person's or company's live detail has. */
-  saveTestContacts(campaignId: string, contacts: TestContacts): Promise<{ readonly ok: true } | { readonly ok: false; readonly field: "email" | "mobile" | "linkedin"; readonly message: string } | { readonly ok: false; readonly missing: true }>;
+  saveTestContacts(campaignId: string, contacts: TestContacts): Promise<{ readonly ok: true } | { readonly ok: false; readonly field: "email" | "mobile" | SocialChannel; readonly message: string } | { readonly ok: false; readonly missing: true }>;
   /**
    * Run test in one transaction with its request id (17a's binding): the facts are read, `refusal` judges them, and an
    * accepted run is inserted and entered with `enter`. The effect names the run.
@@ -427,7 +431,7 @@ export interface EngineStore {
 
   upsertAccounts(accounts: readonly SenderAccountConfig[]): Promise<void>;
   /** Marks unhealthy every account of `channel` its port no longer reports: it is disconnected. */
-  disconnectUnlisted(channel: "email" | "sms" | "linkedin", listed: readonly string[]): Promise<void>;
+  disconnectUnlisted(channel: SendChannel, listed: readonly string[]): Promise<void>;
   /** Every SMS conversation binding of a mobile (E.164), from any number, oldest first (ADR 0003 4.5). */
   smsBindingsOf(recipient: string): Promise<SmsBindingRecord[]>;
   /**

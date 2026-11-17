@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import { OUTREACH_STATUSES } from "../../domain/outreach-status.ts";
-import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead, StepWaitApi } from "../../shared/api.ts";
+import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead, SendView, StepWaitApi, TrackChannelApi } from "../../shared/api.ts";
 import {
+  outgoingSoFar,
+  soFarSentence,
   CALL_LINE_IS_THE_SENTENCE,
   CAMPAIGN_DONE,
   CONTROL_LABEL,
@@ -38,7 +40,7 @@ function lead(status: OutreachStatus, fields: Partial<RecordLead> = {}): RecordL
     reply: null,
     sender: null,
     smsSender: null,
-    linkedinReply: null,
+    replyMarks: {},
     zone: ZONE,
     tracks: [],
     branch: "main",
@@ -54,7 +56,7 @@ function lead(status: OutreachStatus, fields: Partial<RecordLead> = {}): RecordL
 /** A running lead whose current step is email 2, due Tuesday 3 November at 09:00 London. */
 const running = (status: OutreachStatus, fields: Partial<RecordLead> = {}) =>
   lead(status, {
-    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, when: at("2026-11-03T09:00:00.000Z") }, callTask: null, steps: [] }],
+    tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, messageRequest: null, hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, when: at("2026-11-03T09:00:00.000Z") }, callTask: null, steps: [] }],
     controls: [allowed("pause", { statusAfter: "paused", next: step() }), refused("resume", "They are not paused."), allowed("skip", { skips: step(), next: step({ stepId: "s3", number: 3, when: at("2026-11-06T09:00:00.000Z") }) }), allowed("stop", { statusAfter: "stopped_manually" })],
     ...fields,
   });
@@ -115,7 +117,7 @@ describe("the plain next-step sentence, for every status", () => {
   test("queued and active after launch: the step the read names, and when it is due", () => {
     expect(nextStepSentence(running("queued"), ZONE)).toBe("Nothing has gone out yet. Next: email 2 of 3, earliest Tue 3 Nov at 09:00.");
     // A held step is never said to be due: the row says why, naming whose text it waits on (verifier on faac357, item 5).
-    const held = running("queued", { tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, hold: "unresolved", holdOwners: [], nextStep: { stepId: "s2", number: 2, when: at("2026-11-03T09:00:00.000Z") }, callTask: null, steps: [] }] });
+    const held = running("queued", { tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, messageRequest: null, hold: "unresolved", holdOwners: [], nextStep: { stepId: "s2", number: 2, when: at("2026-11-03T09:00:00.000Z") }, callTask: null, steps: [] }] });
     expect(nextStepSentence(held, ZONE)).toBe("Nothing has gone out yet. Next: email 2 of 3, on hold because the provider hasn’t confirmed whether a message went.");
     expect(nextStepSentence(running("active"), ZONE)).toBe("Next: email 2 of 3, earliest Tue 3 Nov at 09:00.");
   });
@@ -185,7 +187,7 @@ describe("the controls offered: exactly the ones the read allows, in a fixed ord
       controls: [refused("pause", "Outreach to them has ended in this campaign (stopped manually)."), allowed("move_to_win_back", { next: step() }), allowed("resume_from_next_step", { next: step() }), refused("skip", "x")],
     });
     expect(offeredControls(r).map((c) => c.action)).toEqual(["resume_from_next_step", "move_to_win_back"]);
-    expect(CONTROL_LABEL).toEqual({ pause: "Pause", resume: "Resume", skip: "Skip this step", stop: "Stop", resume_from_next_step: "Resume from the next step", move_to_win_back: "Move to win-back", mark_replied: "Mark replied on LinkedIn", invite_withdrawn: "It’s withdrawn", invite_kept: "It’s still there" });
+    expect(CONTROL_LABEL).toEqual({ pause: "Pause", resume: "Resume", skip: "Skip this step", stop: "Stop", resume_from_next_step: "Resume from the next step", move_to_win_back: "Move to win-back", "mark_replied:linkedin": "Mark replied on LinkedIn", "mark_replied:instagram": "Mark replied on Instagram", invite_withdrawn: "It’s withdrawn", invite_kept: "It’s still there" });
   });
 });
 
@@ -285,5 +287,33 @@ describe("a time inside a repeated hour says which one (verifier on cc9bf55, ite
     expect(stepWhenPhrase(at("2026-10-25T00:00:00.000Z"), ZONE)).toBe("earliest Sun 25 Oct at 01:00 BST");
     expect(stepWhenPhrase(at("2026-10-25T01:00:00.000Z"), ZONE)).toBe("earliest Sun 25 Oct at 01:00 GMT");
     expect(stepWhenPhrase(at("2026-10-25T03:00:00.000Z"), ZONE)).toBe("earliest Sun 25 Oct at 03:00");
+  });
+});
+
+describe("what has left the app, in three states on every channel (verifier on f2824d4, item 10)", () => {
+  const send = (state: SendView["state"], unresolved = false, handed = state !== "claimed"): SendView => ({ attemptId: "a1", state, sender: "s", destination: "d", copy: null, handedAt: handed ? "2026-11-02T09:00:00.000Z" : null, sentAt: state === "sent" ? "2026-11-02T09:00:01.000Z" : null, endedBy: null, rejectReason: null, unresolved });
+  const withSend = (channel: TrackChannelApi, sends: SendView[], result: "sent" | null = null) =>
+    running("queued", { tracks: [{ trackId: "t1", channel, branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, messageRequest: null, hold: null, holdOwners: [], nextStep: null, callTask: null, steps: [{ stepId: "s1", number: 1, removed: false, result, reason: null, at: null, sends, calls: [] }] }] });
+  const NOUN = { email: "An email", sms: "A text", linkedin: "A LinkedIn invite or message", instagram: "An Instagram message" } as const;
+
+  test.each(Object.keys(NOUN) as (keyof typeof NOUN)[])("%s: nothing handed over, handed over and not known, recorded sent", (channel) => {
+    expect(outgoingSoFar(withSend(channel, []))).toEqual({ state: "nothing" });
+    expect(nextStepSentence(withSend(channel, []), ZONE)).toMatch(/^Nothing has gone out yet\./);
+    // Handed over, by the stored handover time: a claim too, when it carries work handed over earlier.
+    for (const s of [send("handed"), send("accepted"), send("claimed", false, true), send("rejected", true), send("withdrawn", true)]) {
+      expect(outgoingSoFar(withSend(channel, [s])), s.state).toEqual({ state: "unknown", channel });
+      const sentence = nextStepSentence(withSend(channel, [s]), ZONE);
+      expect(sentence).toMatch(new RegExp(`^${NOUN[channel]} was handed over, and it isn’t known yet whether it went\\.`));
+      expect(sentence).not.toContain("Nothing has gone out");
+    }
+    // Refused or withdrawn and known so, or a claim never handed over (the council on 5a30b9f), or a claim withdrawn or
+    // expired before its handover, whatever its outcome flag: nothing went.
+    for (const s of [send("rejected"), send("withdrawn"), send("claimed"), send("withdrawn", true, false)]) {
+      expect(outgoingSoFar(withSend(channel, [s])), `${s.state} handed ${String(s.handedAt)}`).toEqual({ state: "nothing" });
+      expect(nextStepSentence(withSend(channel, [s]), ZONE)).toMatch(/^Nothing has gone out yet\./);
+    }
+    expect(outgoingSoFar(withSend(channel, [send("handed"), send("sent")]))).toEqual({ state: "sent", channel });
+    expect(outgoingSoFar(withSend(channel, [], "sent"))).toEqual({ state: "sent", channel });
+    expect(soFarSentence({ state: "sent", channel })).toBe(`${NOUN[channel]} has gone out.`);
   });
 });

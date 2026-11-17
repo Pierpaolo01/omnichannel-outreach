@@ -16,6 +16,7 @@ const track = (linkedin: Partial<LinkedinTrackView> | null, fields: Partial<Trac
   finishedAt: null,
   conversationOwners: [],
   linkedin: linkedin === null ? null : { ...VIEW, ...linkedin },
+  messageRequest: null,
   hold: null,
   holdOwners: [],
   nextStep: null,
@@ -77,7 +78,7 @@ describe("a LinkedIn track's facts on the record", () => {
     // A stuck withdrawal is said once, in the expiry's own line (council on a6c1700, item 7).
     const stuck = linkedinTrackLines(track({ withdrawalStuck: true, withdrawalAsked: true, withdrawal: "wanted" }, { finishReason: "invite_not_accepted" }), "active", ZONE);
     expect(stuck.filter((l) => /hasn’t (answered|confirmed)/.test(l))).toHaveLength(1);
-    const taken = linkedinTrackLines(track(null, { finishReason: "skipped_conversation_taken", conversationOwners: [{ name: "Spring clinics", test: false }] }), "active", ZONE);
+    const taken = linkedinTrackLines(track(null, { finishReason: "skipped_conversation_taken", conversationOwners: [{ name: "Spring clinics", test: false, lead: null }] }), "active", ZONE);
     expect(taken[0]).toContain("campaign Spring clinics");
     expect(taken[0]).toContain("LinkedIn");
     expect(taken[0]).not.toMatch(/mobile|\btext\b/);

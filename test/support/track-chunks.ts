@@ -66,6 +66,10 @@ export function trackChunks(from: number, to: number): void {
       test("the fixed seeds reach a never-entered branch beside a running lead and beside a lead with no channel at launch", () => {
         expect(["a-lead-beside-a-branch-never-entered", "no-channel-at-launch-beside-a-branch"].filter((f) => !reached.has(f))).toEqual([]);
       });
+      // The review bot on 0922582: an email track and an SMS track every lead had started, removed before a lead's first claim.
+      test("the fixed seeds remove a started email track and a started SMS track before a lead's first claim", () => {
+        expect(["a-started-email-track-removed-before-its-first-claim", "a-started-sms-track-removed-before-its-first-claim"].filter((f) => !reached.has(f))).toEqual([]);
+      });
       // Review bot on b21af02: a LinkedIn track started after its text, in the campaign beside SMS.
       test("the fixed seeds start a LinkedIn track after a text on the same person", () => {
         expect(reached.has("linkedin-after-its-text")).toBe(true);

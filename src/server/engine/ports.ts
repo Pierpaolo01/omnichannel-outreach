@@ -8,6 +8,8 @@
  * (#28; ADR 0004): the running app registers `UnconnectedLinkedInPort`, which lists no session, so every LinkedIn track
  * meets launch blocker 3; tests use `test/support/fake-linkedin-port.ts`, which the running app never registers.
  */
+import type { SendChannel } from "../../domain/sequence/definition.ts";
+import { MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel } from "../../domain/social-channels.ts";
 import type { CallAnswer } from "../../domain/sequence/attempt.ts";
 import type { RenderedCopy, RejectReason } from "../../domain/sequence/state.ts";
 import type { SenderAccountConfig } from "./engine-store.ts";
@@ -108,7 +110,7 @@ export type PresendResult = { readonly kind: "clear" } | { readonly kind: "reply
 export type InviteWithdrawal = { readonly kind: "withdrawn" } | { readonly kind: "already_accepted"; readonly at: number | null } | { readonly kind: "unknown" };
 
 export interface SendPort {
-  readonly channel: "email" | "sms" | "linkedin";
+  readonly channel: SendChannel;
   /** Openers and follow-ups may travel differently (ADR 0002). */
   transportFor(step: { readonly threading: "new_subject" | "continue_thread" }): Transport;
   accounts(): Promise<AccountStatus[]>;
@@ -192,12 +194,15 @@ export class UnprovisionedSmsPort implements SendPort {
 }
 
 /**
- * The running app's LinkedIn port (ADR 0004 1.1): no LinkedIn session is connected, and the repository's rules allow no new
- * account connection (#28). It lists no session, so every LinkedIn track meets launch blocker 3, and it never acts. Nothing
- * here opens a browser or makes a network call.
+ * The running app's port for a social channel (ADR 0004 1.1, 13.1): no LinkedIn, Instagram or Facebook session is connected,
+ * and the repository's rules allow no new account connection (#28). It lists no session, so every track on the channel meets
+ * launch blocker 3, and it never acts. Nothing here opens a browser or makes a network call.
  */
-export class UnconnectedLinkedInPort implements SendPort {
-  readonly channel = "linkedin";
+export class UnconnectedSocialPort implements SendPort {
+  readonly channel: SocialChannel;
+  constructor(channel: SocialChannel) {
+    this.channel = channel;
+  }
   transportFor(): Transport {
     return { retryable: false, notSentIsFinal: false, available: false };
   }
@@ -221,6 +226,13 @@ export class UnconnectedLinkedInPort implements SendPort {
   }
   lookup(): Promise<LookupResult> {
     return Promise.resolve({ kind: "unknown" });
+  }
+}
+
+/** The running app's LinkedIn port: the unconnected social port on LinkedIn (ADR 0004 1.1). */
+export class UnconnectedLinkedInPort extends UnconnectedSocialPort {
+  constructor() {
+    super("linkedin");
   }
 }
 
@@ -314,17 +326,33 @@ export function callOutcome(r: PortCallResult): CallOutcome {
  * its id. The port itself knows only its own ids: `namespacedLinkedinPort` adds the prefix to the accounts it lists and
  * strips it from every request the engine makes of it.
  */
-export const LINKEDIN_ACCOUNT_PREFIX = "linkedin:";
-export const linkedinAccountId = (sessionId: string): string => `${LINKEDIN_ACCOUNT_PREFIX}${sessionId}`;
-const sessionIdOf = (accountId: string): string => (accountId.startsWith(LINKEDIN_ACCOUNT_PREFIX) ? accountId.slice(LINKEDIN_ACCOUNT_PREFIX.length) : accountId);
+export const LINKEDIN_ACCOUNT_PREFIX = SOCIAL_CHANNELS.linkedin.accountPrefix;
+export const linkedinAccountId = (sessionId: string): string => socialAccountId("linkedin", sessionId);
+/** A social session's account id in the app: the channel's prefix and the session's own id (ADR 0004 1.1, 13.2). */
+export const socialAccountId = (channel: SocialChannel, sessionId: string): string => `${SOCIAL_CHANNELS[channel].accountPrefix}${sessionId}`;
 
 export function namespacedLinkedinPort(port: SendPort): SendPort {
+  return namespacedSocialPort("linkedin", port);
+}
+
+/**
+ * Every message-request channel's port as the engine holds it (ADR 0004 13.1): the given one, namespaced, or the unconnected
+ * one, which lists no session.
+ */
+export function messageRequestPorts(given: { readonly [C in MessageRequestChannel]?: SendPort }): Record<MessageRequestChannel, SendPort> {
+  return Object.fromEntries(MESSAGE_REQUEST_CHANNELS.map((c) => [c, namespacedSocialPort(c, given[c] ?? new UnconnectedSocialPort(c))])) as Record<MessageRequestChannel, SendPort>;
+}
+
+/** A social port with the app's account ids: the channel's prefix added to what it lists, stripped from what it is asked. */
+export function namespacedSocialPort(channel: SocialChannel, port: SendPort): SendPort {
+  const prefix = SOCIAL_CHANNELS[channel].accountPrefix;
+  const sessionIdOf = (accountId: string): string => (accountId.startsWith(prefix) ? accountId.slice(prefix.length) : accountId);
   const withdrawInvite = port.withdrawInvite?.bind(port);
   const contact = port.contact?.bind(port);
   return {
     channel: port.channel,
     transportFor: (step) => port.transportFor(step),
-    accounts: async () => (await port.accounts()).map((a) => ({ ...a, id: linkedinAccountId(a.id) })),
+    accounts: async () => (await port.accounts()).map((a) => ({ ...a, id: socialAccountId(channel, a.id) })),
     ...(contact ? { contact } : {}),
     presendCheck: (request) => port.presendCheck({ ...request, sender: sessionIdOf(request.sender) }),
     handover: (request) => port.handover({ ...request, sender: sessionIdOf(request.sender) }),

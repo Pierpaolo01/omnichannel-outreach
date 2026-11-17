@@ -104,8 +104,8 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     invariant: "L3",
     seed: 4,
     rules: {
-      markReplied: (state, requestId, now) => {
-        const refused = DEFAULT_RULES.markReplied(state, requestId, now);
+      markReplied: (state, requestId, now, channel) => {
+        const refused = DEFAULT_RULES.markReplied(state, requestId, now, channel);
         if (!refused.ok) return refused;
         return { ok: true, state: { ...state, replies: [...state.replies, { channel: "linkedin", atWall: now, providerRef: markedReplyId("linkedin", requestId) }] } };
       },
@@ -298,5 +298,12 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     invariant: "L13",
     seed: 11,
     rules: { evaluate: (state, now, options) => DEFAULT_RULES.evaluate(state, now, { ...options, skipTakenConversations: false }) },
+  },
+  // L13 (the review bot on 0922582): a LinkedIn track a lead started, removed by a running edit before its first claim, finds
+  // no sender, so its invite waits for ever.
+  "a removed track a lead started finds no sender": {
+    invariant: "L13",
+    seed: 0,
+    rules: { chooseAccount: (state, now, stepId) => (state.campaign.definition.tracks.find((t) => t.steps.some((x) => x.id === stepId))?.removed ? null : DEFAULT_RULES.chooseAccount(state, now, stepId)) },
   },
 };

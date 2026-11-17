@@ -1,3 +1,5 @@
+import { MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel } from "../domain/social-channels.ts";
+import type { SendChannel, TrackChannel } from "../domain/sequence/definition.ts";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -5,9 +7,9 @@ import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus, OUTREACH_STATUSES, type OutreachStatus } from "../domain/outreach-status.ts";
 import { LEAD_CONTROLS } from "../domain/sequence/controls.ts";
 import { maySend } from "../domain/sequence/attempt.ts";
-import { campaignControls, controlsView, linkedinReplyView } from "./engine/controls-view.ts";
+import { campaignControls, controlsView, replyMarksView } from "./engine/controls-view.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
-import type { ActivityView, ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, CompanyRecord, FileCheckResult, PersonRecord, RecordCalls, SmsProviderStatus, TestContactsRefusal, TestRunTab } from "../shared/api.ts";
+import type { ActivityView, ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, CompanyRecord, FileCheckResult, PersonRecord, RecordCalls, SmsProviderStatus, SocialProvidersStatus, TestContactsRefusal, TestRunTab } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
 import { checkApiRequest } from "./guard.ts";
 import { invalidBodyMessage, requestObject } from "./request-body.ts";
@@ -52,6 +54,8 @@ export interface AppDependencies {
    * no LinkedIn session is connected (#28); `test-simulator` only in the test harness's simulated provider.
    */
   readonly linkedinProvider?: "none" | "test-simulator";
+  /** The message-request channels' providers (ADR 0004 13.1), as `linkedinProvider`: `none` for every channel unless a test says so. */
+  readonly socialProviders?: { readonly [C in MessageRequestChannel]?: "none" | "test-simulator" };
   /** The engine's rules, as the read models use them; the tests' broken engines replace entries (ADR 0003 9.2). */
   readonly rules?: Partial<Rules>;
   /** The bulk rule's parts; the generated bulk runs' broken apps replace one (ADR 0003 "Ticket 18"). */
@@ -71,7 +75,7 @@ const stepBody = requestObject({
 });
 const trackBody = requestObject({
   id: z.string().trim().min(1).max(100),
-  channel: z.enum(["email", "sms", "call", "linkedin"]),
+  channel: z.enum(["email", "sms", "call", ...SOCIAL_CHANNEL_LIST] as unknown as readonly ["email", ...TrackChannel[]]),
   branch: z.enum(["main", "win_back"]).default("main"),
   window: z.array(windowRule).max(14),
   steps: z.array(stepBody).max(50),
@@ -82,6 +86,8 @@ const trackBody = requestObject({
   callSkipLimitDays: z.number().optional(),
   /** A LinkedIn track's wait for its invite to be accepted, in days (ADR 0004 3.1); the validator checks it. */
   acceptWaitDays: z.number().optional(),
+  /** A message-request track's chosen sender sessions (ADR 0004 13.5); the validator refuses them on any other track. */
+  senders: z.array(z.string().min(1).max(200)).max(100).optional(),
 });
 const definitionBody = requestObject({
   timezone: z.string().trim().min(1),
@@ -106,11 +112,12 @@ function definitionFromBody(fields: Omit<z.infer<typeof definitionBody>, "save" 
   return {
     ...rest,
     ...(linkedinPool !== undefined ? { linkedinPool } : {}),
-    tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, acceptWaitDays, ...t }) => ({
+    tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, acceptWaitDays, senders, ...t }) => ({
       ...t,
       ...(declinedPath ? { declinedPath } : {}),
       ...(callSkipLimitDays !== undefined ? { callSkipLimitDays } : {}),
       ...(acceptWaitDays !== undefined ? { acceptWaitDays } : {}),
+      ...(senders !== undefined ? { senders } : {}),
     })),
   };
 }
@@ -145,7 +152,7 @@ const leadControlBody = requestObject({
 // Ticket 21: the user's own test contacts, Run test and Stop test (ADR 0003 "Ticket 21").
 const markRepliedBody = requestObject({
   requestId: controlRequestId,
-  channel: z.literal("linkedin", { message: "Only a LinkedIn reply is marked by hand: email and SMS replies are detected." }),
+  channel: z.enum(SOCIAL_CHANNEL_LIST as unknown as readonly [SocialChannel, ...SocialChannel[]], { message: `Only a social reply is marked by hand (${SOCIAL_CHANNEL_LIST.map((c) => SOCIAL_CHANNELS[c].name).join(" or ")}): email and SMS replies are detected.` }),
   expect: z.strictObject({ status: z.enum(OUTREACH_STATUSES) }, { message: "Send the status the confirmation showed." }).optional(),
 });
 const inviteWithdrawalBody = requestObject({ requestId: controlRequestId, trackId: z.string().min(1).max(100), answer: z.enum(["withdrawn", "kept"]) });
@@ -154,7 +161,12 @@ const allowancesBody = requestObject({
   messagesPerDay: z.number().int().min(0).max(10_000),
   notesPerMonth: z.number().int().min(0).max(100_000),
 });
-const testContactsBody = requestObject({ email: z.string().max(320), mobile: z.string().max(40), linkedin: z.string().max(300).optional() });
+// The user's own test address on each social channel, one optional field per channel of the registry (ADR 0004 8, 13.8).
+const testContactsBody = requestObject({
+  email: z.string().max(320),
+  mobile: z.string().max(40),
+  ...(Object.fromEntries(SOCIAL_CHANNEL_LIST.map((c) => [c, z.string().max(300).optional()])) as { [C in SocialChannel]: z.ZodOptional<z.ZodString> }),
+});
 const runTestBody = requestObject({
   requestId: controlRequestId,
   renderAs: z.string().trim().min(1, "Choose the lead the test's copy is written for.").max(200),
@@ -227,7 +239,7 @@ const launchBody = requestObject({ definitionVersion: z.number().int().optional(
 const checkBody = requestObject({ businessesCsv: z.string().optional(), peopleCsv: z.string().optional() });
 
 /** The HTTP interface. Every route is under /api; the web client is served separately. */
-export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", linkedinProvider = "none", rules: givenRules, bulkRules, measureRules }: AppDependencies): Hono {
+export function createApp({ store, now, newId, engine: givenEngine, emailProvider, smsProvider = "none", linkedinProvider = "none", socialProviders = {}, rules: givenRules, bulkRules, measureRules }: AppDependencies): Hono {
   const rules: Rules = rulesWith(givenRules);
   const engine = givenEngine ?? new Engine({ store: store.engine, port: new UnconnectedEmailPort(), smsPort: new UnprovisionedSmsPort(), now: () => Date.parse(now()), newId });
   const app = new Hono().basePath("/api");
@@ -640,7 +652,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // Work handed over and not settled may still be sent (ticket 17a's provider limitation): the screens say so.
   // When each step goes is read with what dispatch knows beyond the lead (ADR 0003 "Reads that say when"): the port's
   // transport, and the dispatch gate while sending is interrupted.
-  const transport = (channel: "email" | "sms" | "linkedin", threading: "new_subject" | "continue_thread") => engine.transportAvailable?.(channel, threading) ?? true;
+  const transport = (channel: SendChannel, threading: "new_subject" | "continue_thread") => engine.transportAvailable?.(channel, threading) ?? true;
   /**
    * A read with what dispatch knows, computed once with a probe in place of the later days' call room, and again with the
    * room only when some step asked for it (council and verifier on cc9bf55, items 6 and 12): the other leads' open calls are
@@ -658,7 +670,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // (the P2 seeds of the search on ab6fe8e). Pure: nothing is written; the next round evaluates the same.
   const readOf = (stored: SubjectState, at: number, env: StepEnv): EnrollmentRead => {
     const state = rules.previewAsOf(stored, at, rules.evaluate);
-    return { ...progressView(state, at, env, rules.stepWhen), controls: controlsView(state, at, rules, env), mayStillSend: state.work.filter(maySend).length, linkedinReply: linkedinReplyView(stored, at, rules) };
+    return { ...progressView(state, at, env, rules.stepWhen), controls: controlsView(state, at, rules, env), mayStillSend: state.work.filter(maySend).length, replyMarks: replyMarksView(stored, at, rules) };
   };
   const enrollmentRead = async (id: string): Promise<EnrollmentRead | null> => {
     const at = Date.parse(now());
@@ -728,7 +740,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const id = c.req.param("id");
     if (!(await store.engine.subject(id, Date.parse(now()))) || (await isTestRun(id))) return notFound(c, "enrollment");
     if (!engine.markReplied) return controlRefused(c, "Marking a reply needs the engine.");
-    const answer = await engine.markReplied(id, body.data.requestId, body.data.expect ?? null);
+    const answer = await engine.markReplied(id, body.data.requestId, body.data.channel, body.data.expect ?? null);
     if (!answer.ok) return controlRefused(c, answer.reason);
     return c.json({ enrollment: await enrollmentRead(id), replayed: answer.replayed });
   });
@@ -741,7 +753,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const run = await store.engine.testRun(c.req.param("id"));
     if (!run) return notFound(c, "test run");
     if (!engine.markReplied) return controlRefused(c, "Marking a reply needs the engine.");
-    const answer = await engine.markReplied(run.id, body.data.requestId, body.data.expect ?? null);
+    const answer = await engine.markReplied(run.id, body.data.requestId, body.data.channel, body.data.expect ?? null);
     if (!answer.ok) return controlRefused(c, answer.reason);
     const tab = await testTab(run.campaignId);
     return tab ? c.json<TestRunTab & { readonly replayed: boolean }>({ ...tab, replayed: answer.replayed }) : notFound(c, "campaign");
@@ -778,7 +790,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     const body = allowancesBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
     const set = await store.engine.setAllowances(c.req.param("id"), body.data, Date.parse(now()));
-    if (set === "not_social") return notFound(c, "LinkedIn sender account");
+    if (set === "not_social") return notFound(c, "social sender account");
     return c.json(await store.engine.allowances(c.req.param("id")));
   });
 
@@ -852,8 +864,9 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.put("/campaigns/:id/test-contacts", async (c) => {
     const body = testContactsBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
-    const { linkedin, ...rest } = body.data;
-    const parsed = parseTestContacts(linkedin === undefined ? rest : { ...rest, linkedin });
+    // A social field the page did not send is left out, so it is not compared or changed.
+    const { email, mobile } = body.data;
+    const parsed = parseTestContacts({ email, mobile, ...Object.fromEntries(SOCIAL_CHANNEL_LIST.flatMap((c) => (body.data[c] === undefined ? [] : [[c, body.data[c]]]))) });
     if (!parsed.ok) return c.json<TestContactsRefusal>({ error: { code: "invalid_test_contact", message: parsed.message, field: parsed.field } }, 400);
     const saved = await store.engine.saveTestContacts(c.req.param("id"), parsed.contacts);
     if (!saved.ok) return "missing" in saved ? notFound(c, "campaign") : c.json<TestContactsRefusal>({ error: { code: "test_contact_is_a_lead", message: saved.message, field: saved.field } }, 409);
@@ -892,6 +905,23 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
       linkedinProvider === "none"
         ? { provider: "none", message: "No LinkedIn session is connected, so LinkedIn tracks cannot launch." }
         : { provider: "test-simulator", message: "Simulated LinkedIn (not a session): tests only." },
+    ),
+  );
+
+  // No Instagram session is connected in the running app (ADR 0004 13.1): nothing presents it as a working integration.
+  app.get("/social-providers", (c) =>
+    c.json<SocialProvidersStatus>(
+      Object.fromEntries(
+        MESSAGE_REQUEST_CHANNELS.map((ch) => {
+          const name = SOCIAL_CHANNELS[ch].name;
+          return [
+            ch,
+            (socialProviders[ch] ?? "none") === "none"
+              ? { provider: "none", message: `No ${name} session is connected, so ${name} tracks cannot launch.` }
+              : { provider: "test-simulator", message: `Simulated ${name} (not a session): tests only.` },
+          ];
+        }),
+      ) as SocialProvidersStatus,
     ),
   );
 

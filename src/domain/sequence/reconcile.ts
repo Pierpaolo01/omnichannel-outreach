@@ -5,7 +5,7 @@
  * effect.
  */
 import { skipDeadlineOf, skipLimitOf } from "./calls.ts";
-import type { CampaignDefinition, StepDefinition, TrackDefinition } from "./definition.ts";
+import { POOL_FIELD, poolOf, type CampaignDefinition, type StepDefinition, type TrackDefinition } from "./definition.ts";
 import { alignPending, inFlight, liveTracksFor, progressOf, remainingSteps, withdrawClaims, awaitingAcceptance } from "./progress.ts";
 import type { SubjectState } from "./state.ts";
 
@@ -137,7 +137,11 @@ export function changesBetween(previous: CampaignDefinition, next: CampaignDefin
   if (previous.timezone !== next.timezone) add("timezone");
   // The pools follow the connected senders: a change rides along with Apply, so it is listed (council on 93bed86, item 12).
   const same = (a: readonly string[] | undefined, b: readonly string[] | undefined) => [...(a ?? [])].sort().join("\n") === [...(b ?? [])].sort().join("\n");
-  if (!same(previous.emailPool, next.emailPool) || !same(previous.smsPool, next.smsPool) || !same(previous.linkedinPool, next.linkedinPool)) add("sender_pool");
+  // The campaign's pools by channel, and each message-request track's chosen senders by its id (ADR 0004 13.5).
+  const campaignPools = (d: CampaignDefinition) => (Object.keys(POOL_FIELD) as (keyof typeof POOL_FIELD)[]).map((c) => poolOf(d, c));
+  const poolsBefore = campaignPools(previous);
+  const sendersBefore = new Map(previous.tracks.map((t) => [t.id, t.senders] as const));
+  if (campaignPools(next).some((pool, i) => !same(poolsBefore[i], pool)) || next.tracks.some((t) => sendersBefore.has(t.id) && !same(sendersBefore.get(t.id), t.senders))) add("sender_pool");
   return out;
 }
 

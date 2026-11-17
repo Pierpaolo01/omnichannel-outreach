@@ -5,11 +5,12 @@
  * ticket 27) fails typecheck until it has its words. Days are said in the user's zone, as the read gives them. History is
  * said in the past tense; a present state only as the read says it at its instant. Provisional wording, for the principal.
  */
-import type { LinkedinReplyMark, LinkedinTrackView, NeedsAttention, OutreachStatus, TrackProgressView } from "../../shared/api.ts";
+import type { ReplyMark, LinkedinTrackView, NeedsAttention, OutreachStatus, TrackProgressView } from "../../shared/api.ts";
 import { statusGroup } from "../../domain/outreach-status.ts";
 import type { AttentionItem } from "../calls/wording.ts";
 import { dateIn } from "../calls/wording.ts";
 import { conversationTaken } from "./sms-wording.ts";
+import { markRepliedWords } from "./reply-mark-wording.ts";
 
 /** How the invite's note went, from the choice stored with the work at the handover (ADR 0004 section 4). */
 export function noteLine(note: NonNullable<LinkedinTrackView["note"]>): string {
@@ -154,19 +155,14 @@ export function withdrawalStuckItems(stuck: NonNullable<NeedsAttention["inviteWi
 }
 
 /** The reply mark's confirmation and answer (ADR 0004 section 7): a mark of the user's, never a detected reply. */
-export const MARK_REPLIED = {
-  label: "Mark replied on LinkedIn",
-  pending: "Marking replied on LinkedIn",
-  preview: "Mark them replied on LinkedIn? Their outreach in this campaign stops, as any reply stops it, and nothing more goes to them here. Carry on the conversation on LinkedIn.",
-  done: "Marked replied on LinkedIn. Carry on the conversation on LinkedIn.",
-} as const;
+export const MARK_REPLIED = markRepliedWords("linkedin");
 
 /**
  * What a test run's LinkedIn reply mark is for, said from the work that allows it (review bot on c20c8f0): the read's own
  * `linkedinReply.work`, the work the engine's rule found, by its kind and whether it is recorded sent. Four sentences, one
  * per case, through an exhaustive mapping; nothing is inferred from which other fields are empty.
  */
-export function testReplyHelper(work: Extract<LinkedinReplyMark, { allowed: true }>["work"]): string {
+export function testReplyHelper(work: Extract<ReplyMark, { allowed: true }>["work"]): string {
   const after = "mark it once you have written back on LinkedIn from your test profile.";
   switch (`${work.kind}:${work.state}` as const) {
     case "message:sent":

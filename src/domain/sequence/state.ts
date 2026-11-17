@@ -6,11 +6,12 @@
 import type { OutreachStatus } from "../outreach-status.ts";
 import type { Freeze, LeadClock } from "./clock.ts";
 import type { MergeData } from "./copy.ts";
-import type { Branch, CampaignDefinition, DeclinedPath, Threading } from "./definition.ts";
+import type { Branch, CampaignDefinition, ConversationChannel, DeclinedPath, Threading } from "./definition.ts";
+import type { MessageRequestChannel, SocialChannel, SocialSenderKind } from "../social-channels.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
 
-/** The channels a reply can be on: detected for email and SMS, marked by the user for LinkedIn (ADR 0004 section 7). */
-export type ReplyChannelName = "email" | "sms" | "linkedin";
+/** The channels a reply can be on: detected for email and SMS, marked by the user on a social channel (ADR 0004 7, 13.8). */
+export type ReplyChannelName = "email" | "sms" | SocialChannel;
 
 export type EndReason = Extract<
   OutreachStatus,
@@ -57,6 +58,11 @@ export interface SubjectRecord {
   readonly smsSender: string | null;
   /** The subject's LinkedIn sender session, fixed at its first LinkedIn handover (ADR 0004 6), never reassigned. Absent: none. */
   readonly linkedinSender?: string | null;
+  /**
+   * The sender session of each of the subject's message-request tracks, by track id, fixed at that track's first handover
+   * (ADR 0004 13.5; the review bot on 0922582), never reassigned and never read by another track. Absent: none yet.
+   */
+  readonly socialSenders?: Readonly<Record<string, string>>;
   /**
    * The reply that stopped the lead: its channel and its time as the provider reported it. Stored in
    * the transaction that ends the lead as replied, and never recomputed from later replies, whatever
@@ -148,7 +154,11 @@ export interface StepResult {
 
 export type AttemptState = "claimed" | "handed" | "accepted" | "sent" | "rejected" | "withdrawn";
 export type EndedBy = "guard" | "claim_expired" | "quiesce" | "provider" | "lookup_not_sent" | "user" | "call" | "observed" | "lookup";
-export type RejectReason = "blocklisted" | "invalid_destination" | "payment_required" | "rate_limited" | "provider_skipped" | "not_connected";
+/**
+ * `not_connected`: a LinkedIn message to someone no longer a connection (ADR 0004 Q37). `not_allowed`: a message-request
+ * channel's platform does not let this session message this account (ADR 0004 13.3, Q44). Neither marks the address bad.
+ */
+export type RejectReason = "blocklisted" | "invalid_destination" | "payment_required" | "rate_limited" | "provider_skipped" | "not_connected" | "not_allowed";
 export type LookupAnswer = "sent" | "queued" | "not-sent" | "unknown";
 
 export interface RenderedCopy {
@@ -261,6 +271,8 @@ export interface SmsBinding {
   readonly ownerCampaignId: string | null;
   /** That campaign's name as stored now; null for a binding this change takes. */
   readonly ownerCampaignName: string | null;
+  /** The owning lead's name as stored now (verifier on f2824d4, item 9); null for a test run or a binding this change takes. */
+  readonly ownerLeadName?: string | null;
   /** Whether the owner is a test run (ticket 21), whose binding is released when it ends. */
   readonly ownerIsTest: boolean;
   /** Whether the owner has ended. An ended owner keeps its binding all the same (ruling 8). */
@@ -280,7 +292,7 @@ export interface SmsBinding {
    * The conversation's channel: its sender account's stored channel (`sender_accounts.channel`), never inferred from the
    * destination (review bot on b21af02). Every lookup, ownership check and release reads only its own channel's pairs.
    */
-  readonly channel: "sms" | "linkedin";
+  readonly channel: ConversationChannel;
 }
 
 /**
@@ -294,6 +306,8 @@ export interface ConversationCause {
   readonly ownerCampaignId: string | null;
   readonly ownerCampaignName: string | null;
   readonly ownerIsTest: boolean;
+  /** The owning lead's name when the cause was stored (item 9); absent on causes stored before it was kept. */
+  readonly ownerLeadName?: string | null;
 }
 
 /**
@@ -435,8 +449,13 @@ export interface CallDay {
 /** A live contact detail of the lead, as engine decisions read it. */
 export interface LeadDetail {
   readonly id: string;
-  /** `linkedin`: the decision maker's profile from the import (ADR 0004 section 5), keyed by `linkedinProfileKey`. */
-  readonly channel: "email" | "phone" | "linkedin";
+  /**
+   * `linkedin`: the decision maker's profile from the import (ADR 0004 section 5), keyed by `linkedinProfileKey`. A
+   * message-request channel: the decision maker's own account or the company's (ADR 0004 13.4), keyed by its normaliser.
+   */
+  readonly channel: "email" | "phone" | SocialChannel;
+  /** On a message-request channel, whose account it is: the decision maker's own or the company's (ADR 0004 13.4). */
+  readonly belongsTo?: "person" | "company";
   /** The lead may send to it: its own email, or a company lead's shared inbox. */
   readonly ownEmail: boolean;
   /**
@@ -452,8 +471,16 @@ export interface LeadDetail {
   readonly order: number;
 }
 
-/** Why a LinkedIn track was skipped as a missing channel, as recorded when it finished (ticket 24b). */
+/**
+ * Why a social track was skipped as a missing channel, as recorded when it finished (ticket 24b; ADR 0004 13.4). The names are
+ * LinkedIn's and mean the same on every social channel: no address, an address that is not a profile or account, a company
+ * lead (LinkedIn only), replaced or removed by a re-import, marked bad.
+ */
 export type LinkedinSkipCause = "no_profile" | "not_a_member_profile" | "company_lead" | "replaced" | "removed_by_import" | "marked_bad";
+export type SocialSkipCause = LinkedinSkipCause;
+
+/** What the import holds in one address cell of a social channel: an address the normaliser reads, one it does not, or none. */
+export type ImportedAddress = "account" | "not_account" | "none";
 
 export interface LeadFacts {
   /** The prospect's zone: the person's, else the company's, else the campaign default (3.4). */
@@ -463,6 +490,11 @@ export interface LeadFacts {
    * profile, an address that is not one (a company page, a search), or none. Absent for a company lead or a test run.
    */
   readonly importedProfile?: "member" | "not_member" | "none";
+  /**
+   * What the import holds for each message-request channel (ADR 0004 13.4): the decision maker's own cell (null for a company
+   * lead) and the company's. Absent for a test run.
+   */
+  readonly importedAccounts?: Readonly<Partial<Record<MessageRequestChannel, { readonly person: ImportedAddress | null; readonly company: ImportedAddress }>>>;
   readonly details: readonly LeadDetail[];
   /**
    * Every detail id an attempt or track names, resolved to the live detail it stands for now.
@@ -482,7 +514,9 @@ export interface Allowance {
 
 export interface AccountState {
   readonly id: string;
-  readonly channel: "email" | "sms" | "linkedin";
+  readonly channel: "email" | "sms" | SocialChannel;
+  /** What a social session reports of itself (ADR 0004 13.5): personal or business. Absent on email, SMS and LinkedIn. */
+  readonly socialKind?: SocialSenderKind;
   /**
    * A social account's allowances per kind of action, today (ADR 0004 6): sent on the reset day plus reservations, from
    * `provider_work.kind`. Absent on email and SMS, whose `capacity` is the one bucket.

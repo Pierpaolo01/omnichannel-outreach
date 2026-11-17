@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { launchCheck } from "../../domain/sequence/blockers.ts";
 import type { CampaignDefinition, TrackDefinition } from "../../shared/api.ts";
-import { describeBlocker } from "./blocker-wording.ts";
+import { blockedOnlyBy, describeBlocker, nothingBlocks } from "./blocker-wording.ts";
 
 /** Every launch blocker names its track and channel from the fact the server sends (ticket 13b, verifier B2). */
 const week = [{ day: 1, start: 9, end: 17 }];
@@ -89,5 +89,18 @@ describe("a LinkedIn track's blockers (ticket 24b)", () => {
     expect(w!.title).toBe("The LinkedIn track has no connected LinkedIn session");
     expect(w!.detail).toBe("No LinkedIn session is connected, so LinkedIn tracks cannot launch. Remove the track to launch without it.");
     expect(w!.detail).not.toMatch(/connect (one|a session)|until a session/i);
+  });
+});
+
+describe("what blocks launch, from the blockers the domain has (the council on 5a30b9f, item 3)", () => {
+  const instagram: TrackDefinition = { id: "ig", channel: "instagram", branch: "main", window: week, start: { kind: "entry" }, removed: false, senders: ["instagram:s1"], steps: [{ id: "ig-1", waitDays: 0, subject: "", body: "Hello.", threading: "new_subject", removed: false }] };
+  test("with no track: every blocker, a message-request track with no session chosen included", () => {
+    expect(blockedOnlyBy()).toBe("With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, no connected sender, or an Instagram track with no sender session chosen.");
+  });
+  test("with tracks and nothing blocking: what holds, the chosen sessions only where a message-request track is", () => {
+    expect(nothingBlocks(def([track("t1", "email", "Hi", "Hello")]))).toBe("Every message has copy, every merge field has a fallback where a lead lacks it, and every email and SMS track has a sender.");
+    expect(nothingBlocks(def([track("t1", "email", "Hi", "Hello"), instagram]))).toBe(
+      "Every message has copy, every merge field has a fallback where a lead lacks it, every email, SMS and Instagram track has a sender, and every Instagram track has a sender session chosen.",
+    );
   });
 });

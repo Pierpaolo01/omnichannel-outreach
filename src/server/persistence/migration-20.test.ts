@@ -161,7 +161,8 @@ function expectKept(r: Awaited<ReturnType<typeof upgrade>>): void {
   expect(r.work).toBe(r.kept.work);
   expect(r.attempts).toEqual(r.kept.attempts);
   // Every column of the account is kept; the sync after the upgrade set today's room to 0 and stored the daily limit.
-  expect(r.accounts).toEqual(r.kept.accounts.map((a) => ({ ...a, capacity: 0, daily_limit: 50 })));
+  // Migration 25 adds a social session's kind (ticket 25), none for an inbox.
+  expect(r.accounts).toEqual(r.kept.accounts.map((a) => ({ ...a, capacity: 0, daily_limit: 50, social_kind: null })));
 }
 
 /** The triggers migrations after 20 add, read from their own SQL (23: a fixed channel, the conversations' version). */

@@ -542,6 +542,7 @@ class SqliteStore implements OutreachStore {
               : { kind: "company", companyId: str(row, "company_id") },
         })),
       badProfileKeys: this.db.prepare("SELECT key FROM linkedin_profile_marks").all().map((r) => str(r, "key")),
+      badAccountKeys: this.badAccountKeys(),
       otherEnrollments: this.db
         .prepare("SELECT lead_kind, person_id, company_id, campaign_id FROM enrollments WHERE campaign_id <> ?")
         .all(campaignId)
@@ -850,13 +851,25 @@ class SqliteStore implements OutreachStore {
     if (this.enrollments({ kind: "person", personId }).length > 0) return null;
     const url = strOrNull(this.db.prepare("SELECT linkedin_url FROM people WHERE id = ?").get(personId) ?? {}, "linkedin_url") ?? "";
     const bad = new Set(this.db.prepare("SELECT key FROM linkedin_profile_marks").all().map((r) => str(r, "key")));
-    const reach = decisionMakerReach(this.details("person", personId), this.details("company", companyId), { url, bad });
+    const accounts = { person: this.sourceRow("people", personId), company: this.sourceRow("companies", companyId), bad: new Set(this.badAccountKeys()) };
+    const reach = decisionMakerReach(this.details("person", personId), this.details("company", companyId), { url, bad }, accounts);
     return hasUsableChannel(reach) ? null : "no_usable_channel";
   }
 
   private companyUnenrolledReason(companyId: string): UnenrolledReason {
     if (this.enrollments({ kind: "company", companyId }).length > 0) return null;
-    return hasUsableChannel(companyLeadReach(this.details("company", companyId))) ? null : "no_usable_channel";
+    return hasUsableChannel(companyLeadReach(this.details("company", companyId), { company: this.sourceRow("companies", companyId), bad: new Set(this.badAccountKeys()) })) ? null : "no_usable_channel";
+  }
+
+  /** A person's or company's latest source row, where the import keeps the account cells (ADR 0004 13.4). */
+  private sourceRow(table: "people" | "companies", id: string): Readonly<Record<string, string>> {
+    const raw = strOrNull(this.db.prepare(`SELECT source_row FROM ${table} WHERE id = ?`).get(id) ?? {}, "source_row");
+    return raw === null ? {} : (JSON.parse(raw) as Record<string, string>);
+  }
+
+  /** Every message-request account key marked unreachable (ADR 0004 13.4): never cleared. */
+  private badAccountKeys(): string[] {
+    return this.db.prepare("SELECT key FROM social_destination_marks").all().map((r) => str(r, "key"));
   }
 
   private run(sql: string, values: readonly SQLInputValue[]): void {

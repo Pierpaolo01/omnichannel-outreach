@@ -69,6 +69,14 @@ const paths = {
       <path d="M6.2 14.2c.7-1.9 2.1-2.9 3.8-2.9s3.1 1 3.8 2.9" />
     </>
   ),
+  // A message request (ADR 0004 13.1): a round message with a person's line in it, not a platform's mark.
+  instagram: (
+    <>
+      <path d="M10 3.2a6.8 6.8 0 1 1-3.4 12.7L3.4 16.8l.9-3.1A6.8 6.8 0 0 1 10 3.2z" />
+      <circle cx="10" cy="8.6" r="1.7" />
+      <path d="M7.2 13c.6-1.3 1.6-2 2.8-2s2.2.7 2.8 2" />
+    </>
+  ),
   sms: <path d="M4.5 4.5h11a1.5 1.5 0 0 1 1.5 1.5v6.5a1.5 1.5 0 0 1-1.5 1.5H9l-3.5 2.6V14h-1A1.5 1.5 0 0 1 3 12.5V6a1.5 1.5 0 0 1 1.5-1.5z" />,
   clock: (
     <>

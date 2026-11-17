@@ -6,7 +6,8 @@
  */
 import { ENGINE_PARAMS, isLive, isUncertain } from "./attempt.ts";
 import { leadNow, localDayNumber, windowOpen } from "./clock.ts";
-import { holdsConversations, linkedinStepKind, poolOf, socialActionOf, type SocialAction } from "./definition.ts";
+import { holdsConversations, socialActionOf, socialStepKind, type SendChannel, type SocialAction } from "./definition.ts";
+import { isSocialChannel } from "../social-channels.ts";
 import {
   rules as gateRules,
   invitePendingUntil,
@@ -30,7 +31,9 @@ import {
   stepDef,
   threadOf,
   trackHold,
+  trackPoolOf,
   windowOf,
+  withSocialSender,
   type HoldReason,
 } from "./progress.ts";
 import { callPlacedFrom, callRoom, isListed, listedForDay, userDay } from "./calls.ts";
@@ -142,7 +145,7 @@ export type StepWhen =
   | { readonly kind: "call_day"; readonly at: number; readonly day: number }
   | { readonly kind: "listed_for"; readonly day: number }
   /** `channel` names the step's channel where the reason depends on it (no transport). */
-  | { readonly kind: "waits"; readonly why: StepWait; readonly channel?: "email" | "sms" | "linkedin"; readonly until?: number };
+  | { readonly kind: "waits"; readonly why: StepWait; readonly channel?: SendChannel; readonly until?: number };
 
 /**
  * A held track's reason as the read gives it (5.4), one case per hold `heldReason` can return, so a hold a later change
@@ -170,7 +173,7 @@ export function holdWait(hold: HoldReason): StepWait {
  * is interrupted (`waitingOn`, as the gate asks). Both default to what a subject alone shows: available, not held.
  */
 export interface StepEnv {
-  readonly transportAvailable?: (channel: "email" | "sms" | "linkedin", threading: "new_subject" | "continue_thread") => boolean;
+  readonly transportAvailable?: (channel: SendChannel, threading: "new_subject" | "continue_thread") => boolean;
   readonly waitingOnProvider?: (state: SubjectState, trackId: string) => boolean;
   /**
    * Whether the user's list has room for one more call on a later user day, from the calls the engine knows are carried into
@@ -210,7 +213,7 @@ export function stepWhen(state: SubjectState, trackId: string, now: number, env:
   const stepId = p.nextStepId;
   const channel = channelOf(state, trackId);
   if (channel === "call") return callWhen(state, trackId, stepId, now, env);
-  if (channel !== "email" && channel !== "sms" && channel !== "linkedin") return null;
+  if (channel === undefined) return null;
   // 1. A held track first (5.4): work the provider has not confirmed holds the track with a live attempt too.
   const hold = trackHold(state, trackId);
   if (hold) return waits(holdWait(hold));
@@ -299,7 +302,7 @@ function actionOfPending(state: SubjectState, trackId: string): SocialAction | n
 /** The social action a step's handover asks for: the allowance it counts on (ADR 0004 2.1, 6). Null for email and SMS. */
 export function actionOfStep(state: SubjectState, trackId: string, stepId: string): SocialAction | null {
   const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
-  return track ? socialActionOf(linkedinStepKind(track, stepId)) : null;
+  return track ? socialActionOf(socialStepKind(track, stepId)) : null;
 }
 
 /**
@@ -319,8 +322,7 @@ export function forAction(account: AccountState, action: SocialAction | null): A
 function destinationOf(state: SubjectState, trackId: string): string {
   const p = progressOf(state, trackId);
   const d = state.lead.details.find((x) => x.id === state.lead.resolved[p?.destinationDetailId ?? ""]?.liveId);
-  const channel = channelOf(state, trackId);
-  return (channel === "sms" || channel === "linkedin" ? d?.key : d?.value) ?? "";
+  return (channelOf(state, trackId) === "email" ? d?.value : d?.key) ?? "";
 }
 
 /** A claim's step guard on the lead alone: a destination that is not a good address, copy that does not render, no thread. */
@@ -334,11 +336,11 @@ function leadWait(state: SubjectState, trackId: string, stepId: string): { kind:
 }
 
 /**
- * A LinkedIn step that every session it may use allows none of, of its kind of action (ADR 0004 4, item 6): the user's
+ * A social step that every session it may use allows none of, of its kind of action (ADR 0004 4, item 6; 13.7): the user's
  * allowance is zero or never set, so no reset brings room. The one test `stepWhen` and the reads share (ticket 24b, item 15).
  */
 export function noAllowanceOnAnySession(state: SubjectState, trackId: string, now: number): boolean {
-  if (channelOf(state, trackId) !== "linkedin") return false;
+  if (!isSocialChannel(channelOf(state, trackId))) return false;
   const sessions = candidatesOf(state, trackId, now);
   return sessions.length > 0 && sessions.every((a) => a.dailyLimit <= 0);
 }
@@ -346,11 +348,11 @@ export function noAllowanceOnAnySession(state: SubjectState, trackId: string, no
 /** What the engine knows at the read rules out every sender for the step: none connected, or every daily limit zero. */
 function noSenderKnown(state: SubjectState, trackId: string, now: number): { kind: "waits"; why: StepWait } | null {
   const channel = channelOf(state, trackId) ?? "email";
-  // A LinkedIn step: every session it may use allows none of its kind of action, the user's setting (ADR 0004 4, item 6).
-  if (channel === "linkedin") return noAllowanceOnAnySession(state, trackId, now) ? { kind: "waits", why: "sending_capacity" } : null;
+  // A social step: every session it may use allows none of its kind of action, the user's setting (ADR 0004 4, item 6; 13.7).
+  if (isSocialChannel(channel)) return noAllowanceOnAnySession(state, trackId, now) ? { kind: "waits", why: "sending_capacity" } : null;
   if (channel !== "email" && channel !== "sms") return null;
-  const fixed = senderOf(state, channel);
-  const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];
+  const fixed = senderOf(state, channel, trackId);
+  const ids = fixed !== null ? [fixed] : [...trackPoolOf(state, trackId)];
   const connected = ids.map((id) => state.accounts[id]).filter((a): a is AccountState => a !== undefined && a.channel === channel && a.problem !== "not_listed");
   if (connected.length === 0) return { kind: "waits", why: "sender_unavailable" };
   if (connected.every((a) => a.dailyLimit <= 0)) return { kind: "waits", why: "sending_capacity" };
@@ -484,7 +486,6 @@ export function claim(
   if (!p?.destinationDetailId) throw new Error("claim without a destination");
   const destination = state.lead.details.find((d) => d.id === state.lead.resolved[p.destinationDetailId ?? ""]?.liveId);
   const channel = channelOf(state, item.trackId);
-  const sms = channel === "sms";
   const action = actionOfStep(state, item.trackId, item.stepId);
   // Uncertain work on this account is carried on, with its key and reservation; otherwise new work.
   const found = inheritedWork(state, item.stepId);
@@ -496,8 +497,8 @@ export function claim(
     stepId: item.stepId,
     accountId: account.id,
     destinationDetailId: p.destinationDetailId,
-    // A text goes to the mobile's E.164 form, a LinkedIn step to the profile's key; an email to the address as written.
-    destination: (sms || channel === "linkedin" ? destination?.key : destination?.value) ?? "",
+    // A text goes to the mobile's E.164 form, a social step to the profile's or account's key; an email to the address as written.
+    destination: (channel === "email" ? destination?.value : destination?.key) ?? "",
     state: "claimed",
     copy: null,
     threading: stepDef(state, item.trackId, item.stepId)?.threading ?? "new_subject",
@@ -596,8 +597,8 @@ export function handoverFailures(state: SubjectState, attempt: Attempt, account:
   // 15. The attempt's reservation exists: its provider work is unsettled.
   if (state.work.find((w) => w.key === attempt.idempotencyKey)?.settled !== null) failed.push(15);
   const channel = channelOf(state, attempt.trackId) ?? "email";
-  const fixed = senderOf(state, channel);
-  if (account.channel !== channel || (fixed !== null ? fixed !== account.id : !poolOf(state.campaign.definition, channel).includes(account.id))) failed.push(10);
+  const fixed = senderOf(state, channel, attempt.trackId);
+  if (account.channel !== channel || (fixed !== null ? fixed !== account.id : !trackPoolOf(state, attempt.trackId).includes(account.id))) failed.push(10);
   // 11. For SMS, the pair is unbound, or bound to this subject.
   // 11. For a channel of conversations (SMS, LinkedIn), the pair is unbound, or bound to this subject.
   if (holdsConversations(channel) && !pairFree(state, account.id, attempt.destination, channel)) failed.push(11);
@@ -639,17 +640,16 @@ export function handOver(state: SubjectState, attempt: Attempt, account: Account
   const channel = channelOf(state, attempt.trackId);
   const sms = channel === "sms";
   const binds = holdsConversations(channel) && !state.smsBindings.some((b) => b.sender === account.id && b.recipient === attempt.destination);
-  const subject =
-    channel === "linkedin"
-      ? { ...state.subject, linkedinSender: state.subject.linkedinSender ?? account.id }
-      : sms
-        ? { ...state.subject, smsSender: state.subject.smsSender ?? account.id }
-        : { ...state.subject, emailSender: state.subject.emailSender ?? account.id };
+  const subject = isSocialChannel(channel)
+    ? withSocialSender(state, channel, attempt.trackId, account.id).subject
+    : sms
+      ? { ...state.subject, smsSender: state.subject.smsSender ?? account.id }
+      : { ...state.subject, emailSender: state.subject.emailSender ?? account.id };
   const notes = note === "with" && base.notes ? { notes: { ...base.notes, used: base.notes.used + 1 } } : {};
   return {
     ...state,
     subject,
-    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerCampaignName: null, ownerIsTest: state.subject.kind === "test_run", ownerEnded: false, ownerSent: false, ownerAnswered: false, channel: channel === "linkedin" ? "linkedin" : "sms" }] : state.smsBindings,
+    smsBindings: binds ? [...state.smsBindings, { sender: account.id, recipient: attempt.destination, owner: state.subject.id, ownerCampaignId: state.campaign.id, ownerCampaignName: null, ownerIsTest: state.subject.kind === "test_run", ownerEnded: false, ownerSent: false, ownerAnswered: false, channel }] : state.smsBindings,
     attempts: state.attempts.map((a) => (a.id === attempt.id ? handed : a)),
     work: state.work.map((w) => (w.key === attempt.idempotencyKey ? { ...w, calls: w.calls + 1, firstHandedWall: w.firstHandedWall ?? now, unresolvedSince: null, ...(note !== null ? { note } : {}) } : w)),
     accounts: { ...state.accounts, [account.id]: { ...base, nextSlotAt: now + base.gapMs, ...notes } },
