@@ -416,6 +416,16 @@ The four are in the fixed seeds (5, 8, 18, 29, 46, 69, 73, 93), each passing for
 - **Two holes the first runs found and the record now models:** the acceptance deadline was neither a wake of the worker nor a horizon of its evaluation cache, so an expiry waited for an unrelated tick (`settledEvaluation` and `nextWakeAt` now include it); and the record's held-time arithmetic had to walk the holds forward (`afterHolds`) rather than iterate.
 - **Not built in part a:** the canvas, the record's screens and the measures panel (part b); a test run's tab line for awaiting acceptance (the read gives the reason; part b words it).
 
+## As built (part b, 17 November 2026)
+
+The screens for what part a built, on the simulated provider; no engine behaviour changed.
+
+- **Reads added** (none changes a rule): `EnrollmentRead.linkedinReply` and `TestRunRead.linkedinReply`, the mark's own transition (`rules.markReplied`) on a copy of the subject as of the read (`linkedinReplyView`), so the read's refusal is the action's; `TestRunRead.status`, which the run's mark sends as its expectation; `TestRunTab.contacts.linkedin`, `linkedinIsALead` and `TestRunRead.linkedin`; `TestStepRow.until` with `awaiting_acceptance`; `BeforeLaunchView.coverage.linkedin` and `PreviewLead.linkedin` (`goodProfile`); `WithheldTrack.why` `not_modelled`.
+- **Part a gaps found and fixed**, each with a test that failed first (`src/server/linkedin-screens.test.ts`, `src/web/campaign/linkedin-wording.test.ts`, `src/shared/track-label.test.ts`): Activity left LinkedIn tracks out entirely (and its missing-channel reason would have read "No mobile of their own"); Copy for a lead served LinkedIn steps as emails; `toTestRun` dropped the test profile, so the tab read it as none; a LinkedIn step waiting for capacity read "their due  waits" on Today; "LinkedIn track" was lower-cased to "linkedIn track" mid-sentence; a test run's marked reply was counted as a lead in the measures line.
+- **Not fixed, reported:** the daily-load projection does not model LinkedIn. Its per-lead account key reads the email and SMS pools only, and it does not run the connection check, so it never hands an invite over and would report that leads never start. Until it does, a live LinkedIn track withholds the figure (`not_modelled`), said as such.
+- **Step names** by role from the step's number (`LINKEDIN_STEP_KIND_AT`, `stepTitle` in `src/shared/track-label.ts`), held equal to `linkedinStepKind` at every position by a test.
+- **The LinkedIn pool follows the connected sessions** in the editor's one pool sync, as the email and SMS pools do, written only once a session is connected or the definition holds a pool already.
+
 ## Consequences
 
 - **ADR 0003.** `TrackChannel` and the account channel gain `linkedin`; `FinishReason` gains `invite_not_accepted`; `StepWait` gains `awaiting_acceptance`; a reply's channel gains `linkedin` (a mark only). Its section 11's "Social tracks" line is replaced by this ADR. Its question numbers continue here.
