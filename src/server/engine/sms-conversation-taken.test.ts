@@ -90,7 +90,7 @@ describe("a mobile whose conversation is taken on every number skips the SMS tra
 
     expect(texts(PAT_MOBILE).map((d) => d.subjectId)).toEqual([a("Pat Oneil")]);
     const skipped = await h.progress(b("Pat Oneil"));
-    expect(skipped.tracks[0]).toMatchObject({ trackId: "t1", finishReason: "skipped_conversation_taken", finishedAt: new Date(MONDAY_9 + 2 * H).toISOString(), hold: null, conversationOwners: [{ name: "Spring clinics", test: false }] });
+    expect(skipped.tracks[0]).toMatchObject({ trackId: "t1", finishReason: "skipped_conversation_taken", finishedAt: new Date(MONDAY_9 + 2 * H).toISOString(), hold: null, conversationOwners: [{ name: "Spring clinics", test: false, lead: null }] });
     const held = await attention();
     expect(held.heldTracks).toEqual([]);
 
@@ -100,7 +100,7 @@ describe("a mobile whose conversation is taken on every number skips the SMS tra
     expect((await h.progress(b("Pat Oneil"))).status).toBe("sequence_finished_no_response");
 
     const entries = (await activity("Pat Oneil")).filter((e) => e.campaign.name === "Autumn clinics");
-    expect(entries).toContainEqual(expect.objectContaining({ kind: "skipped", channel: "sms", stepNumber: null, reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false }] }));
+    expect(entries).toContainEqual(expect.objectContaining({ kind: "skipped", channel: "sms", stepNumber: null, reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false, lead: null }] }));
     expect(entries).toContainEqual(expect.objectContaining({ kind: "released", channel: "email", because: "skipped" }));
 
     // A late answer on the conversation reaches its owner only, after both have ended.
@@ -201,7 +201,7 @@ describe("a mobile whose conversation is taken on every number skips the SMS tra
     expect(ended).toMatchObject({ status: "finished_no_usable_channel", endedAt: new Date(MONDAY_9 + H).toISOString() });
     const entry = (await attention()).noUsableChannel.find((x) => x.enrollmentId === b("Pat Oneil"));
     expect(entry?.channels).toEqual([
-      { channel: "sms", why: "conversation_taken", owners: [{ name: "Spring clinics", test: false }] },
+      { channel: "sms", why: "conversation_taken", owners: [{ name: "Spring clinics", test: false, lead: null }] },
       { channel: "email", why: "missing", owners: [] },
     ]);
     const entries = (await activity("Pat Oneil")).filter((e) => e.campaign.name === "Autumn clinics").map((e) => e.kind);

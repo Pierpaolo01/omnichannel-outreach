@@ -343,8 +343,8 @@ describe("a test mobile in another subject's SMS conversation (ADR 0003, questio
 
     const steps = (await tab()).run?.steps ?? [];
     expect(steps.filter((s) => s.channel === "sms").map((s) => [s.stepId, s.state, s.reason, s.owners])).toEqual([
-      ["m1", "skipped", "sms_conversation_taken", [{ name: "Clinics, London", test: true }]],
-      ["m2", "skipped", "sms_conversation_taken", [{ name: "Clinics, London", test: true }]],
+      ["m1", "skipped", "sms_conversation_taken", [{ name: "Clinics, London", test: true, lead: null }]],
+      ["m2", "skipped", "sms_conversation_taken", [{ name: "Clinics, London", test: true, lead: null }]],
     ]);
     // Its email after the SMS track still goes; nothing was texted for the second test.
     expect(steps.find((s) => s.stepId === "e1")?.state).toBe("sent");

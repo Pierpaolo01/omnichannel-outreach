@@ -104,8 +104,11 @@ export const CONVERSATION_INPUTS = {
   reply_events: ["event_id", "state", "inbox", "address", "received_wall"],
 } as const;
 export const CONVERSATION_INPUT_TABLES = Object.keys(CONVERSATION_INPUTS) as (keyof typeof CONVERSATION_INPUTS)[];
-/** What the ownership query reads that is no fact of ownership: the owner's campaign's name, and the lead's destinations. */
-export const CONVERSATION_LOOKUP_TABLES = ["campaigns", "live_contact_details", "attempts", "json_each"] as const;
+/**
+ * What the ownership query reads that is no fact of ownership: the owner's campaign's name, the owning lead's name (`people`,
+ * `companies`: said when the owner is a lead of the same campaign, the verifier on f2824d4 item 9), and the lead's destinations.
+ */
+export const CONVERSATION_LOOKUP_TABLES = ["campaigns", "people", "companies", "live_contact_details", "attempts", "json_each"] as const;
 
 export class SqliteEngineStore implements EngineStore {
   private readonly db: DatabaseSync;
