@@ -9,7 +9,7 @@ import { leadNow, wallOfLead } from "./clock.ts";
 import type { TrackDefinition } from "./definition.ts";
 import type { OutreachStatus } from "../outreach-status.ts";
 import { markedReplyId } from "./reply-identity.ts";
-import { advanceTrack, applyReply, channelReaches, deriveStatus, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
+import { advanceTrack, anyInviteOpen, applyReply, channelReaches, deriveStatus, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
 import { isUncertain } from "./attempt.ts";
 import type { SubjectState } from "./state.ts";
 
@@ -232,7 +232,10 @@ const stepKey = (step: { readonly track: TrackDefinition; readonly stepId: strin
  * or with a provider's answer (what may still be sent). The read carries it with each allowed control; the press sends it.
  */
 export function previewDigest(before: SubjectState, action: LeadControl, after: SubjectState): string {
-  return `${action}|${deriveStatus(after)}|${action === "skip" ? stepKey(skipTarget(before)) : "-"}|${stepKey(currentStep(after))}`;
+  const base = `${action}|${deriveStatus(after)}|${action === "skip" ? stepKey(skipTarget(before)) : "-"}|${stepKey(currentStep(after))}`;
+  // A stop or a move to win-back leaves a sent LinkedIn invite open, and its confirmation says so (ticket 24b; ADR 0004 3.4):
+  // the digest carries it, so a confirmation shown with that sentence is refused once the invite is no longer open.
+  return (action === "stop" || action === "move_to_win_back") && anyInviteOpen(after) ? `${base}|invite_open` : base;
 }
 
 /**

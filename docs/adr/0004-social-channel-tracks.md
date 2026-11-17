@@ -426,6 +426,17 @@ The screens for what part a built, on the simulated provider; no engine behaviou
 - **Step names** by role from the step's number (`LINKEDIN_STEP_KIND_AT`, `stepTitle` in `src/shared/track-label.ts`), held equal to `linkedinStepKind` at every position by a test.
 - **The LinkedIn pool follows the connected sessions** in the editor's one pool sync, as the email and SMS pools do, written only once a session is connected or the definition holds a pool already.
 
+### The reviews of `dee365d` (council, review bot and verifier, 17 November 2026)
+
+Fifteen items, each reproduced as a failing test first (`src/server/linkedin-screens-review.test.ts`, `src/web/campaign/linkedin-review.test.ts`, `e2e/linkedin-confirmations.spec.ts`, `e2e/linkedin.spec.ts`):
+
+- **Reads that say done** are tied to the stored fact (items 2, 11, 14): `LinkedinTrackView.invite` (`sent`, `handed`); the note is said as gone only when sent; a handed-over step of any channel reads "handed to the provider; it isn't known yet whether it went"; the expiry is said by the withdrawal's state, on the record and the Test run tab through one function (`expiryLine`); an acceptance recorded after the track ended is said as recorded late, with the time LinkedIn gave as an upper bound ("by").
+- **An open invite** is one domain test (`inviteOpenOn`, `anyInviteOpen` in `progress.ts`): only the acceptance expiry asks for a withdrawal, so every other ending leaves a sent invite open, and the record, the stop and win-back confirmations and a removing edit's preview say so. The stop and win-back preview digest carries it (`previewDigest`), so a confirmation shown with that sentence is refused once the invite is no longer open (items 6, 7).
+- **A LinkedIn session's room** is read per kind wherever it is said (`SessionKinds` on the sequence read and the load's accounts; Needs attention's held work); Needs attention lists LinkedIn steps waiting for capacity by their kind (`forAction`), and one whose kind no session has any allowance for as `noAllowance`, read on the record as `no_allowance` (a view-level reading of the engine's `sending_capacity`, which the generated runs keep asserting) (items 4, 15).
+- **The load figure** is withheld as `not_modelled` for any live LinkedIn track of this campaign, session or none, and for one of a campaign competing for its senders, named; said in `ink-2`, not as an error (items 1, 8, 9).
+- **Confirmations** are snapshots of the read and the subject they opened on: a test run's close when the shown run changes (or a test is starting), and a mark or answer names its run in its route; the record's LinkedIn confirmations close when the read no longer offers them; each says why, and focus returns to the opening control or the closing line, with `useFocusRescue` for anything else (items 3, 10, 12). A test run's stuck withdrawal is answered on its tab (`POST /api/test-runs/:id/invite-withdrawal`).
+- **Words per case**: the first message's changed wait counts from the connection (item 5); each failure reason has its own sentence, a removed connection never "profile not reachable" (item 13).
+
 ## Consequences
 
 - **ADR 0003.** `TrackChannel` and the account channel gain `linkedin`; `FinishReason` gains `invite_not_accepted`; `StepWait` gains `awaiting_acceptance`; a reply's channel gains `linkedin` (a mark only). Its section 11's "Social tracks" line is replaced by this ADR. Its question numbers continue here.

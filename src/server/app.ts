@@ -747,6 +747,20 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     return tab ? c.json<TestRunTab & { readonly replayed: boolean }>({ ...tab, replayed: answer.replayed }) : notFound(c, "campaign");
   });
 
+  // A test run's withdrawal the session keeps answering unknown (council on dee365d, item 3): the same transition and request
+  // binding as a lead's; the answer is the run's tab.
+  app.post("/test-runs/:id/invite-withdrawal", async (c) => {
+    const body = inviteWithdrawalBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const run = await store.engine.testRun(c.req.param("id"));
+    if (!run) return notFound(c, "test run");
+    if (!engine.markInviteWithdrawal) return controlRefused(c, "Marking a withdrawal needs the engine.");
+    const answer = await engine.markInviteWithdrawal(run.id, body.data.trackId, body.data.answer, body.data.requestId);
+    if (!answer.ok) return controlRefused(c, answer.reason);
+    const tab = await testTab(run.campaignId);
+    return tab ? c.json<TestRunTab & { readonly replayed: boolean }>({ ...tab, replayed: answer.replayed }) : notFound(c, "campaign");
+  });
+
   // The user settles an invite withdrawal the session keeps answering unknown (ADR 0004 3.3).
   app.post("/enrollments/:id/invite-withdrawal", async (c) => {
     const body = inviteWithdrawalBody.safeParse(await readJson(c));

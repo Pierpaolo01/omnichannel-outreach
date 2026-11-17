@@ -62,7 +62,7 @@ test("the record's LinkedIn states: waiting for acceptance with the day it ends,
 
   await test.step("Ola, stopped after her invite went: the record says it is still open on LinkedIn", async () => {
     await at(page, f, `/leads/people/${await f.person("Ola Berg")}`);
-    await expect(page.getByText("The connection invite sent from this campaign is still open on LinkedIn: ending their outreach here doesn’t withdraw it. Withdraw it on LinkedIn if you want it gone.")).toBeVisible();
+    await expect(page.getByText("The connection invite sent from this campaign is still open on LinkedIn. Only a wait for acceptance that runs out withdraws an invite, so this one stays until they answer it or you withdraw it on LinkedIn.")).toBeVisible();
   });
 
   await test.step("Pat: connected, and skipped in the second campaign, which names the first; Kim has no member profile and the mark is refused with why", async () => {
@@ -89,6 +89,22 @@ test("a withdrawal LinkedIn never confirmed: Needs attention names it, the recor
   await expect(page.getByText("Marked withdrawn. The invite no longer holds this person for this session.")).toBeVisible();
   await expect(page.getByText(/and the invite was withdrawn\.$/)).toBeVisible();
   await at(page, f, `/leads/people/${await f.person("Ivo Marsh")}`);
-  await expect(page.getByText(/after this track had ended\. You are connected now, and may want to write to them on LinkedIn yourself\.$/)).toBeVisible();
+  await expect(page.getByText(/^Their acceptance of the invite was recorded after this track had ended; LinkedIn shows they had accepted it by /)).toBeVisible();
   await shot(page, "13-accepted-after-the-track-ended");
+});
+
+test("a LinkedIn step a session has no allowance for, set to zero or never set, and one whose allowance is used up today: on the record and on Today", async ({ page }) => {
+  for (const [name, allowances] of [["zero", { invitesPerDay: 0, messagesPerDay: 0, notesPerMonth: 0 }], ["unset", null]] as const) {
+    const f = await fakeLinkedinApp("running", `linkedin-allowance-${name}`, allowances);
+    await at(page, f, `/leads/people/${await f.person("Pat Oneil")}`);
+    await expect(page.getByText(/Next: the connection invite, waiting: no LinkedIn session it may use has an allowance for this kind of step\./).first()).toBeVisible();
+    await at(page, f, "/");
+    await expect(page.getByText("4 leads in Clinics on LinkedIn have LinkedIn steps that can’t go yet")).toBeVisible();
+    await expect(page.getByText(/is full for the day/)).toHaveCount(0);
+    if (name === "zero") await shot(page, "14-today-no-allowance");
+  }
+  const used = await fakeLinkedinApp("launched", "linkedin-allowance-used", { invitesPerDay: 1, messagesPerDay: 20, notesPerMonth: 0 });
+  await at(page, used, "/");
+  await expect(page.getByText(/leads in Clinics on LinkedIn are waiting for sending capacity/)).toBeVisible();
+  await expect(page.getByText(/is full for the day\. The first resets/)).toBeVisible();
 });

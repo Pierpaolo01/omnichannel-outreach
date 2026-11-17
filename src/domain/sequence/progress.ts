@@ -1582,3 +1582,20 @@ export function connectionChecked(state: SubjectState, trackId: string, session:
   };
   return attend(connect(s, trackId, "already_connected", at, atWall), now);
 }
+
+/**
+ * Whether an invite this subject sent on a LinkedIn track is still open on LinkedIn (ADR 0004 3.4; ticket 24b): sent, not
+ * accepted, not connected, not withdrawn and not found accepted. Only the acceptance expiry asks for a withdrawal, so an
+ * invite stays open through a stop, a reply, a move to win-back, an ending with no channel or a removing edit. The one test
+ * the record's read and the controls' preview digest share.
+ */
+export function inviteOpenOn(state: SubjectState, trackId: string): boolean {
+  const p = state.tracks.find((x) => x.trackId === trackId);
+  const invite = state.work.find((w) => w.trackId === trackId && w.kind === "invite" && w.firstHandedWall !== null && w.settled !== "rejected");
+  const sent = invite !== undefined && (invite.settled === "sent" || invite.settled === "user_sent" || invite.sentWall !== null);
+  const withdrawal = p?.inviteWithdrawal ?? null;
+  return sent && p?.acceptedWall == null && (p?.connection ?? null) === null && withdrawal !== "withdrawn" && withdrawal !== "accepted_first";
+}
+
+/** Whether any LinkedIn track of the subject has an invite still open on LinkedIn (`inviteOpenOn`). */
+export const anyInviteOpen = (state: SubjectState): boolean => state.tracks.some((t) => inviteOpenOn(state, t.trackId));

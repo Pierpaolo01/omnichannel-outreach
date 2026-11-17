@@ -6,8 +6,10 @@ import { browserStorage } from "../calls/storage.ts";
 import { ErrorState } from "../components.tsx";
 import { useLiveRead } from "../controls/useLiveRead.ts";
 import { Icon, type IconName } from "../icons.tsx";
+import { useFocusRescue } from "../focusRescue.ts";
 import { answered, isTestRunPressKey, keepPress, pendingPress, type TestRunPress } from "./testRunPress.ts";
-import { ConfirmStrip, ROW_CHANGED } from "../controls/ControlViews.tsx";
+import { ConfirmStrip } from "../controls/ControlViews.tsx";
+import { WITHDRAWAL_ANSWERS } from "./linkedin-wording.ts";
 import { endingDetail, endingTitle, progressText, stepDetail, stepStateText, timeIn } from "./testRunWording.ts";
 import type { SequenceEditor } from "./useSequence.ts";
 
@@ -46,12 +48,31 @@ const DISABLED = "disabled:border-line disabled:bg-transparent disabled:text-mut
 
 const newRequestId = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `r-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
-/** What an answered press did, said where focus goes. */
-const PRESS_DONE: Record<TestRunPress["kind"], string> = {
-  run: "The test started. Its steps are on the right.",
-  stop: "The test is stopped. Nothing more goes to your test contacts.",
-  reply: "Marked replied on LinkedIn. The test stopped, as a lead’s outreach stops at your mark.",
-};
+/**
+ * What an answered press did, said where focus goes, from the press and its answer only (council on dee365d, item 10): a
+ * mark or a withdrawal answer names the run it was confirmed on, and says the test stopped only when that run was running
+ * and is the one the answer shows.
+ */
+export function pressDone(p: Pick<TestRunPress, "kind" | "runId" | "wasRunning">, shown: TestRunTabView["run"]): string {
+  const same = p.runId !== undefined && shown?.id === p.runId;
+  switch (p.kind) {
+    case "run":
+      return "The test started. Its steps are on the right.";
+    case "stop":
+      return "The test is stopped. Nothing more goes to your test contacts.";
+    case "reply":
+      if (!same) return "Marked the earlier test replied on LinkedIn. The test shown now is a newer one.";
+      return p.wasRunning === true ? "Marked replied on LinkedIn. The test stopped, as a lead’s outreach stops at your mark." : "Marked replied on LinkedIn.";
+    case "withdrawn":
+      return same ? WITHDRAWAL_ANSWERS[0].done : "Marked the earlier test’s invite withdrawn. The test shown now is a newer one.";
+    case "kept":
+      return same ? WITHDRAWAL_ANSWERS[1].done : "Marked the earlier test’s invite still there. The test shown now is a newer one.";
+    default: {
+      const unhandled: never = p.kind;
+      throw new Error(`A test press with no answer: ${String(unhandled)}`);
+    }
+  }
+}
 
 interface Presses {
   /** The newest control answer, numbered as it arrived in the page's one order with the reads. */
@@ -64,7 +85,7 @@ interface Presses {
   readonly refusal: string | null;
   /** What the last answered press did, said where focus goes; `n` moves focus there again for the same words. */
   readonly said: { readonly text: string; readonly n: number } | null;
-  readonly press_: (kind: TestRunPress["kind"], path: string, body: Record<string, unknown>) => void;
+  readonly press_: (kind: TestRunPress["kind"], path: string, body: Record<string, unknown>, about?: { readonly runId: string; readonly wasRunning: boolean }) => void;
   readonly retry: () => void;
 }
 
@@ -95,7 +116,7 @@ function usePresses(campaignId: string, refresh: () => Promise<void>, issue: () 
         answered(store, campaignId, p.requestId);
         setLatest((prev) => (prev === null || issued > prev.issued ? { view, issued } : prev));
         setPress((now) => (now?.requestId === p.requestId ? null : now));
-        setSaid((prev) => ({ text: PRESS_DONE[p.kind], n: (prev?.n ?? 0) + 1 }));
+        setSaid((prev) => ({ text: pressDone(p, view.run), n: (prev?.n ?? 0) + 1 }));
         await refresh();
       } catch (error) {
         // A refusal is the server's answer: the press is done. A failure with no answer keeps it for Try again.
@@ -140,9 +161,9 @@ function usePresses(campaignId: string, refresh: () => Promise<void>, issue: () 
     sending,
     refusal,
     said,
-    press_: (kind, path, body) => {
+    press_: (kind, path, body, about) => {
       const requestId = newRequestId();
-      const p: TestRunPress = { v: 1, kind, requestId, path, body: { requestId, ...body }, pressedAt: Date.now() };
+      const p: TestRunPress = { v: 1, kind, requestId, path, body: { requestId, ...body }, pressedAt: Date.now(), ...(about ? { runId: about.runId, wasRunning: about.wasRunning } : {}) };
       // Kept before it is sent; if storage refuses, the press still goes and this page alone knows it.
       keepPress(store, campaignId, p);
       void send(p);
@@ -258,7 +279,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   };
 
   const hint = noContact ? (asksLinkedin ? "Add your email, mobile or LinkedIn profile, and save them, to run a test." : "Add your email or mobile, and save them, to run a test.") : dirty ? "Save your contacts to run a test with them." : editor.unsaved ? "Your latest change to the sequence isn’t saved yet; a test runs the saved version." : "";
-  const status = pending ? (press.kind === "reply" ? `Marking the test replied: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : press.kind === "run" ? `Starting the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : `Stopping the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.`) : (said?.text ?? hint);
+  const status = pending ? (press.kind === "reply" ? `Marking the test replied: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : press.kind === "withdrawn" || press.kind === "kept" ? `Marking the test’s invite: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : press.kind === "run" ? `Starting the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : `Stopping the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.`) : (said?.text ?? hint);
 
   return (
     <section aria-labelledby="test-contacts" className="flex min-w-0 flex-col gap-3.5 rounded-box border border-line bg-base-100 px-5 pb-5 pt-4">
@@ -421,8 +442,11 @@ function RunPanel({ tab, starting, presses }: { tab: TestRunTabView; starting: b
           <p className="text-[14px] text-ink-2">A test sends the whole sequence to your own email and mobile, and puts its calls on your Calls list. It is optional: you can launch without one.</p>
         </>
       ) : (
-        <RunRead run={run} tab={tab} presses={presses} />
+        <RunRead run={run} tab={tab} />
       )}
+      {/* Outside the run's own read, so a confirmation sees the shown run change under it and closes (item 10). */}
+      {/* While a test is starting, the shown run is being replaced: an open confirmation closes and says so. */}
+      <TestLinkedinControls run={starting && !run?.running ? null : run} presses={presses} />
       {tab.noTestSinceEdit && run !== null && !starting && (
         <p className="flex gap-2 text-[13.5px] text-ink-2">
           <Icon name="warn" className="mt-0.5 size-4 flex-none text-pause" />
@@ -436,7 +460,7 @@ function RunPanel({ tab, starting, presses }: { tab: TestRunTabView; starting: b
   );
 }
 
-function RunRead({ run, tab, presses }: { run: TestRunRead; tab: TestRunTabView; presses: Presses }) {
+function RunRead({ run, tab }: { run: TestRunRead; tab: TestRunTabView }) {
   const started = timeIn(tab.zone, run.startedAt, tab.at);
   return (
     <>
@@ -478,48 +502,143 @@ function RunRead({ run, tab, presses }: { run: TestRunRead; tab: TestRunTabView;
           );
         })}
       </ol>
-      {run.linkedinReply !== null && <TestReplyMark run={run} presses={presses} />}
+
     </>
   );
 }
 
+/** A confirmation on the tab, a snapshot of the read it opened on and of the run it was opened for (council on dee365d, item 10). */
+type TestConfirmation = { readonly kind: "reply"; readonly runId: string; readonly status: TestRunRead["status"]; readonly wasRunning: boolean } | { readonly kind: "withdrawn" | "kept"; readonly runId: string; readonly trackId: string; readonly wasRunning: boolean };
+
+/** Why an open confirmation no longer applies to what the tab shows, or null while it does. */
+export function testConfirmationGone(c: TestConfirmation, run: TestRunRead | null): string | null {
+  if (run === null || run.id !== c.runId) return "The test shown here changed since you opened this, so it was closed. Nothing was marked.";
+  if (c.kind === "reply") return run.linkedinReply?.allowed === true && run.status === c.status ? null : "This test changed since you opened this, so it was closed. Nothing was marked.";
+  return run.linkedinTracks.some((t) => t.trackId === c.trackId && t.view.withdrawalStuck) ? null : "The withdrawal was settled since you opened this, so it was closed. Nothing was marked.";
+}
+
+const CONFIRM_TEXT = {
+  reply: "Mark this test replied on LinkedIn? It stops the test, as a reply stops a lead’s outreach in this campaign. Carry on the conversation on LinkedIn.",
+  withdrawn: "Mark the test invite withdrawn? Do this only once LinkedIn no longer shows it as pending on your test profile. The app stops asking LinkedIn about it.",
+  kept: "Mark the test invite still there? The app stops asking LinkedIn to withdraw it and leaves it open on your test profile.",
+} as const;
+
 /**
- * The test run's LinkedIn reply mark (ticket 24b; ADR 0004 section 7): offered while the read allows it, with the read's
- * refusal said in its place otherwise, and confirmed in place against the status the read showed (the snapshot rule of
- * the record's controls): the press sends that status, so a run that changed since is refused by the server.
+ * The run's LinkedIn reply mark and its stuck withdrawal's two answers (ticket 24b; ADR 0004 sections 3.3 and 7): offered
+ * while the read allows them, a refusal said in their place, each confirmed in place against the read and the run it was
+ * opened on. A confirmation whose run is no longer the one shown, or whose press the read no longer offers, closes and says
+ * why; its press names its run in its route, so a late one is applied to that run only and says so (item 10).
  */
-function TestReplyMark({ run, presses }: { run: TestRunRead; presses: Presses }) {
-  const [opened, setOpened] = useState<{ status: TestRunRead["status"]; runId: string } | null>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
-  const mark = run.linkedinReply;
+function TestLinkedinControls({ run, presses }: { run: TestRunRead | null; presses: Presses }) {
+  const [opened, setOpened] = useState<TestConfirmation | null>(null);
+  const [closed, setClosed] = useState<string | null>(null);
+  // Buttons by key, so a cancelled confirmation returns focus to the one that opened it once it is drawn again (item 12).
+  const buttons = useRef(new Map<string, HTMLButtonElement>());
+  const focusBack = useRef<string | null>(null);
+  const closedRef = useRef<HTMLParagraphElement>(null);
+  const rescue = useFocusRescue();
+  // After each render: a cancelled confirmation's button, once it is drawn again, takes focus back.
+  useEffect(() => {
+    const key = focusBack.current;
+    if (key === null) return;
+    const el = buttons.current.get(key);
+    if (el?.isConnected) {
+      el.focus();
+      focusBack.current = null;
+    }
+  });
   const pending = presses.press !== null;
-  if (mark === null) return null;
-  if (!mark.allowed) return <p className="border-t border-line pt-3 text-[13.5px] text-muted">{mark.reason}</p>;
+  const gone = opened === null ? null : testConfirmationGone(opened, run);
+  if (opened !== null && gone !== null) {
+    setOpened(null);
+    setClosed(gone);
+  }
+  useEffect(() => {
+    if (closed !== null) closedRef.current?.focus();
+  }, [closed]);
+  if (run === null)
+    return closed === null ? null : (
+      <div ref={rescue}>
+        <p ref={closedRef} tabIndex={-1} role="status" className="text-[13.5px] text-ink-2 outline-offset-4">
+          {closed}
+        </p>
+      </div>
+    );
+  const mark = run.linkedinReply;
+  const stuck = run.linkedinTracks.filter((t) => t.view.withdrawalStuck);
+  if (mark === null && stuck.length === 0 && closed === null) return null;
+  const keyOf = (c: TestConfirmation) => (c.kind === "reply" ? "reply" : `${c.kind}:${c.trackId}`);
+  function open(c: TestConfirmation): void {
+    setClosed(null);
+    setOpened(c);
+  }
   return (
-    <div className="flex flex-col gap-2 border-t border-line pt-3">
+    <div ref={rescue} className="flex flex-col gap-2 border-t border-line pt-3">
+      {closed !== null && (
+        <p ref={closedRef} tabIndex={-1} data-rescue="1" role="status" className="rounded-field bg-pause-soft px-3 py-2 text-[13.5px] text-base-content outline-offset-4">
+          {closed}
+        </p>
+      )}
       {opened ? (
         <ConfirmStrip
-          text="Mark this test replied on LinkedIn? It stops the test, as a reply stops a lead’s outreach in this campaign. Carry on the conversation on LinkedIn."
-          action="Mark replied"
-          changed={opened.status !== run.status ? ROW_CHANGED : null}
+          text={CONFIRM_TEXT[opened.kind]}
+          action={opened.kind === "reply" ? "Mark replied" : WITHDRAWAL_ANSWERS[opened.kind === "withdrawn" ? 0 : 1].label}
           busy={pending ? "Another change to this test is on its way." : null}
           onConfirm={() => {
-            presses.press_("reply", `/api/test-runs/${encodeURIComponent(opened.runId)}/replies`, { channel: "linkedin", expect: { status: opened.status } });
+            const about = { runId: opened.runId, wasRunning: opened.wasRunning };
+            if (opened.kind === "reply") presses.press_("reply", `/api/test-runs/${encodeURIComponent(opened.runId)}/replies`, { channel: "linkedin", expect: { status: opened.status } }, about);
+            else presses.press_(opened.kind, `/api/test-runs/${encodeURIComponent(opened.runId)}/invite-withdrawal`, { trackId: opened.trackId, answer: opened.kind === "withdrawn" ? "withdrawn" : "kept" }, about);
             setOpened(null);
           }}
           onCancel={() => {
+            focusBack.current = keyOf(opened);
             setOpened(null);
-            requestAnimationFrame(() => trigger.current?.focus());
           }}
         />
       ) : (
-        <div className="flex flex-wrap items-center gap-2.5">
-          <button ref={trigger} type="button" className={`btn btn-sm border-line-strong bg-base-100 font-medium ${DISABLED}`} disabled={pending} onClick={() => setOpened({ status: run.status, runId: run.id })}>
-            <Icon name="linkedin" className="size-4" />
-            Mark replied on LinkedIn
-          </button>
-          <span className="text-[13px] text-muted">Once you have answered a test message on your test profile.</span>
-        </div>
+        <>
+          {stuck.map((t) => (
+            <div key={t.trackId} className="flex flex-col gap-1.5">
+              <p className="text-[13.5px] text-ink-2">LinkedIn hasn’t confirmed the test invite was withdrawn. Check your test profile on LinkedIn and say what you found.</p>
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Was the test invite withdrawn?">
+                {(["withdrawn", "kept"] as const).map((kind, i) => (
+                  <button
+                    key={kind}
+                    ref={(el) => {
+                      if (el) buttons.current.set(`${kind}:${t.trackId}`, el);
+                    }}
+                    data-rescue="2"
+                    type="button"
+                    className={`btn btn-sm border-line-strong bg-base-100 font-medium ${DISABLED}`}
+                    disabled={pending}
+                    onClick={() => open({ kind, runId: run.id, trackId: t.trackId, wasRunning: run.running })}
+                  >
+                    {WITHDRAWAL_ANSWERS[i]?.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          {mark !== null && !mark.allowed && <p className="text-[13.5px] text-muted">{mark.reason}</p>}
+          {mark?.allowed && (
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                ref={(el) => {
+                  if (el) buttons.current.set("reply", el);
+                }}
+                data-rescue="2"
+                type="button"
+                className={`btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium ${DISABLED}`}
+                disabled={pending}
+                onClick={() => open({ kind: "reply", runId: run.id, status: run.status, wasRunning: run.running })}
+              >
+                <Icon name="linkedin" className="size-4" />
+                Mark replied on LinkedIn
+              </button>
+              <span className="text-[13px] text-muted">Once you have answered a test message on your test profile.</span>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

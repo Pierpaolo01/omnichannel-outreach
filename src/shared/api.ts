@@ -162,7 +162,12 @@ export type StepWaitApi =
   /** A LinkedIn message waiting for its invite to be accepted (ADR 0004 section 9): `until` is the day the wait ends, a fact. */
   | "awaiting_acceptance"
   /** An invite to the profile already pending on LinkedIn that this application did not send (question Q42). */
-  | "invite_pending_elsewhere";
+  | "invite_pending_elsewhere"
+  /**
+   * A LinkedIn step no session it may use has any allowance for, of the step's kind (council on dee365d, item 15): the
+   * engine's `sending_capacity` with every such session's allowance zero or unset, so nothing resets it. No time.
+   */
+  | "no_allowance";
 
 /**
  * When a pending step goes, as the engine decides it at the read's instant (`stepWhen`): ready (its time has come and nothing
@@ -462,6 +467,17 @@ export interface SenderAccountViewApi {
   readonly usedToday: number;
   /** An account-level wait after a quota (402) or rate-limit (429) refusal. */
   readonly waiting: "quota" | "rate_limited" | null;
+  /**
+   * A LinkedIn session's room per kind of action (ADR 0004 6; council on dee365d, item 4): its invites and its messages a
+   * day, each with what is used today. `capacity` and `usedToday` above add the two and are not said for a session.
+   */
+  readonly kinds?: SessionKinds;
+}
+
+/** A LinkedIn session's daily allowances, each with its use today (sent on the reset day plus reservations). */
+export interface SessionKinds {
+  readonly invite: { readonly capacity: number; readonly usedToday: number };
+  readonly message: { readonly capacity: number; readonly usedToday: number };
 }
 
 /**
@@ -559,7 +575,12 @@ export interface StepProgressView {
 
 /** What the engine stores of a LinkedIn track, for the record's sentences (ADR 0004 section 9). Part b words it. */
 export interface LinkedinTrackView {
-  /** The invite's note as it went: with it, without it because the note allowance was used, none written; null before it went. */
+  /**
+   * The invite's work (council on dee365d, item 11): `sent` once the engine records it sent (by the session, a lookup or the
+   * user's mark); `handed` while it is with the session and not known to have gone; null before the handover, or refused.
+   */
+  readonly invite: "sent" | "handed" | null;
+  /** The note chosen at the handover: with it, without it because the note allowance was used, none written; null before it. Said as gone only with `invite` sent. */
   readonly note: "with" | "withheld" | "none" | null;
   /** How the track connected, and when (the acceptance or the pre-send check); null while not connected. */
   readonly connection: "accepted" | "already_connected" | null;
@@ -686,6 +707,8 @@ export interface NeedsAttention {
    */
   readonly heldCapacity: readonly {
     readonly accountId: string;
+    /** The account's channel: a LinkedIn session's held work is said apart from a summed capacity (council on dee365d, item 4). */
+    readonly channel: "email" | "sms" | "linkedin";
     readonly held: number;
     readonly capacity: number;
     /** Sends already counted on the inbox's current reset day. */
@@ -715,6 +738,10 @@ export interface NeedsAttention {
     readonly dueAt: string;
     readonly accountIds: readonly string[];
     readonly resetsAt: string;
+    /** A LinkedIn step's kind of action, whose allowance it waits on (council on dee365d, item 15); null on email and SMS. */
+    readonly action: "invite" | "message" | null;
+    /** Every account it may use has no allowance of that kind (zero or never set): no reset brings room, so none is promised. */
+    readonly noAllowance: boolean;
   })[];
   /**
    * Leads left with no usable channel, from any cause (ticket 20a; follow-up 42 item 50), most recently ended first, with
@@ -811,6 +838,8 @@ export interface LoadProjectionView {
     /** The most this campaign would send from it on one day. */
     readonly busiestDay: number;
     readonly gapSeconds: number;
+    /** A LinkedIn session's room per kind (council on dee365d, item 4); its summed `capacity` is not said. */
+    readonly kinds?: SessionKinds;
   }[];
   /**
    * Calendar days, counting launch day as day 1, until every lead some live track can reach has had
@@ -1313,6 +1342,11 @@ export interface WithheldTrack {
    * connection check), so no figure is shown rather than a wrong one.
    */
   readonly why: "no_sender" | "not_modelled";
+  /**
+   * Another campaign's track (council on dee365d, item 8): a campaign competing for this one's senders, by name, whose
+   * live LinkedIn track the estimate cannot simulate. Absent for this campaign's own tracks.
+   */
+  readonly campaign?: string;
 }
 
 export interface WithheldBy {
@@ -1717,6 +1751,8 @@ export interface TestRunRead {
   readonly steps: readonly TestStepRow[];
   /** The run's outreach status at the read, which a reply mark's confirmation sends back as its expectation (ticket 24b). */
   readonly status: OutreachStatus;
+  /** Each LinkedIn track's own facts for this run, as a lead's read gives them (council on dee365d, items 2 and 3). */
+  readonly linkedinTracks: readonly { readonly trackId: string; readonly view: LinkedinTrackView }[];
   /** Whether the user may mark this test replied on LinkedIn now, by the engine's rule; null with no LinkedIn track (ticket 24b). */
   readonly linkedinReply: LinkedinReplyMark | null;
 }

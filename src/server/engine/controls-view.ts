@@ -34,7 +34,7 @@ function stepView(state: SubjectState, step: NonNullable<ReturnType<typeof curre
 
 function whenOf(state: SubjectState, trackId: string, now: number, env: StepEnv, read: typeof stepWhen): ControlStepView["when"] {
   const when = read(state, trackId, now, env);
-  return when ? stepWhenView(when, now, state.callDay.day, channelOfTrack(state, trackId)) : null;
+  return when ? stepWhenView(when, now, state.callDay.day, channelOfTrack(state, trackId), { state, trackId }) : null;
 }
 
 /** A call step's record: its calls logged so far (skip for now is no call), and whether its open task is a callback. */

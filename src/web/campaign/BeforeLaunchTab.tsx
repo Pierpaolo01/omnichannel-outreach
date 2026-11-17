@@ -228,9 +228,7 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
   if (live.some((t) => t.channel === "call") && !(editor.view.definition.callScript ?? "").trim()) {
     items.push({ title: "The call script is empty", detail: "Your call tasks will show no talking points. Write them in a phone track, in the sequence." });
   }
-  for (const a of facts.load?.accounts ?? []) {
-    if (a.usedToday > 0) items.push({ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: `Other campaigns or test runs sent or reserved them, so fewer first ${a.channel === "sms" ? "texts" : a.channel === "linkedin" ? "invites" : "emails"} can go today.` });
-  }
+  for (const a of facts.load?.accounts ?? []) items.push(...usedTodayWarnings(a));
   // A sender the win-back branch uses counts too: its emails and texts go from the same pools (ticket 16b).
   const sending = editor.view.definition.tracks.filter((t) => !t.removed);
   for (const a of editor.view.accounts.filter((x) => !x.healthy && sending.some((t) => t.channel === x.channel))) {
@@ -362,12 +360,18 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
                 </td>
                 <td className="py-2.5 max-[560px]:p-0">{blocked ? "—" : `${a.busiestDay} a day`}</td>
                 <td className="py-2.5 max-[560px]:p-0">
-                  <span className={a.usedToday >= a.capacity ? "font-medium text-pause" : ""}>
-                    {a.usedToday} of {a.capacity}
-                  </span>
-                  <span className="mt-1 block h-1 w-24 overflow-hidden rounded-sm bg-line" aria-hidden="true">
-                    <span className={`block h-full ${a.usedToday >= a.capacity ? "bg-pause" : "bg-base-content"}`} style={{ width: `${Math.min(100, (a.usedToday / Math.max(1, a.capacity)) * 100)}%` }} />
-                  </span>
+                  {/* A LinkedIn session's two allowances, each with its use (council on dee365d, item 4); never their sum. */}
+                  {(a.kinds ? [{ what: "invites", ...a.kinds.invite }, { what: "messages", ...a.kinds.message }] : [{ what: "", capacity: a.capacity, usedToday: a.usedToday }]).map((r) => (
+                    <span key={r.what} className="block [&+&]:mt-1.5">
+                      <span className={r.usedToday >= r.capacity ? "font-medium text-pause" : ""}>
+                        {r.usedToday} of {r.capacity}
+                        {r.what ? ` ${r.what}` : ""}
+                      </span>
+                      <span className="mt-1 block h-1 w-24 overflow-hidden rounded-sm bg-line" aria-hidden="true">
+                        <span className={`block h-full ${r.usedToday >= r.capacity ? "bg-pause" : "bg-base-content"}`} style={{ width: `${Math.min(100, (r.usedToday / Math.max(1, r.capacity)) * 100)}%` }} />
+                      </span>
+                    </span>
+                  ))}
                 </td>
               </tr>
             ))}
@@ -397,7 +401,8 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
         </table>
       )}
       {load.withheldBy !== null ? (
-        <p className={`${load.accounts.length > 0 || callRow !== null ? "mt-2" : ""} text-[13.5px] text-crit`}>
+        // Critical only for a sender a blocker also names; a figure withheld for want of a model is no fault (item 9).
+        <p className={`${load.accounts.length > 0 || callRow !== null ? "mt-2" : ""} text-[13.5px] ${load.withheldBy.tracks.some((t) => t.why === "no_sender") ? "text-crit" : "text-ink-2"}`}>
           {/* Worded from the tracks the server names, never guessed from this campaign's channels. */}
           {withheldExplanation(load.withheldBy)}
         </p>
@@ -429,6 +434,22 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
 }
 
 /** Why one sender keeps the figure from being projected (ADR 0003, ticket 13b): said with the sender. */
+/**
+ * What other campaigns and test runs already used of a sender today. A LinkedIn session's invites and messages are two
+ * allowances, said apart (council on dee365d, item 4): messages used never mean fewer invites can go.
+ */
+export function usedTodayWarnings(a: LoadProjectionView["accounts"][number]): { title: string; detail: string }[] {
+  const why = "Other campaigns or test runs sent or reserved them";
+  if (a.kinds) {
+    const { invite, message } = a.kinds;
+    return [
+      ...(invite.usedToday > 0 ? [{ title: `${a.label} has ${invite.usedToday} of its ${invite.capacity} invites a day used today`, detail: `${why}, so fewer invites can go today.` }] : []),
+      ...(message.usedToday > 0 ? [{ title: `${a.label} has ${message.usedToday} of its ${message.capacity} messages a day used today`, detail: `${why}, so fewer LinkedIn messages can go today.` }] : []),
+    ];
+  }
+  return a.usedToday > 0 ? [{ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: `${why}, so fewer first ${a.channel === "sms" ? "texts" : "emails"} can go today.` }] : [];
+}
+
 function heldSaid(c: LoadProjectionView["cannotProject"][number]): string {
   switch (c.reason) {
     case "quota":

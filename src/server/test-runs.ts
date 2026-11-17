@@ -4,7 +4,7 @@
  * functions. Nothing here writes, and nothing beside the engine decides what a test does.
  */
 import { stepWhen, type StepEnv } from "../domain/sequence/dispatch.ts";
-import { stepWaitApi } from "./engine/step-when-view.ts";
+import { readWait } from "./engine/step-when-view.ts";
 import { isLive, maySend } from "../domain/sequence/attempt.ts";
 import { liveSteps, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { deriveStatus, progressOf, unsettledOwnersOf } from "../domain/sequence/progress.ts";
@@ -20,7 +20,7 @@ import type { Rules } from "./engine/rules.ts";
 export type TestTabRules = CallViewRules & Pick<Rules, "markReplied">;
 import type { OutreachStore } from "./persistence/store.ts";
 import { firstListedDay, type CallViewRules } from "./engine/call-views.ts";
-import { conversationOwnersView } from "./engine/views.ts";
+import { conversationOwnersView, linkedinTrackView } from "./engine/views.ts";
 import { startOfLocalDay } from "../domain/sequence/clock.ts";
 
 const iso = (t: number) => new Date(t).toISOString();
@@ -95,6 +95,7 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
     mobile: run.contacts.mobile?.value ?? null,
     linkedin: run.contacts.linkedin?.value ?? null,
     status: deriveStatus(s),
+    linkedinTracks: s.tracks.filter((t) => s.campaign.definition.tracks.find((d) => d.id === t.trackId)?.channel === "linkedin").map((t) => ({ trackId: t.trackId, view: linkedinTrackView(s, t.trackId) })),
     mayStillSend: s.work.filter(maySend).length,
     steps: stepsOf(s, rules, now, env),
     // The mark's own rule on the stored run (it reads the run as of the action itself), as a lead's read says it (ticket 24b).
@@ -119,7 +120,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
     const when = (rules.stepWhen ?? stepWhen)(s, track.id, now, env);
     if (when?.kind !== "waits" || when.why === "with_provider") return null;
     // The day an acceptance wait ends is the read's fact (ADR 0004 section 9): said as when the wait ends, never a send.
-    return { waits: stepWaitApi(when.why), ...(when.why === "awaiting_acceptance" && when.until !== undefined ? { until: iso(when.until) } : {}) };
+    return { waits: readWait(when.why, s, track.id), ...(when.why === "awaiting_acceptance" && when.until !== undefined ? { until: iso(when.until) } : {}) };
   };
   for (const track of tracks) {
     const label = trackLabel(def, track);
@@ -169,7 +170,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
         switch (when?.kind) {
           case "waits":
             // The day an acceptance wait ends is the read's fact (ADR 0004 section 9): said as when the wait ends, never a send.
-            rows.push({ ...base, state: "due", at: null, waits: stepWaitApi(when.why), ...(when.why === "awaiting_acceptance" && when.until !== undefined ? { until: iso(when.until) } : {}) });
+            rows.push({ ...base, state: "due", at: null, waits: readWait(when.why, s, track.id), ...(when.why === "awaiting_acceptance" && when.until !== undefined ? { until: iso(when.until) } : {}) });
             break;
           case "ready":
             rows.push({ ...base, state: "due", at: iso(now) });

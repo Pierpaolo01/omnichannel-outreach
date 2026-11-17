@@ -44,20 +44,24 @@ function connectionLine(view: LinkedinTrackView, userZone: string): string | nul
   }
 }
 
-/** What became of the invite after the acceptance wait ended with no acceptance (3.3), by the withdrawal's stored state. */
-export function expiryLine(withdrawal: LinkedinTrackView["withdrawal"]): string {
-  const ended = "The invite wasn’t accepted within the track’s wait, so the LinkedIn track ended for them";
+/**
+ * What became of the invite after the acceptance wait ended with no acceptance recorded (3.3), by the withdrawal's stored
+ * state, and nothing more: "withdrawn" only once LinkedIn or the user said so (council on dee365d, item 2). `whom` is "them"
+ * on the record and "this test" on the Test run tab, which says it through this same function.
+ */
+export function expiryLine(withdrawal: LinkedinTrackView["withdrawal"], whom: "them" | "this test" = "them"): string {
+  const ended = `No acceptance was recorded within the track’s wait, so the LinkedIn track ended for ${whom}`;
   switch (withdrawal) {
     case null:
       return `${ended}.`;
     case "wanted":
-      return `${ended}. The invite is being withdrawn.`;
+      return `${ended}. The app has asked LinkedIn to withdraw the invite; it isn’t confirmed withdrawn yet.`;
     case "withdrawn":
       return `${ended}, and the invite was withdrawn.`;
     case "accepted_first":
-      return `${ended}. When it was withdrawn, LinkedIn showed they had accepted it first.`;
+      return `${ended}. Asked to withdraw the invite, LinkedIn showed it had been accepted first, so it wasn’t withdrawn.`;
     case "kept_by_user":
-      return `${ended}. You marked the invite as still there on LinkedIn, so it was left open.`;
+      return `${ended}. You marked the invite as still there on LinkedIn, so it wasn’t withdrawn.`;
     default: {
       const unhandled: never = withdrawal;
       throw new Error(`A withdrawal state with no words: ${String(unhandled)}`);
@@ -78,23 +82,39 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
   // A pair another campaign holds (Q41): named by the one conversation wording, in LinkedIn's words.
   if (track.finishReason === "skipped_conversation_taken") lines.push(`The LinkedIn track was skipped: ${conversationTaken(track.conversationOwners, "linkedin")}.`);
   if (view === null) return lines;
-  if (view.note !== null) lines.push(noteLine(view.note));
+  // The note as it went only once the invite is recorded sent (council on dee365d, item 11); handed over and not known to
+  // have gone, it is said as the engine holds it, in the unresolved state's words.
+  if (view.invite === "sent" && view.note !== null) lines.push(noteLine(view.note));
+  if (view.invite === "handed") lines.push(INVITE_HANDED);
   const connected = connectionLine(view, userZone);
   if (connected) lines.push(connected);
   if (track.finishReason === "invite_not_accepted") lines.push(expiryLine(view.withdrawal));
+  // An acceptance recorded after the track ended (council on dee365d, item 14): said as recorded late, with the time
+  // LinkedIn gave for it, which the port's contract allows to be an upper bound ("by"), never as accepted late.
   if (view.acceptedAfterFinish) {
-    lines.push(`${view.acceptedAt ? `They accepted the invite on ${dateIn(userZone, view.acceptedAt)}` : "They accepted the invite"}, after this track had ended. You are connected now, and may want to write to them on LinkedIn yourself.`);
+    lines.push(`Their acceptance of the invite was recorded after this track had ended${view.acceptedAt ? `; LinkedIn shows they had accepted it by ${dateIn(userZone, view.acceptedAt)}` : ""}. You are connected now, and may want to write to them on LinkedIn yourself.`);
   }
-  // Q38's interim: a stop or a reply leaves an invite already sent pending on LinkedIn. Said once the lead no longer runs,
-  // and only while no withdrawal was asked for: an expiry's withdrawal is said by its own line.
-  if (view.inviteOpen && view.withdrawal === null && (statusGroup(status) === "handed_to_you" || statusGroup(status) === "ended")) lines.push(INVITE_STILL_OPEN);
+  // Q38's interim, and every other ending the engine leaves an invite open through (council on dee365d, item 6): only the
+  // acceptance expiry asks for a withdrawal, so a stop, a reply on any channel, a move to win-back, an ending with no
+  // channel left or an edit that removes the track leaves a sent invite open. Said once the track has ended or the lead no
+  // longer runs, and only while no withdrawal was asked for: an expiry's withdrawal is said by its own line.
+  if (view.inviteOpen && view.withdrawal === null && (track.finishReason !== null || statusGroup(status) === "handed_to_you" || statusGroup(status) === "ended")) lines.push(INVITE_STILL_OPEN);
   if (view.pendingElsewhereSince) lines.push(`An invite to them was already pending on LinkedIn, not sent by this application (first seen ${dateIn(userZone, view.pendingElsewhereSince)}). This track waits until it is accepted or gone.`);
   if (view.withdrawalStuck) lines.push("LinkedIn hasn’t confirmed the invite was withdrawn. Check their profile on LinkedIn and say what you found.");
   return lines;
 }
 
-/** Q38's interim, on the record (ADR 0004 3.4). */
-export const INVITE_STILL_OPEN = "The connection invite sent from this campaign is still open on LinkedIn: ending their outreach here doesn’t withdraw it. Withdraw it on LinkedIn if you want it gone.";
+/** Q38's interim, on the record (ADR 0004 3.4), for every ending but the acceptance expiry. */
+export const INVITE_STILL_OPEN = "The connection invite sent from this campaign is still open on LinkedIn. Only a wait for acceptance that runs out withdraws an invite, so this one stays until they answer it or you withdraw it on LinkedIn.";
+
+/** An invite handed to the session and not known to have gone: the unresolved state's words (`HOLD_CLAUSE.unresolved`). */
+export const INVITE_HANDED = "The connection invite is with the LinkedIn session, which hasn’t confirmed whether it went.";
+
+/** What a stop or a move to win-back leaves on LinkedIn, in its confirmation, while the read says an invite is open (item 6). */
+export const INVITE_STAYS_OPEN = {
+  stop: "The LinkedIn invite already sent stays open on LinkedIn: stopping doesn’t withdraw it.",
+  move_to_win_back: "The LinkedIn invite already sent stays open on LinkedIn: moving to win-back doesn’t withdraw it.",
+} as const;
 
 /** The two answers to a withdrawal LinkedIn never confirmed (ADR 0004 3.3), as the record offers them. */
 export const WITHDRAWAL_ANSWERS = [

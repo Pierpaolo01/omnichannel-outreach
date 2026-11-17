@@ -6,6 +6,28 @@ import type { StepWait, StepWhen } from "../../domain/sequence/dispatch.ts";
 import type { StepWaitApi, StepWhenView } from "../../shared/api.ts";
 import { dateOfDay } from "./call-views.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
+import { linkedinStepKind, poolOf, socialActionOf } from "../../domain/sequence/definition.ts";
+import { progressOf } from "../../domain/sequence/progress.ts";
+
+/**
+ * Whether a LinkedIn track's pending step waits because no session it may use has any allowance of the step's kind, zero or
+ * never set (council on dee365d, item 15): the engine reads it as `sending_capacity`, and the reads say it apart from a
+ * day's allowance used up, which a reset ends. Nothing is computed beside the engine's own account records.
+ */
+export function noAllowanceFor(state: SubjectState, trackId: string): boolean {
+  const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
+  const stepId = progressOf(state, trackId)?.nextStepId ?? null;
+  if (!track || track.channel !== "linkedin" || stepId === null) return false;
+  const action = socialActionOf(linkedinStepKind(track, stepId));
+  if (action === null) return false;
+  const sessions = poolOf(state.campaign.definition, "linkedin").map((id) => state.accounts[id]).filter((a) => a !== undefined && a.channel === "linkedin");
+  return sessions.length > 0 && sessions.every((a) => (a?.kinds?.[action].capacity ?? 0) <= 0);
+}
+
+/** A wait as the reads say it: the engine's reason, with `sending_capacity` said as `no_allowance` where that is the cause. */
+export function readWait(why: StepWait, state: SubjectState, trackId: string): StepWaitApi {
+  return why === "sending_capacity" && noAllowanceFor(state, trackId) ? "no_allowance" : stepWaitApi(why);
+}
 
 /** A track's channel in the subject's definition in force (a removed track keeps its channel). */
 export function channelOfTrack(state: SubjectState, trackId: string): "email" | "sms" | "call" | "linkedin" {
@@ -54,12 +76,12 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
  * A wait carries its track's channel, so every reason is worded in that channel's words (council on b21af02, item 1): a
  * transport's wait names the transport's channel, which is the track's.
  */
-export function stepWhenView(when: StepWhen, now: number, today: number, channel: "email" | "sms" | "call" | "linkedin"): StepWhenView {
+export function stepWhenView(when: StepWhen, now: number, today: number, channel: "email" | "sms" | "call" | "linkedin", at?: { readonly state: SubjectState; readonly trackId: string }): StepWhenView {
   switch (when.kind) {
     case "waits":
       return {
         kind: "waits",
-        why: stepWaitApi(when.why),
+        why: at ? readWait(when.why, at.state, at.trackId) : stepWaitApi(when.why),
         channel: when.channel ?? channel,
         ...(when.until !== undefined ? { until: new Date(when.until).toISOString() } : {}),
       };

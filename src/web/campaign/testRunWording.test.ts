@@ -46,7 +46,7 @@ describe("the Test run tab says only what the run's facts say (ticket 21)", () =
     expect(endingTitle("your_reply", null)).toBe("Stopped by your reply");
     expect(endingTitle("edited", null)).toBe("Stopped by an edit");
     const steps = [row({}), row({ stepId: "e2", state: "due" }), row({ stepId: "w1", branch: "win_back", state: "not_reached", at: null })];
-    expect(progressText({ id: "t", running: true, ending: null, startedAt: READ, endedAt: null, renderAs: { id: "l", name: "Pat" }, email: null, mobile: null, linkedin: null, status: "active", mayStillSend: 0, steps, linkedinReply: null })).toBe("1 of 2 steps done");
+    expect(progressText({ id: "t", running: true, ending: null, startedAt: READ, endedAt: null, renderAs: { id: "l", name: "Pat" }, email: null, mobile: null, linkedin: null, status: "active", mayStillSend: 0, steps, linkedinTracks: [], linkedinReply: null })).toBe("1 of 2 steps done");
   });
 
   test("a finished test says what went and what was skipped and why, never that every step ran when some did not (council on ffa202c, item 13)", () => {
@@ -80,10 +80,17 @@ describe("a test run's LinkedIn steps (ticket 24b; ADR 0004 section 8)", () => {
   test("where it goes, with the provider's words; skips and failures in LinkedIn's terms", () => {
     expect(stepDetail(li({ name: "Connection invite" }), run)).toBe(`To ${run.linkedin}`);
     expect(stepStateText(li({ state: "with_provider" }), "Europe/London", READ)).toBe("With the LinkedIn session");
-    expect(stepStateText(li({ state: "failed" }), "Europe/London", READ)).toBe("Failed 10:41: profile not reachable");
+    expect(stepStateText(li({ state: "failed", reason: "profile unreachable" }), "Europe/London", READ)).toBe("Failed 10:41: profile not reachable");
+    // A removed connection is not a bad profile (Q37; council on dee365d, item 13).
+    expect(stepStateText(li({ stepId: "m1", state: "failed", reason: "not connected" }), "Europe/London", READ)).toBe("Failed 10:41: no longer connected on LinkedIn, so the message couldn’t go");
     expect(stepDetail(li({ state: "skipped", reason: "missing_channel" }), run)).toBe("Skipped: no test LinkedIn profile saved");
     expect(stepDetail(li({ state: "skipped", reason: "already_connected" }), run)).toBe("Skipped: your session is already connected to your test profile");
-    expect(stepDetail(li({ stepId: "m1", state: "skipped", reason: "invite_not_accepted" }), run)).toBe("Skipped: the invite wasn’t accepted in time, so it was withdrawn");
+    // The expiry is said from the run's own withdrawal state, through the record's function (council on dee365d, item 2):
+    // never "withdrawn" while LinkedIn only ever answered unknown, on every message row.
+    const view = (withdrawal: "wanted" | "withdrawn" | "accepted_first" | "kept_by_user") => ({ ...run, linkedinTracks: [{ trackId: "li", view: { invite: "sent" as const, note: null, connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal, withdrawalStuck: withdrawal === "wanted", inviteOpen: withdrawal !== "withdrawn", pendingElsewhereSince: null } }] });
+    for (const stepId of ["m1", "m2"]) expect(stepDetail(li({ stepId, state: "skipped", reason: "invite_not_accepted" }), view("wanted"))).toBe("Skipped: no acceptance was recorded within the track’s wait, so the LinkedIn track ended for this test. The app has asked LinkedIn to withdraw the invite; it isn’t confirmed withdrawn yet.");
+    expect(stepDetail(li({ stepId: "m1", state: "skipped", reason: "invite_not_accepted" }), view("withdrawn"))).toBe("Skipped: no acceptance was recorded within the track’s wait, so the LinkedIn track ended for this test, and the invite was withdrawn.");
+    expect(stepDetail(li({ stepId: "m1", state: "skipped", reason: "invite_not_accepted" }), view("kept_by_user"))).not.toContain("and the invite was withdrawn");
   });
   test("a finished run names a missing test profile apart from a missing mobile", () => {
     const steps = [li({ state: "skipped", reason: "missing_channel" }), li({ stepId: "m1", state: "skipped", reason: "missing_channel" }), row({})];

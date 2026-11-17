@@ -2,11 +2,11 @@ import { describe, expect, test } from "vitest";
 import type { LinkedinTrackView, NeedsAttention, TrackProgressView } from "../../shared/api.ts";
 import { attentionItems, SAID_ON_TODAY } from "../calls/wording.ts";
 import { describeEntry } from "../activity.tsx";
-import { expiryLine, INVITE_STILL_OPEN, linkedinTrackLines, MARK_REPLIED, noteLine, withdrawalStuckItems } from "./linkedin-wording.ts";
+import { expiryLine, INVITE_HANDED, INVITE_STILL_OPEN, linkedinTrackLines, MARK_REPLIED, noteLine, withdrawalStuckItems } from "./linkedin-wording.ts";
 
 /** The record's and Today's LinkedIn sentences, one per state of the read (ticket 24b; ADR 0004 section 9). */
 const ZONE = "Europe/London";
-const VIEW: LinkedinTrackView = { note: null, connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalStuck: false, inviteOpen: false, pendingElsewhereSince: null };
+const VIEW: LinkedinTrackView = { invite: null, note: null, connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalStuck: false, inviteOpen: false, pendingElsewhereSince: null };
 const track = (linkedin: Partial<LinkedinTrackView> | null, fields: Partial<TrackProgressView> = {}): TrackProgressView => ({
   trackId: "li",
   channel: "linkedin",
@@ -35,22 +35,24 @@ describe("a LinkedIn track's facts on the record", () => {
   });
 
   test("an acceptance with its day; an existing connection; nothing for a track not yet sent", () => {
-    expect(linkedinTrackLines(track({ note: "with", connection: "accepted", connectedAt: "2026-11-03T10:00:00.000Z" }), "active", ZONE)).toEqual(["The connection invite went with its note.", "They accepted the invite on Tue 3 Nov."]);
+    expect(linkedinTrackLines(track({ invite: "sent", note: "with", connection: "accepted", connectedAt: "2026-11-03T10:00:00.000Z" }), "active", ZONE)).toEqual(["The connection invite went with its note.", "They accepted the invite on Tue 3 Nov."]);
     expect(linkedinTrackLines(track({ connection: "already_connected", connectedAt: "2026-11-03T10:00:00.000Z" }), "active", ZONE)).toEqual(["Your LinkedIn session was already connected to them, so no invite was sent."]);
     expect(linkedinTrackLines(track({}), "active", ZONE)).toEqual([]);
     expect(linkedinTrackLines(track(null, { channel: "email" }), "active", ZONE)).toEqual([]);
   });
 
   test("the expiry by each withdrawal state, never a time promised", () => {
-    expect(expiryLine("wanted")).toBe("The invite wasn’t accepted within the track’s wait, so the LinkedIn track ended for them. The invite is being withdrawn.");
-    expect(expiryLine("withdrawn")).toBe("The invite wasn’t accepted within the track’s wait, so the LinkedIn track ended for them, and the invite was withdrawn.");
-    expect(expiryLine("accepted_first")).toContain("LinkedIn showed they had accepted it first");
-    expect(expiryLine("kept_by_user")).toContain("You marked the invite as still there on LinkedIn");
+    expect(expiryLine("wanted")).toBe("No acceptance was recorded within the track’s wait, so the LinkedIn track ended for them. The app has asked LinkedIn to withdraw the invite; it isn’t confirmed withdrawn yet.");
+    expect(expiryLine("withdrawn")).toBe("No acceptance was recorded within the track’s wait, so the LinkedIn track ended for them, and the invite was withdrawn.");
+    expect(expiryLine("accepted_first")).toContain("LinkedIn showed it had been accepted first, so it wasn’t withdrawn");
+    expect(expiryLine("kept_by_user")).toContain("so it wasn’t withdrawn");
+    // Only the withdrawn state says it was withdrawn (council on dee365d, item 2).
+    for (const w of [null, "wanted", "accepted_first", "kept_by_user"] as const) expect(expiryLine(w)).not.toMatch(/and the invite was withdrawn/);
   });
 
   test("an acceptance after the track ended: connected now, and the user may write by hand", () => {
-    const lines = linkedinTrackLines(track({ note: "none", acceptedAt: "2026-11-20T09:00:00.000Z", acceptedAfterFinish: true, withdrawal: "accepted_first" }, { finishReason: "invite_not_accepted" }), "sequence_finished_no_response", ZONE);
-    expect(lines).toContain("They accepted the invite on Fri 20 Nov, after this track had ended. You are connected now, and may want to write to them on LinkedIn yourself.");
+    const lines = linkedinTrackLines(track({ invite: "sent", note: "none", acceptedAt: "2026-11-20T09:00:00.000Z", acceptedAfterFinish: true, withdrawal: "accepted_first" }, { finishReason: "invite_not_accepted" }), "sequence_finished_no_response", ZONE);
+    expect(lines).toContain("Their acceptance of the invite was recorded after this track had ended; LinkedIn shows they had accepted it by Fri 20 Nov. You are connected now, and may want to write to them on LinkedIn yourself.");
   });
 
   test("an invite still open on LinkedIn is said once the lead no longer runs (Q38), never while it runs", () => {
@@ -58,6 +60,8 @@ describe("a LinkedIn track's facts on the record", () => {
     expect(linkedinTrackLines(open, "stopped_manually", ZONE)).toContain(INVITE_STILL_OPEN);
     expect(linkedinTrackLines(open, "replied", ZONE)).toContain(INVITE_STILL_OPEN);
     expect(linkedinTrackLines(open, "active", ZONE)).not.toContain(INVITE_STILL_OPEN);
+    // Every other ending of the track leaves it open too (item 6): a finished track says so whatever the lead's status.
+    expect(linkedinTrackLines(track({ note: "with", inviteOpen: true }, { finishReason: "dropped_for_win_back" }), "in_win_back", ZONE)).toContain(INVITE_STILL_OPEN);
     // An expiry's withdrawal, stuck or not, is said by its own line, never as left open by a stop.
     expect(linkedinTrackLines(track({ inviteOpen: true, withdrawal: "wanted", withdrawalStuck: true }, { finishReason: "invite_not_accepted" }), "sequence_finished_no_response", ZONE)).not.toContain(INVITE_STILL_OPEN);
   });
@@ -78,6 +82,18 @@ describe("a LinkedIn track's facts on the record", () => {
   });
 });
 
+describe("nothing is said as done before the engine records it (council on dee365d, item 11)", () => {
+  test("an invite handed over with its answer unknown: no note said as gone, the unresolved state said instead", () => {
+    const lines = linkedinTrackLines(track({ invite: "handed", note: "with" }), "active", ZONE);
+    expect(lines).toEqual([INVITE_HANDED]);
+    expect(lines.join(" ")).not.toMatch(/invite went|was sent|accepted the|was withdrawn|connected to them/);
+  });
+  test("the note as it went only with the invite recorded sent", () => {
+    expect(linkedinTrackLines(track({ invite: "sent", note: "withheld" }), "active", ZONE)).toEqual([noteLine("withheld")]);
+    expect(linkedinTrackLines(track({ invite: null, note: "with" }), "active", ZONE)).toEqual([]);
+  });
+});
+
 describe("Needs attention's LinkedIn entries (Today)", () => {
   test("a withdrawal LinkedIn keeps answering unknown: named, with its campaign and count, linking to the record for the two answers", () => {
     const stuck = [{ ...LEAD, enrollmentId: "e1", trackId: "li", unknownAnswers: 3 }];
@@ -90,7 +106,7 @@ describe("Needs attention's LinkedIn entries (Today)", () => {
   });
 
   test("a LinkedIn step waiting for sending capacity is said in LinkedIn's words, never an empty clause (a part a gap)", () => {
-    const items = attentionItems({ ...NOTHING, waitingForCapacity: [{ ...LEAD, enrollmentId: "e1", campaignId: "c1", trackId: "li", stepId: "i1", channel: "linkedin", dueAt: "2026-11-02T09:00:00.000Z", accountIds: ["linkedin:s1"], resetsAt: "2026-11-03T00:00:00.000Z" }] }, TODAY);
+    const items = attentionItems({ ...NOTHING, waitingForCapacity: [{ ...LEAD, enrollmentId: "e1", campaignId: "c1", trackId: "li", stepId: "i1", channel: "linkedin", dueAt: "2026-11-02T09:00:00.000Z", accountIds: ["linkedin:s1"], resetsAt: "2026-11-03T00:00:00.000Z" , action: null, noAllowance: false}] }, TODAY);
     expect(items[0]?.body).toMatch(/LinkedIn/);
     expect(items[0]?.body).not.toMatch(/due {2}|due waits/);
   });

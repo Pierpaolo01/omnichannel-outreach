@@ -153,19 +153,33 @@ function reachWording(kind: EditChangeKind, paused: boolean): string {
 }
 
 /** What the change does to the leads, from the server's counts; each count is said only when it is not zero. */
-function whatItDoes(change: EditImpactChange, paused: boolean): string {
+/**
+ * What a changed wait does, by the step's role (council on dee365d, item 5): a LinkedIn track's first message waits from
+ * the connection (the acceptance, or the check that found one), as its inspector says; every other step from the message
+ * before it.
+ */
+export function stepWaitReach(change: Pick<EditImpactChange, "trackId" | "stepId">, draft: CampaignDefinition): string {
+  const track = draft.tracks.find((t) => t.id === change.trackId);
+  const index = track ? liveSteps(track).findIndex((s) => s.id === change.stepId) : -1;
+  if (track?.channel === "linkedin" && index === 1) return "will wait the new time before it, counted from when they accept the invite, or from the connection your session already had";
+  return "will wait the new time before it, counted from their last message";
+}
+
+export function whatItDoes(change: EditImpactChange, paused: boolean, draft?: CampaignDefinition): string {
   const parts: string[] = [];
   const removal = change.kind === "step_removed" || change.kind === "track_removed";
-  if (change.reaches > 0) parts.push(`${plural(change.reaches, "lead", "leads")} ${reachWording(change.kind, paused)}`);
+  if (change.reaches > 0) parts.push(`${plural(change.reaches, "lead", "leads")} ${change.kind === "step_wait" && draft ? stepWaitReach(change, draft) : reachWording(change.kind, paused)}`);
   if (change.skips > 0) parts.push(`${plural(change.skips, "lead", "leads")} not there yet will skip it`);
   if (change.inFlight > 0) parts.push(`${plural(change.inFlight, "lead has", "leads have")} it with the provider now, so it goes as it was`);
   if (change.untouched > 0) {
     if (change.trackId === null) parts.push(`${plural(change.untouched, "lead has", "leads have")} ended`);
     else parts.push(`${plural(change.untouched, "lead is", "leads are")} past it or finished${removal && change.kind === "track_removed" ? ", and keep what they started" : ""}`);
   }
-  if (parts.length === 0) return "No lead is affected.";
+  // Removing a LinkedIn track leaves an invite already sent open on LinkedIn (council on dee365d, item 6).
+  const openAfter = change.kind === "track_removed" && draft?.tracks.find((t) => t.id === change.trackId)?.channel === "linkedin" ? " An invite already sent stays open on LinkedIn: removing the track doesn’t withdraw it." : "";
+  if (parts.length === 0) return `No lead is affected.${openAfter}`;
   const sentence = parts.join("; ");
-  return `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`;
+  return `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.${openAfter}`;
 }
 
 /** The read's instant in the campaign's own zone, named, never the browser's (as every screen states a time). */
@@ -259,7 +273,7 @@ export function RunningChanges({ campaignId, editor, paused, onDiscarded }: { ca
                       <span className="font-semibold">{changeName(change, editor.draft, editor.view.definition)}</span>
                       <span className="text-ink-2"> · {whatChanged(change, editor.draft)}</span>
                     </span>
-                    <span className="text-ink-2">{whatItDoes(change, paused)}</span>
+                    <span className="text-ink-2">{whatItDoes(change, paused, editor.draft)}</span>
                   </li>
                 ))}
               </ul>

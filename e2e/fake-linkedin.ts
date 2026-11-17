@@ -65,9 +65,11 @@ export const LINKEDIN_DEFINITION: CampaignDefinition = { timezone: "Europe/Londo
  * test profile saved. `running`: launched, Wednesday noon (Pat connected, Nia and Ivo waiting for acceptance, Ola stopped
  * with her invite open, a second campaign skipping Pat). `later`: the same, Friday noon (Nia's withdrawal stuck at unknown,
  * Ivo's acceptance recorded after his track ended). `testing`: `ready`, with a test run whose invite went to the test profile
- * and waits for the user to accept it.
+ * and waits for the user to accept it. `test-stuck`: `ready`, with a test run whose invite was never accepted and whose
+ * withdrawal LinkedIn keeps answering unknown, so the run finished with its withdrawal stuck. `launched`: `running`, read on
+ * Monday at 10:00, its first day.
  */
-export type LinkedinScenario = "fresh" | "ready" | "testing" | "running" | "later";
+export type LinkedinScenario = "fresh" | "ready" | "testing" | "test-stuck" | "launched" | "running" | "later";
 
 export interface FakeLinkedinApp {
   readonly url: string;
@@ -82,13 +84,17 @@ export interface FakeLinkedinApp {
 const started = new Map<string, Promise<FakeLinkedinApp>>();
 
 /** One app per name and test worker, seeded once. */
-export function fakeLinkedinApp(scenario: LinkedinScenario, name: string = scenario): Promise<FakeLinkedinApp> {
+/** The session's allowances: the world's own unless given; `null` leaves them never set (ADR 0004 1.2: no default). */
+type Allowances = { readonly invitesPerDay: number; readonly messagesPerDay: number; readonly notesPerMonth: number } | null;
+const WORLD_ALLOWANCES: Allowances = { invitesPerDay: 20, messagesPerDay: 20, notesPerMonth: 1 };
+
+export function fakeLinkedinApp(scenario: LinkedinScenario, name: string = scenario, allowances: Allowances = WORLD_ALLOWANCES): Promise<FakeLinkedinApp> {
   let app = started.get(name);
-  if (!app) started.set(name, (app = start(scenario)));
+  if (!app) started.set(name, (app = start(scenario, allowances)));
   return app;
 }
 
-async function start(scenario: LinkedinScenario): Promise<FakeLinkedinApp> {
+async function start(scenario: LinkedinScenario, allowances: Allowances): Promise<FakeLinkedinApp> {
   const h = new EngineHarness({
     start: LI_MONDAY_8 - H,
     accounts: [{ id: FAKE_INBOX, capacity: 30, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
@@ -96,8 +102,10 @@ async function start(scenario: LinkedinScenario): Promise<FakeLinkedinApp> {
   });
   await h.tick();
   // The user's allowances for the simulated session (ADR 0004 1.2: no default). One note a month, so later invites go without it.
-  const set = await h.request("PUT", `/api/sender-accounts/${SESSION_ID}/allowances`, { invitesPerDay: 20, messagesPerDay: 20, notesPerMonth: 1 });
-  if (set.status !== 200) throw new Error(`allowances refused: ${JSON.stringify(set.body)}`);
+  if (allowances !== null) {
+    const set = await h.request("PUT", `/api/sender-accounts/${SESSION_ID}/allowances`, allowances);
+    if (set.status !== 200) throw new Error(`allowances refused: ${JSON.stringify(set.body)}`);
+  }
   h.linkedin.profiles.set(PROFILES.pat, { acceptAfterMs: 26 * H });
   h.linkedin.profiles.set(PROFILES.nia, { withdrawUnknown: 50 });
   h.linkedin.profiles.set(PROFILES.sam, { connected: true });
@@ -110,18 +118,19 @@ async function start(scenario: LinkedinScenario): Promise<FakeLinkedinApp> {
   const enrollment = async (name: string, campaignId = campaign.id) => (await rows()).find((r) => r.name === name)?.enrollments.find((e) => e.campaign.id === campaignId)?.id ?? "";
   let second: string | null = null;
   if (scenario !== "fresh") await h.defineSequence(campaign.id, LINKEDIN_DEFINITION);
-  if (scenario === "ready" || scenario === "testing") {
+  if (scenario === "ready" || scenario === "testing" || scenario === "test-stuck") {
     const contacts = await h.request("PUT", `/api/campaigns/${campaign.id}/test-contacts`, { email: "", mobile: "", linkedin: TEST_PROFILE });
     if (contacts.status !== 200) throw new Error(`test profile refused: ${JSON.stringify(contacts.body)}`);
   }
-  if (scenario === "testing") {
+  if (scenario === "test-stuck") h.linkedin.profiles.set(TEST_PROFILE, { withdrawUnknown: 500 });
+  if (scenario === "testing" || scenario === "test-stuck") {
     const tab = (await h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${campaign.id}/test-runs`)).body;
     h.clock = LI_MONDAY_8 + H + 30 * MIN;
     const run = await h.request("POST", `/api/campaigns/${campaign.id}/test-runs`, { requestId: "li-test-1", renderAs: await enrollment("Pat Oneil"), expect: { definitionVersion: tab.definitionVersion } });
     if (run.status !== 200) throw new Error(`test run refused: ${JSON.stringify(run.body)}`);
-    await h.advanceTo(h.clock + 10 * MIN);
+    await h.advanceTo(h.clock + (scenario === "test-stuck" ? 4 * DAY : 10 * MIN));
   }
-  if (scenario === "running" || scenario === "later") {
+  if (scenario === "launched" || scenario === "running" || scenario === "later") {
     h.clock = LI_MONDAY_8;
     const launched = await h.launch(campaign.id);
     if (launched.status !== 200) throw new Error(`launch refused: ${JSON.stringify(launched.body)}`);
@@ -140,7 +149,7 @@ async function start(scenario: LinkedinScenario): Promise<FakeLinkedinApp> {
     if (again.status !== 200) throw new Error(`second launch refused: ${JSON.stringify(again.body)}`);
     // Wednesday noon: Pat accepted on Tuesday and has their first message. Through Friday noon ("later"): Nia's wait ended
     // and LinkedIn keeps answering "unknown" to the withdrawal; Ivo accepted late, after his track had ended.
-    await h.advanceTo(LI_MONDAY_8 + (scenario === "later" ? 4 : 2) * DAY + 4 * H);
+    await h.advanceTo(scenario === "launched" ? LI_MONDAY_8 + 2 * H : LI_MONDAY_8 + (scenario === "later" ? 4 : 2) * DAY + 4 * H);
   }
   return { url: await serveHarness(h), h, campaign: campaign.id, second, person, enrollment };
 }

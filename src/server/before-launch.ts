@@ -14,6 +14,7 @@ import type { AccountState, CallDay, SubjectState } from "../domain/sequence/sta
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
 import { trackLabel, trackPhrase } from "../shared/track-label.ts";
 import type { Rules } from "./engine/rules.ts";
+import { kindsView } from "./engine/views.ts";
 import { projectLoad, type Projection, type ProjectionStop } from "./load-projection.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
@@ -144,11 +145,13 @@ function poolAccounts(definition: CampaignDefinition, all: readonly AccountState
 function withheldTracks(definition: CampaignDefinition, all: readonly AccountState[]): WithheldTrack[] {
   return liveTracks(definition, "main").flatMap((t): WithheldTrack[] => {
     if (t.channel === "call") return [];
+    // Ticket 24b: the projection does not run LinkedIn's connection check, so it would never hand an invite over and would
+    // say leads never start. Until it models LinkedIn, a live LinkedIn track withholds the figure as not modelled, with a
+    // session or without one (council on dee365d, item 1): a session would bring no figure, and the missing session is
+    // the launch blocker's to say.
+    if (t.channel === "linkedin") return [{ trackId: t.id, channel: t.channel, label: trackPhrase(definition, t), why: "not_modelled" }];
     const connected = all.some((a) => a.channel === t.channel && poolOf(definition, t.channel).includes(a.id));
-    if (!connected) return [{ trackId: t.id, channel: t.channel, label: trackPhrase(definition, t), why: "no_sender" }];
-    // Ticket 24b: the projection does not run LinkedIn's connection check, so it would never hand an invite over and
-    // would say leads never start. Until it models LinkedIn, a live LinkedIn track withholds the figure, said as such.
-    return t.channel === "linkedin" ? [{ trackId: t.id, channel: t.channel, label: trackPhrase(definition, t), why: "not_modelled" }] : [];
+    return connected ? [] : [{ trackId: t.id, channel: t.channel, label: trackPhrase(definition, t), why: "no_sender" }];
   });
 }
 
@@ -230,6 +233,11 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
     }
   }
   const others = [...competing.subjects, ...holders];
+  // A campaign competing for these senders with a live LinkedIn track (council on dee365d, item 8): the projection would
+  // simulate it without its LinkedIn work, so what starts after that track never would, and this figure would be too
+  // low. It is withheld, naming that campaign and track.
+  const linkedinElsewhere = await linkedinTracksOf(store, others);
+  if (linkedinElsewhere.length > 0) return { projection: null, withheldBy: { tracks: linkedinElsewhere }, callsNotCounted: [], held: [] };
   const held = await unsettled(store, [...others, ...leads.map((l) => l.state)], competing.reach);
   if (held.length > 0) return { projection: null, withheldBy: null, callsNotCounted: [], held };
   const nameOf = async (id: string) => ({ id, name: (await store.campaign(id))?.name ?? "" });
@@ -252,6 +260,22 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
   const { stop } = projection;
   if (stop.reason === "bound") return { projection: null, stoppedEarly: "bound", stop, withheldBy: null, callsNotCounted, held: [] };
   return { projection, stoppedEarly: stop.reason === "horizon" ? "horizon" : null, stop, withheldBy: null, callsNotCounted, held: [] };
+}
+
+/** Each live LinkedIn track of the campaigns `subjects` belong to, once per campaign, named with its campaign. */
+async function linkedinTracksOf(store: OutreachStore, subjects: readonly SubjectState[]): Promise<WithheldTrack[]> {
+  const seen = new Set<string>();
+  const out: WithheldTrack[] = [];
+  for (const s of subjects) {
+    if (seen.has(s.campaign.id)) continue;
+    seen.add(s.campaign.id);
+    const def = s.campaign.definition;
+    const tracks = [...liveTracks(def, "main"), ...liveTracks(def, "win_back")].filter((t) => t.channel === "linkedin");
+    if (tracks.length === 0) continue;
+    const name = (await store.campaign(s.campaign.id))?.name ?? "";
+    for (const t of tracks) out.push({ trackId: t.id, channel: "linkedin", label: trackPhrase(def, t), why: "not_modelled", campaign: s.subject.kind === "test_run" ? `the test run of ${name}` : name });
+  }
+  return out;
 }
 
 /** The accounts a running subject may use: its campaign's pools, its fixed senders and its live attempts'. */
@@ -367,6 +391,7 @@ async function loadProjection(store: OutreachStore, campaignId: string, definiti
       usedToday: a.used,
       busiestDay: projection?.busiestDay.get(a.id) ?? 0,
       gapSeconds: Math.round(a.gapMs / 1000),
+      ...(a.kinds ? { kinds: kindsView(a.kinds) } : {}),
     })),
     daysUntilAllStart: projection?.daysUntilAllStart ?? null,
     // Said without a count: the run that finds it stopped at the horizon.

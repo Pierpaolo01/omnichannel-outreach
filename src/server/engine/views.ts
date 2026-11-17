@@ -3,14 +3,15 @@ import { stepNumber } from "../../domain/sequence/definition.ts";
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { carriedInto, isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
-import { accountAvailable, candidatesFor, claimRefusal, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
+import { linkedinStepKind, socialActionOf } from "../../domain/sequence/definition.ts";
+import { accountAvailable, candidatesFor, claimRefusal, forAction, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
 import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
 import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
-import { invitePendingUntil, inviteWithdrawalStuck, channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
+import { inviteOpenOn, invitePendingUntil, inviteWithdrawalStuck, channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
-import type { LinkedinTrackView, AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi } from "../../shared/api.ts";
+import type { LinkedinTrackView, AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi, SessionKinds } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -153,7 +154,7 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
 function nextStepOf(s: SubjectState, trackId: string, numberOf: (stepId: string) => number, now: number, env: StepEnv, read: typeof stepWhen): EnrollmentProgress["tracks"][number]["nextStep"] {
   const p = s.tracks.find((x) => x.trackId === trackId);
   const when = read(s, trackId, now, env);
-  return p?.nextStepId && when ? { stepId: p.nextStepId, number: numberOf(p.nextStepId), when: stepWhenView(when, now, s.callDay.day, channelOfTrack(s, trackId)) } : null;
+  return p?.nextStepId && when ? { stepId: p.nextStepId, number: numberOf(p.nextStepId), when: stepWhenView(when, now, s.callDay.day, channelOfTrack(s, trackId), { state: s, trackId }) } : null;
 }
 
 /** A branch's tracks for the lead: not removed, or already started by it (5.1). */
@@ -177,7 +178,13 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
     gapSeconds: Math.round(a.gapMs / 1000),
     usedToday: a.used,
     waiting: a.waitReason,
+    ...(a.kinds ? { kinds: kindsView(a.kinds) } : {}),
   };
+}
+
+/** A LinkedIn session's room per kind (council on dee365d, item 4), as the engine counts it (`AccountState.kinds`). */
+export function kindsView(kinds: NonNullable<AccountState["kinds"]>): SessionKinds {
+  return { invite: { capacity: kinds.invite.capacity, usedToday: kinds.invite.used }, message: { capacity: kinds.message.capacity, usedToday: kinds.message.used } };
 }
 
 /**
@@ -224,7 +231,7 @@ export async function needsAttention(
         canMarkNotSent: w.lookupAnswer !== "queued",
       });
     }
-    heldCapacity.push({ accountId: acc.id, held: held.length, capacity: acc.capacity, sentToday: await store.sentToday(acc.id, now), work });
+    heldCapacity.push({ accountId: acc.id, channel: acc.channel, held: held.length, capacity: acc.capacity, sentToday: await store.sentToday(acc.id, now), work });
   }
   const heldTracks: EngineNeedsAttention["heldTracks"][number][] = [];
   const waitingForCapacity: EngineNeedsAttention["waitingForCapacity"][number][] = [];
@@ -247,7 +254,9 @@ export async function needsAttention(
     for (const item of readyItems(s, now)) {
       if (claimRefusal(s, item, now) !== null) continue;
       const channel = channelOf(s, item.trackId);
-      if (channel !== "email" && channel !== "sms") continue;
+      // LinkedIn too (council on dee365d, item 4), each session judged by the step's own kind of action (`forAction`).
+      if (channel !== "email" && channel !== "sms" && channel !== "linkedin") continue;
+      const action = socialActionOf(linkedinStepKind(s.campaign.definition.tracks.find((t) => t.id === item.trackId) ?? { channel, steps: [] }, item.stepId));
       const step = s.campaign.definition.tracks.find((t) => t.id === item.trackId)?.steps.find((x) => x.id === item.stepId);
       const base = { enrollmentId: id, trackId: item.trackId, stepId: item.stepId, channel, dueAt: new Date(item.dueWall).toISOString() };
       if (!transportAvailable(channel, step?.threading ?? "new_subject")) {
@@ -263,10 +272,12 @@ export async function needsAttention(
       if (inheritedWork(s, item.stepId)) continue;
       const usable = candidatesFor(s, item.trackId)
         .map((x) => s.accounts[x])
-        .filter((a): a is AccountState => a !== undefined && a.channel === channel && accountAvailable(a, now));
+        .filter((a): a is AccountState => a !== undefined && a.channel === channel && accountAvailable(a, now))
+        .map((a) => forAction(a, action));
       if (usable.length === 0 || usable.some((a) => a.used < a.capacity)) continue;
       const resetsAt = Math.min(...usable.map((a) => startOfLocalDay(localDayNumber(now, a.resetZone) + 1, a.resetZone)));
-      waitingForCapacity.push({ ...base, campaignId: s.campaign.id, accountIds: usable.map((a) => a.id).sort(), resetsAt: new Date(resetsAt).toISOString() });
+      // A LinkedIn step whose kind no session allows at all (item 15): no reset brings room, so the read says so.
+      waitingForCapacity.push({ ...base, campaignId: s.campaign.id, accountIds: usable.map((a) => a.id).sort(), resetsAt: new Date(resetsAt).toISOString(), action, noAllowance: action !== null && usable.every((a) => a.capacity <= 0) });
     }
   }
   // Ticket 20a (follow-up 42 item 50): every lead that ended with no usable channel, from any cause, most recent first,
@@ -335,9 +346,10 @@ const earliest = (ts: readonly number[]): number | null => (ts.length === 0 ? nu
 export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTrackView {
   const p = s.tracks.find((x) => x.trackId === trackId);
   const invite = s.work.find((w) => w.trackId === trackId && w.kind === "invite" && w.firstHandedWall !== null && w.settled !== "rejected");
-  const sent = invite !== undefined && (invite.settled === "sent" || invite.settled === "user_sent" || invite.sentWall !== null);
   const withdrawal = p?.inviteWithdrawal ?? null;
+  const sent = invite !== undefined && (invite.settled === "sent" || invite.settled === "user_sent" || invite.sentWall !== null);
   return {
+    invite: sent ? "sent" : invite !== undefined && invite.settled === null ? "handed" : null,
     note: invite?.note ?? null,
     connection: p?.connection ?? null,
     connectedAt: iso(p?.connectedWall ?? null),
@@ -345,7 +357,7 @@ export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTra
     acceptedAfterFinish: p?.acceptedWall != null && p.finishedWall != null && (p.connection ?? null) === null,
     withdrawal,
     withdrawalStuck: p ? inviteWithdrawalStuck(p) : false,
-    inviteOpen: sent && p?.acceptedWall == null && (p?.connection ?? null) === null && withdrawal !== "withdrawn" && withdrawal !== "accepted_first",
+    inviteOpen: inviteOpenOn(s, trackId),
     // While the track holds as pending elsewhere (every session it may use pending): the earliest any of them saw it.
     pendingElsewhereSince: iso(invitePendingUntil(s, trackId) === null ? null : earliest(Object.values(p?.connectionChecks ?? {}).flatMap((c) => (c.pendingSince === null ? [] : [c.pendingSince])))),
   };

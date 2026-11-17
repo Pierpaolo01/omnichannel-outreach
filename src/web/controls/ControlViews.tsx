@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { CampaignPauseRead, ControlAnswer, LeadControlApi, OutreachStatus, RecordLead, StatusGroup } from "../../shared/api.ts";
 import { GroupCounts } from "../status.tsx";
 import { Icon } from "../icons.tsx";
+import { useFocusRescue } from "../focusRescue.ts";
 import { statusGroup } from "../../domain/outreach-status.ts";
 import type { Controls } from "./useControls.ts";
 import type { ControlTarget, RecordControl } from "./requests.ts";
@@ -208,7 +209,27 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   // The confirmation open, as a snapshot of the read it opened on (council on 57d874f, item 1): what it shows and sends.
   const [opened, setOpened] = useState<LeadConfirmation | null>(null);
   const [linkedinOpened, setLinkedinOpened] = useState<LinkedinConfirmation | null>(null);
-  const linkedinTrigger = useRef<HTMLButtonElement | null>(null);
+  // Why a LinkedIn confirmation closed under the user (council on dee365d, item 10): said, never silent.
+  const [linkedinClosed, setLinkedinClosed] = useState<string | null>(null);
+  // The LinkedIn presses' buttons by key, so focus returns to the one that opened a confirmation once it is drawn again
+  // (council on dee365d, item 12): the button is not on the page while its confirmation is open.
+  const linkedinButtons = useRef(new Map<string, HTMLButtonElement>());
+  const focusBack = useRef<string | null>(null);
+  const closedRef = useRef<HTMLParagraphElement | null>(null);
+  const rescue = useFocusRescue();
+  // After each render: a cancelled confirmation's button, once it is drawn again, takes focus back.
+  useEffect(() => {
+    const key = focusBack.current;
+    if (key === null) return;
+    const el = linkedinButtons.current.get(key);
+    if (el?.isConnected) {
+      el.focus();
+      focusBack.current = null;
+    }
+  });
+  useEffect(() => {
+    if (linkedinClosed !== null) closedRef.current?.focus();
+  }, [linkedinClosed]);
   // The withdrawal answers the read asks for (ADR 0004 3.3), one pair per LinkedIn track whose withdrawal is stuck.
   const stuck = lead.tracks.filter((t) => t.linkedin?.withdrawalStuck === true);
   const [unstored, setUnstored] = useState(false);
@@ -259,6 +280,8 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   // A LinkedIn confirmation whose press the read no longer offers closes; focus stays in the row.
   if (linkedinOpened !== null && !linkedinStillOffered(linkedinOpened, lead) && controls.pending(target) === null) {
     setLinkedinOpened(null);
+    setRefocus(false);
+    setLinkedinClosed(linkedinOpened.action === "mark_replied" ? "This lead changed since you opened this, so it was closed. Nothing was marked." : "The withdrawal was settled since you opened this, so it was closed. Nothing was marked.");
     setRefocus(true);
   }
   const confirmLinkedin = (c: LinkedinConfirmation) => {
@@ -274,7 +297,8 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
   };
 
   return (
-    <>
+    // Anything a read removes from under focus falls back to the best control left, not the page (item 12).
+    <div ref={rescue} className="contents">
       {mayStillSendText(lead.mayStillSend) && <p className="text-[14px] text-ink-2">{mayStillSendText(lead.mayStillSend)}</p>}
       {reasons.map((r) => (
         <p key={r} className="text-[13.5px] text-muted [overflow-wrap:anywhere]">
@@ -333,9 +357,9 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
             <button
               type="button"
               ref={(el) => {
-                linkedinTrigger.current = el;
-                if (offered.length === 0) firstControl.current = el;
+                if (el) linkedinButtons.current.set("mark_replied", el);
               }}
+              data-rescue="2"
               aria-label={label("mark_replied")}
               disabled={busy}
               className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium"
@@ -343,6 +367,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
                 controls.dismiss(target);
                 setUnstored(false);
                 setRefocus(false);
+                setLinkedinClosed(null);
                 setLinkedinOpened({ action: "mark_replied", status: lead.status });
               }}
             >
@@ -358,15 +383,19 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
             WITHDRAWAL_ANSWERS.map((a) => (
               <button
                 key={`${t.trackId}-${a.answer}`}
+                ref={(el) => {
+                  if (el) linkedinButtons.current.set(`${a.answer}:${t.trackId}`, el);
+                }}
+                data-rescue="2"
                 type="button"
                 aria-label={`${a.label}: the LinkedIn invite to ${who} in ${campaignName}`}
                 disabled={busy}
                 className="btn btn-sm border-line-strong bg-base-100 font-medium"
-                onClick={(e) => {
-                  linkedinTrigger.current = e.currentTarget;
+                onClick={() => {
                   controls.dismiss(target);
                   setUnstored(false);
                   setRefocus(false);
+                  setLinkedinClosed(null);
                   setLinkedinOpened({ action: a.answer === "withdrawn" ? "invite_withdrawn" : "invite_kept", trackId: t.trackId, status: lead.status });
                 }}
               >
@@ -376,6 +405,11 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
           )}
         </div>
       )}
+      {linkedinClosed !== null && !linkedinOpened && (
+        <p ref={closedRef} tabIndex={-1} data-rescue="1" role="status" className="rounded-field bg-pause-soft px-4 py-2.5 text-[14px] text-base-content outline-offset-4">
+          {linkedinClosed}
+        </p>
+      )}
       {linkedinOpened && (
         <ConfirmStrip
           text={linkedinConfirmText(linkedinOpened)}
@@ -383,8 +417,9 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
           busy={busy ? "Another change to this lead is on its way." : null}
           onConfirm={() => confirmLinkedin(linkedinOpened)}
           onCancel={() => {
+            const back = linkedinOpened.action === "mark_replied" ? "mark_replied" : `${linkedinOpened.action === "invite_withdrawn" ? "withdrawn" : "kept"}:${linkedinOpened.trackId}`;
+            focusBack.current = back;
             setLinkedinOpened(null);
-            requestAnimationFrame(() => (linkedinTrigger.current ?? firstControl.current)?.focus());
           }}
         />
       )}
@@ -404,7 +439,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
           }}
         />
       )}
-    </>
+    </div>
   );
 }
 

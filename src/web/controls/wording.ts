@@ -13,6 +13,7 @@ import { callHoldSentence, dateIn, holdReasonClause, HOURS_CLOSED_PHRASE, listed
 import { dayLabel } from "../calls/callbackTime.ts";
 import { STATUS_GROUP_LABEL } from "../status.tsx";
 import type { RecordControl } from "./requests.ts";
+import { INVITE_STAYS_OPEN } from "../campaign/linkedin-wording.ts";
 
 export type AllowedControl = Extract<ControlView, { readonly allowed: true }>;
 
@@ -104,8 +105,9 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
       return "on hold while their callback is open";
     case "ended":
       return "not going: their outreach in this campaign has ended";
+    // Handed over and not yet reported (council on dee365d, item 11): never a promise that it will go.
     case "with_provider":
-      return "already handed to the provider, which sends it";
+      return "handed to the provider; it isn’t known yet whether it went";
     case "unresolved":
     case "render_failed":
     case "provider_skipped":
@@ -137,6 +139,9 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
       return "waiting for a sender account that can send";
     case "sending_capacity":
       return "waiting for sending capacity: every account it may use is full today";
+    // Item 15: no session it may use has any allowance of the step's kind, so nothing resets it and no time is given.
+    case "no_allowance":
+      return "waiting: no LinkedIn session it may use has an allowance for this kind of step";
     case "call_capacity":
       return "waiting for room on your call list, on a day with calling hours";
     case "on_call_list":
@@ -310,11 +315,11 @@ export function controlPreviewText(control: AllowedControl, campaign: RecordLead
     }
     case "stop":
       // Q38's interim (ADR 0004 3.4): a stop never withdraws a LinkedIn invite already sent, so the confirmation says so.
-      return join("Their outreach in this campaign stops: nothing more goes out and no call is listed. What was sent stays on record.", provider, inviteOpen ? "The LinkedIn invite already sent stays open on LinkedIn: stopping doesn’t withdraw it." : null);
+      return join("Their outreach in this campaign stops: nothing more goes out and no call is listed. What was sent stays on record.", provider, inviteOpen ? INVITE_STAYS_OPEN.stop : null);
     case "resume_from_next_step":
       return join(next ? `They resume at the next unsent step: ${stepPhrase(next)}${due(next.when, userZone)}.` : "They resume at the next unsent step.", campaign.paused ? "It waits while this campaign is paused." : null, "Nothing already sent goes again.");
     case "move_to_win_back":
-      return join(next ? `They move to this campaign’s win-back branch, starting with ${stepPhrase(next)}${due(next.when, userZone)}.` : "They move to this campaign’s win-back branch.", campaign.paused ? "It waits while this campaign is paused." : null, "Their remaining main-sequence steps are dropped.");
+      return join(next ? `They move to this campaign’s win-back branch, starting with ${stepPhrase(next)}${due(next.when, userZone)}.` : "They move to this campaign’s win-back branch.", campaign.paused ? "It waits while this campaign is paused." : null, "Their remaining main-sequence steps are dropped.", inviteOpen ? INVITE_STAYS_OPEN.move_to_win_back : null);
     default: {
       const unhandled: never = control.action;
       throw new Error(`A control with no preview: ${String(unhandled)}`);

@@ -36,7 +36,8 @@ export function openLeadConfirmation(lead: RecordLead, action: LeadControlApi): 
 export function confirmationChanged(opened: LeadConfirmation, lead: RecordLead): boolean {
   const now = allowedIn(lead, opened.action);
   if (!now) return true;
-  return JSON.stringify(now) !== JSON.stringify(opened.control) || JSON.stringify(expectationOf(lead, now)) !== JSON.stringify(opened.expect) || lead.campaignState.paused !== opened.campaignState.paused;
+  // The open invite is part of what the confirmation says (council on dee365d, item 7), and of the digest the server checks.
+  return JSON.stringify(now) !== JSON.stringify(opened.control) || JSON.stringify(expectationOf(lead, now)) !== JSON.stringify(opened.expect) || lead.campaignState.paused !== opened.campaignState.paused || lead.tracks.some((t) => t.linkedin?.inviteOpen === true) !== opened.inviteOpen;
 }
 
 export interface CampaignConfirmation {

@@ -8,8 +8,12 @@ import type { KeyValue } from "../calls/callDesk.ts";
  */
 export interface TestRunPress {
   readonly v: 1;
-  /** Run test, Stop test, or the run's LinkedIn reply mark (ticket 24b). */
-  readonly kind: "run" | "stop" | "reply";
+  /** Run test, Stop test, the run's LinkedIn reply mark, or an answer to its stuck withdrawal (ticket 24b). */
+  readonly kind: "run" | "stop" | "reply" | "withdrawn" | "kept";
+  /** The test run a reply mark or a withdrawal answer was confirmed on (council on dee365d, item 10): its route names it. */
+  readonly runId?: string;
+  /** That run was still running when the mark was confirmed: only then does its answer say the test stopped. */
+  readonly wasRunning?: boolean;
   readonly requestId: string;
   readonly path: string;
   readonly body: unknown;
@@ -33,7 +37,7 @@ export function pendingPress(store: KeyValue, campaignId: string): TestRunPress 
     const value: unknown = JSON.parse(text);
     if (typeof value !== "object" || value === null) return null;
     const p = value as Partial<TestRunPress>;
-    return p.v === 1 && (p.kind === "run" || p.kind === "stop" || p.kind === "reply") && typeof p.requestId === "string" && typeof p.path === "string" && typeof p.pressedAt === "number" ? (p as TestRunPress) : null;
+    return p.v === 1 && (p.kind === "run" || p.kind === "stop" || p.kind === "reply" || p.kind === "withdrawn" || p.kind === "kept") && typeof p.requestId === "string" && typeof p.path === "string" && typeof p.pressedAt === "number" ? (p as TestRunPress) : null;
   } catch {
     return null;
   }
