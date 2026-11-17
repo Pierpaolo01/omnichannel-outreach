@@ -411,7 +411,7 @@ The edit preview names the switch: "The InMail fallback is switched on/off", wit
 ### 13.10 Store
 
 Migration 25:
-- `track_progress.inmail` (`chosen`, `sent`, `no_plan`, `no_credit`, `refused`, `switched_off`, `skipped_by_user`), `inmail_session`; a trigger refuses a move other than null → any, `chosen` → any but null and `chosen`;
+- `track_progress.inmail` (`chosen`, `sent`, `accepted` (an acceptance came before the InMail was handed over), `no_plan`, `no_credit`, `refused`, `switched_off`, `skipped_by_user`), `inmail_session`; a trigger refuses a move other than null → any, `chosen` → any but null and `chosen`;
 - `provider_work.inmail` and `attempts.inmail` (0 or 1; 1 only with kind or action `message`): which message work is an InMail;
 - `sender_accounts.inmail_plan`, `inmail_credits`, `inmail_reported_wall`: the session's last report; an account sync that reports none leaves them as they were (a report is a fact of the session, never cleared by a listing that omits it).
 
@@ -464,6 +464,30 @@ Verified on the simulated provider only. Unverified until a Premium or Sales Nav
 - that a session can send an InMail, how LinkedIn answers when a recipient cannot receive one, and whether a credit is spent on any answer but a send;
 - whether LinkedIn lets the session send follow-up messages in an InMail thread before the recipient answers or connects (a refusal would be `not_connected`, failing the track as Q37's rule does, and the read says so);
 - the real test run of the fallback.
+
+### 13.14 As built (17 November 2026)
+
+- **Code.** `definition.ts`: `StepDefinition.role`, `inmailStepOf`, the step kind `inmail` (by role; the other steps by position among the steps that are not InMail steps), `SocialAction` `inmail` and `allowanceOf`, the validator's four refusals. `progress.ts`: `inviteExpired` with the fallback, `inmailNotSent` (the withdrawal path with its stored cause), `inmailStanding` (the one eligibility test), the gate per kind, `remainingSteps` (an InMail is ahead only once chosen), the InMail's send, an acceptance before it, its refusal, a switch-off in `alignPending`. `dispatch.ts`: `sessionsFor` selects for an InMail only its eligible session, and the reads' `inmail_unavailable` (`inmailUnavailable`) derive from that selection. The engine's pre-send check lets an InMail past its own invite's `pending` and holds it on `connected`.
+- **Store.** Migration 25. `provider_work.inmail` and `attempts.inmail` mark InMail work, while `kind` and `action` stay `message`, the allowance it spends. A session's report is stored by the account sync (`upsertAccounts` with the listing's instant). `AccountState.inmail` carries the reported credits, the InMails spent since the report, and the InMails committed by chosen tracks.
+- **Reads and screens.**
+  - `LinkedinTrackView.inmail`, `StepWhenView.inmail`, `StepProgressView.role`, `ControlStepView.role`, `ActivityEntry.role`, and the copy preview's `role`.
+  - `LinkedinMeasures.inmailsSent`.
+  - The inspector's switch and text (`InmailFallbackControl`).
+  - The record's `inmailLine` and `INMAIL_AT_THE_END`, Activity's reasons, the Test run tab's sentence and rows, and Copy for a lead.
+- **Found by the generated runs and fixed** (seed 24018): with the first message skipped while the lead waited, the walk had passed the InMail's position. So the pending-step alignment moved a chosen InMail to the next follow-up, which the gate then held for ever. A chosen InMail now stays ahead whatever was resolved after its position. The regression test is through HTTP ("a first message skipped while waiting for acceptance").
+- **Found in the record and fixed:**
+  - An edit at the deadline's own instant comes after that tick's judgment (24006).
+  - A session's credits are as its last report says: a signed-out session reports nothing (24016).
+  - An edit of the wait after the judgment moves nothing (24016).
+  - An InMail sent in the judging tick is not counted against its own judgment (24024).
+- **The generated runs.**
+  - The fallback is drawn from a third stream: the switch on at the start, sessions' reports, recipients that refuse, the switch toggled, the InMail's text edited, and credits spent by hand.
+  - A fourth stream draws a switch-off early in the run, and one while a chosen InMail waits to go.
+  - The first two streams are unchanged, and every earlier mutation is still killed at its recorded seed.
+  - Fixed seeds 4, 7, 16 and 24 join `pnpm check`: an InMail sent, a follow-up after it, and its text edited. "A withdrawal that finds the invite accepted", which the fixed seeds no longer reach, is pinned by an example test (`linkedin.test.ts`).
+  - Behaviours the fixed seeds do not reach are pinned by example tests (`linkedin-inmail.test.ts`): a skipped InMail, and an InMail waiting for a credit.
+  - Mutation seeds, found over offsets 0 to 29: L18 24, L19 16, L20 7, L21 18, L22 0, L23 24, L24 18, L25 7.
+- **No change for the fallback off, email, SMS or calls.** `scripts/no-inmail-digest.ts` gives the same digest on the tip `5c43963` and on this branch: `284e00a5982d36894e10ae87757f6773886c12fa3b40a26639284c6ae9869781`. That run is a LinkedIn track without the fallback, then email: 12 handovers, 11 deliveries, 2 acceptances, 4 withdrawals, 25 checks and 1 refusal. `scripts/no-social-digest.ts` still gives `eb4141e8…3708`.
 
 ## The review of `194fc44` (council, review bot and verifier, 16 November 2026)
 

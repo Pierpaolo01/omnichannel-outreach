@@ -19,8 +19,9 @@ export const LINKEDIN_SEED = 24000;
  */
 // 15 (ticket 24b, the search on a6c1700): a step no session it may use has any allowance for, read as no allowance; the
 // seed of the mutation "no allowance reads as full for the day".
-// 7, 16 and 24 (ticket 27, ADR 0004 13.11): an InMail sent (7, 16), and a follow-up after it (24), found over offsets 0 to 29.
-export const LINKEDIN_FIXED_SEEDS: readonly number[] = [5, 7, 8, 15, 16, 18, 24, 29, 46, 69, 73, 93];
+// 4, 7, 16 and 24 (ticket 27, ADR 0004 13.11): an InMail sent (7, 16), a follow-up after it (24), its text edited (4), found
+// over offsets 0 to 35.
+export const LINKEDIN_FIXED_SEEDS: readonly number[] = [4, 5, 7, 8, 15, 16, 18, 24, 29, 46, 69, 73, 93];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const LINKEDIN_FEATURES: readonly string[] = [
   "a-campaign-paused",
@@ -61,7 +62,6 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "a-third-session",
   "a-withdrawal-answered-unknown",
   "a-follow-up-after-an-inmail",
-  "a-withdrawal-found-it-accepted",
   "already-connected",
   "an-answer-of-one-session",
   "an-edit-of-the-wait-while-waiting",
@@ -78,8 +78,12 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "an-inmail-without-a-plan",
   "inmail-credits-spent-by-hand",
   "the-fallback-switched-off",
+  "the-fallback-switched-off-early",
+  "the-fallback-switched-off-while-an-inmail-waits",
   "the-fallback-switched-on",
   "the-withdrawal-path-after-an-inmail-refused",
+  "the-withdrawal-path-after-an-inmail-switched_off",
+  "an-inmail-switched-off-before-it-went",
   "connected-by-acceptance",
   "email-after-linkedin",
   "email-beside-linkedin",
@@ -90,12 +94,12 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "unresolved-marked-not-sent",
 ];
 /** Behaviours the runs can name that the fixed seeds do not reach, each pinned by an example test instead (`linkedin-review.test.ts`). */
-// The InMail fallback's (ticket 27): each pinned by `linkedin-inmail.test.ts` ("a running edit of the switch"; "a chosen
-// InMail that cannot go yet, and one the user skips").
+// Since ticket 27's draws: a skipped InMail and one waiting for a credit (`linkedin-inmail.test.ts`, "a chosen InMail that
+// cannot go yet, and one the user skips"), and a withdrawal that finds the invite accepted (`linkedin.test.ts`), which the
+// fixed seeds reached before the fallback was drawn.
 export const LINKEDIN_OTHER_FEATURES: readonly string[] = [
   "unresolved-marked-sent",
-  "an-inmail-switched-off-before-it-went",
-  "the-withdrawal-path-after-an-inmail-switched_off",
+  "a-withdrawal-found-it-accepted",
   "the-withdrawal-path-after-an-inmail-skipped_by_user",
   "an-inmail-waiting-for-a-credit",
 ];

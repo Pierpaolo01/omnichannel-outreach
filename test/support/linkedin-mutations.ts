@@ -72,7 +72,7 @@ function flag<K extends Flag>(name: K, value: (typeof progressRules)[K]): () => 
 }
 
 /** The InMail mutations' killing seed offsets (ticket 27), found over offsets 0 to 29; ADR 0004 13.11 records them. */
-const INMAIL_SEEDS = { L18: 0, L19: 0, L20: 0, L21: 0, L22: 0, L23: 0, L24: 0, L25: 0 } as const;
+const INMAIL_SEEDS = { L18: 24, L19: 16, L20: 7, L21: 18, L22: 0, L23: 24, L24: 18, L25: 7 } as const;
 
 /** The seed offset that reaches a step no session has any allowance for (the search's 24015 on a6c1700). */
 const NO_ALLOWANCE_SEED = 15;

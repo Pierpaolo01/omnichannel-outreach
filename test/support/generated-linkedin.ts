@@ -143,6 +143,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const rnd2 = random(seed * 7 + 13);
   // The InMail fallback (ticket 27, ADR 0004 13.11) draws from a third stream: the first two streams' draws are unchanged.
   const rnd3 = random(seed * 11 + 29);
+  // A fourth stream schedules an early switch-off (L19's case): the other streams' draws are unchanged.
+  const rnd4 = random(seed * 13 + 31);
   const features = new Set<string>();
   const problems: string[] = [];
   const problem = (text: string) => {
@@ -325,6 +327,13 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     const on = fallbackOn(d, ci);
     if (on !== fallbackAt(ci, h.clock)) switches.get(ci)!.push({ at: h.clock, on });
   };
+  /**
+   * The fallback switched off early, before most leads' deadlines, in a share of the campaigns that start with it on (L19:
+   * an InMail never goes for a lead whose wait ends after it), drawn from the fourth stream.
+   */
+  const earlyOff = new Map<number, number>(campaigns.flatMap((c, i) => (fallbackOn(c.definition, i) && rnd4() < 0.35 ? [[i, START + Math.floor((0.5 + rnd4() * 1.5) * DAY)] as const] : [])));
+  /** The fallback switched off while a chosen InMail waits to go (L25's case), in a share of the others, from the fourth stream. */
+  const offWhenChosen = new Set<number>(campaigns.flatMap((c, i) => (fallbackOn(c.definition, i) && !earlyOff.has(i) && rnd4() < 0.5 ? [i] : [])));
   /** The user spending a session's credits by hand (its credits at 0 from then): when, by session. */
   const creditDrops: { session: string; at: number }[] = [];
   /** Each sign-out: from when, until when it was drawn to last, and when the run actually restored it. */
@@ -460,6 +469,21 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     }
     await extraEvent(rnd2());
     await inmailEvent(rnd3());
+    for (const [ci, at] of [...earlyOff]) {
+      if (at > h.clock) continue;
+      earlyOff.delete(ci);
+      await switchOff(ci);
+    }
+    for (const ci of [...offWhenChosen]) {
+      for (const l of leads.filter((x) => x.campaign === ci)) {
+        const tp = (await h.store.engine.subject(l.id, h.clock))?.tracks.find((x) => x.trackId === campaigns[ci]!.li.id);
+        if (tp?.inmail !== "chosen" || h.linkedin.handoverLog.some((x) => x.subjectId === l.id && x.action === "inmail")) continue;
+        offWhenChosen.delete(ci);
+        await switchOff(ci);
+        features.add("the-fallback-switched-off-while-an-inmail-waits");
+        break;
+      }
+    }
     await check(false);
   }
   for (const s of signedOut) {
@@ -618,6 +642,18 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
         const at = li.deliveryLog.find((x) => x.subjectId === lead.id && x.action === "inmail")?.at ?? Infinity;
         if (first && li.deliveryLog.some((x) => x.subjectId === lead.id && x.stepId === first && x.at > at)) problem(`L23: ${lead.id}'s first message went after its InMail`);
       }
+    }
+  }
+
+  /** The fallback switched off for a campaign, if it is on: its InMail step removed. */
+  async function switchOff(ci: number): Promise<void> {
+    const c = campaigns[ci]!;
+    const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
+    if (!fallbackOn(stored, ci)) return;
+    const tracks = stored.tracks.map((t) => (t.id === c.li.id ? { ...t, steps: t.steps.map((s) => (s.role === "inmail" ? { ...s, removed: true } : s)) } : t));
+    if ((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, tracks })).status === 200) {
+      noteSwitch(ci, { ...stored, tracks });
+      features.add("the-fallback-switched-off-early");
     }
   }
 
