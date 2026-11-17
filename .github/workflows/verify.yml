@@ -1,5 +1,15 @@
 name: verify
 
+# The same checks as `pnpm check` (typecheck, lint, the unit suite, the browser suite), split into
+# parallel jobs so each fits well inside its limit. `check` is the one required result: it passes
+# only when every part passed. Each limit is about twice the part's measured time on CI's machines
+# (see docs/agents/delivery-workflow.md, "Continuous integration").
+#
+# The browser suite is sharded by file (playwright.config.ts keeps `fullyParallel: false`, so a
+# file's tests stay together, in order, in one shard). The demonstration is a dependency project:
+# Playwright runs it in full at the start of every shard, so each shard's database holds its data.
+# Each shard uses its own port and, through it, its own throwaway data folder.
+
 on:
   pull_request:
 
@@ -7,9 +17,50 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  static:
+    name: typecheck and lint
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+
+  unit:
+    name: unit suite ${{ matrix.shard }}/2
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Vitest shards by file.
+      - run: pnpm test --shard=${{ matrix.shard }}/2
+        env:
+          CI: "true"
+
+  browser:
+    name: browser suite ${{ matrix.shard }}/3
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -19,15 +70,32 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
-      # Typecheck, lint, Vitest and the Playwright browser tests.
-      - run: pnpm check
+      - run: pnpm test:e2e --shard=${{ matrix.shard }}/3
         env:
           CI: "true"
+          E2E_PORT: 432${{ matrix.shard }}
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.shard }}
           path: |
             playwright-report/
             test-results/
           retention-days: 7
+
+  # The required result. It runs whatever happened above and passes only if every part passed:
+  # a part that failed, was cancelled or was skipped fails it.
+  check:
+    if: always()
+    needs: [static, unit, browser]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Every part passed
+        env:
+          STATIC: ${{ needs.static.result }}
+          UNIT: ${{ needs.unit.result }}
+          BROWSER: ${{ needs.browser.result }}
+        run: |
+          echo "typecheck and lint: $STATIC; unit suite: $UNIT; browser suite: $BROWSER"
+          test "$STATIC" = success && test "$UNIT" = success && test "$BROWSER" = success
