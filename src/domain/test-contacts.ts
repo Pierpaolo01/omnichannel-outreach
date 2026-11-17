@@ -53,9 +53,10 @@ export function parseTestContacts(input: TestContactsInput): ParsedTestContacts 
  * keys `parseTestContacts` gives both: "+447700900456" and "+44 7700 900456" are one number, and an address's case is
  * not a difference. What cannot be read is unsaved, so Save stays offered and says why.
  */
-export function contactsUnsaved(typed: TestContactsInput, stored: { readonly email: string | null; readonly mobile: string | null }): boolean {
+export function contactsUnsaved(typed: TestContactsInput, stored: { readonly email: string | null; readonly mobile: string | null; readonly linkedin?: string | null }): boolean {
   const mine = parseTestContacts(typed);
-  const theirs = parseTestContacts({ email: stored.email ?? "", mobile: stored.mobile ?? "" });
+  // The test profile is compared only where the page offers it (ticket 24b): a page without the field leaves it as stored.
+  const theirs = parseTestContacts({ email: stored.email ?? "", mobile: stored.mobile ?? "", ...(typed.linkedin !== undefined ? { linkedin: stored.linkedin ?? "" } : {}) });
   if (!mine.ok || !theirs.ok) return true;
-  return mine.contacts.email?.key !== theirs.contacts.email?.key || mine.contacts.mobile?.key !== theirs.contacts.mobile?.key;
+  return mine.contacts.email?.key !== theirs.contacts.email?.key || mine.contacts.mobile?.key !== theirs.contacts.mobile?.key || (mine.contacts.linkedin ?? null)?.key !== (theirs.contacts.linkedin ?? null)?.key;
 }

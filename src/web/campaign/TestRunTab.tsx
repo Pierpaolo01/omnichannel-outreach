@@ -6,7 +6,10 @@ import { browserStorage } from "../calls/storage.ts";
 import { ErrorState } from "../components.tsx";
 import { useLiveRead } from "../controls/useLiveRead.ts";
 import { Icon, type IconName } from "../icons.tsx";
+import { useFocusRescue } from "../focusRescue.ts";
 import { answered, isTestRunPressKey, keepPress, pendingPress, type TestRunPress } from "./testRunPress.ts";
+import { ConfirmStrip } from "../controls/ControlViews.tsx";
+import { testReplyHelper, WITHDRAWAL_ANSWERS } from "./linkedin-wording.ts";
 import { endingDetail, endingTitle, progressText, stepDetail, stepStateText, timeIn } from "./testRunWording.ts";
 import type { SequenceEditor } from "./useSequence.ts";
 
@@ -35,7 +38,7 @@ export function TestRunTab({ campaignId, editor }: { campaignId: string; editor:
   return (
     <div className="grid grid-cols-1 items-start gap-4 min-[1080px]:grid-cols-[380px_minmax(0,1fr)]">
       <Contacts campaignId={campaignId} tab={tab} editor={editor} onChange={refresh} presses={presses} />
-      <RunPanel tab={tab} starting={presses.press?.kind === "run"} />
+      <RunPanel tab={tab} starting={presses.press?.kind === "run"} presses={presses} />
     </div>
   );
 }
@@ -44,6 +47,32 @@ export function TestRunTab({ campaignId, editor }: { campaignId: string; editor:
 const DISABLED = "disabled:border-line disabled:bg-transparent disabled:text-muted";
 
 const newRequestId = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `r-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
+/**
+ * What an answered press did, said where focus goes, from the press and its answer only (council on dee365d, item 10): a
+ * mark or a withdrawal answer names the run it was confirmed on, and says the test stopped only when that run was running
+ * and is the one the answer shows.
+ */
+export function pressDone(p: Pick<TestRunPress, "kind" | "runId" | "wasRunning">, shown: TestRunTabView["run"]): string {
+  const same = p.runId !== undefined && shown?.id === p.runId;
+  switch (p.kind) {
+    case "run":
+      return "The test started. Its steps are on the right.";
+    case "stop":
+      return "The test is stopped. Nothing more goes to your test contacts.";
+    case "reply":
+      if (!same) return "Marked the earlier test replied on LinkedIn. The test shown now is a newer one.";
+      return p.wasRunning === true ? "Marked replied on LinkedIn. The test stopped, as a lead’s outreach stops at your mark." : "Marked replied on LinkedIn.";
+    case "withdrawn":
+      return same ? WITHDRAWAL_ANSWERS[0].done : "Marked the earlier test’s invite withdrawn. The test shown now is a newer one.";
+    case "kept":
+      return same ? WITHDRAWAL_ANSWERS[1].done : "Marked the earlier test’s invite still there. The test shown now is a newer one.";
+    default: {
+      const unhandled: never = p.kind;
+      throw new Error(`A test press with no answer: ${String(unhandled)}`);
+    }
+  }
+}
 
 interface Presses {
   /** The newest control answer, numbered as it arrived in the page's one order with the reads. */
@@ -56,7 +85,7 @@ interface Presses {
   readonly refusal: string | null;
   /** What the last answered press did, said where focus goes; `n` moves focus there again for the same words. */
   readonly said: { readonly text: string; readonly n: number } | null;
-  readonly press_: (kind: TestRunPress["kind"], path: string, body: Record<string, unknown>) => void;
+  readonly press_: (kind: TestRunPress["kind"], path: string, body: Record<string, unknown>, about?: { readonly runId: string; readonly wasRunning: boolean }) => void;
   readonly retry: () => void;
 }
 
@@ -87,7 +116,7 @@ function usePresses(campaignId: string, refresh: () => Promise<void>, issue: () 
         answered(store, campaignId, p.requestId);
         setLatest((prev) => (prev === null || issued > prev.issued ? { view, issued } : prev));
         setPress((now) => (now?.requestId === p.requestId ? null : now));
-        setSaid((prev) => ({ text: p.kind === "run" ? "The test started. Its steps are on the right." : "The test is stopped. Nothing more goes to your test contacts.", n: (prev?.n ?? 0) + 1 }));
+        setSaid((prev) => ({ text: pressDone(p, view.run), n: (prev?.n ?? 0) + 1 }));
         await refresh();
       } catch (error) {
         // A refusal is the server's answer: the press is done. A failure with no answer keeps it for Try again.
@@ -132,9 +161,9 @@ function usePresses(campaignId: string, refresh: () => Promise<void>, issue: () 
     sending,
     refusal,
     said,
-    press_: (kind, path, body) => {
+    press_: (kind, path, body, about) => {
       const requestId = newRequestId();
-      const p: TestRunPress = { v: 1, kind, requestId, path, body: { requestId, ...body }, pressedAt: Date.now() };
+      const p: TestRunPress = { v: 1, kind, requestId, path, body: { requestId, ...body }, pressedAt: Date.now(), ...(about ? { runId: about.runId, wasRunning: about.wasRunning } : {}) };
       // Kept before it is sent; if storage refuses, the press still goes and this page alone knows it.
       keepPress(store, campaignId, p);
       void send(p);
@@ -151,9 +180,13 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   const leadId = useId();
   const [email, setEmail] = useState(tab.contacts.email ?? "");
   const [mobile, setMobile] = useState(tab.contacts.mobile ?? "");
+  const linkedinId = useId();
+  const [linkedin, setLinkedin] = useState(tab.contacts.linkedin ?? "");
+  // The test profile is asked for while the sequence has a LinkedIn track, or one is saved (ticket 24b).
+  const asksLinkedin = editor.view.definition.tracks.some((t) => !t.removed && t.channel === "linkedin") || tab.contacts.linkedin !== null;
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<{ n: number; focus: boolean }>({ n: 0, focus: false });
-  const [fieldError, setFieldError] = useState<{ field: "email" | "mobile"; message: string } | null>(null);
+  const [fieldError, setFieldError] = useState<{ field: "email" | "mobile" | "linkedin"; message: string } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [renderAs, setRenderAs] = useState<string | null>(null);
   const savedRef = useRef<HTMLSpanElement>(null);
@@ -162,10 +195,11 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   const { press, sending, refusal, said } = presses;
 
   // Compared by the server's own reading of a contact (review bot on 55d6ac6): "+447700900456" is the stored "+44 7700 900456".
-  const dirty = contactsUnsaved({ email, mobile }, tab.contacts);
+  const typed = asksLinkedin ? { email, mobile, linkedin } : { email, mobile };
+  const dirty = contactsUnsaved(typed, tab.contacts);
   const lead = tab.leads.find((l) => l.id === renderAs) ?? tab.leads[0] ?? null;
   const running = tab.run?.running === true;
-  const noContact = tab.contacts.email === null && tab.contacts.mobile === null;
+  const noContact = tab.contacts.email === null && tab.contacts.mobile === null && tab.contacts.linkedin === null;
   // A kept press blocks another until the server answers it (Try again resends it): it is never replaced, so never orphaned.
   const pending = press !== null;
 
@@ -183,16 +217,17 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   // One save at a time (review bot on ffa202c; verifier R1): a save asked for while one waits is queued, the latest draft
   // only, and sent after that one's answer, so an older answer can never land after a newer save. The fields take only
   // the answer to the newest save, and only where they still hold what it sent.
-  const current = useRef({ email, mobile });
+  type Typed = { email: string; mobile: string; linkedin?: string };
+  const current = useRef<Typed>(typed);
   useEffect(() => {
-    current.current = { email, mobile };
-  }, [email, mobile]);
+    current.current = asksLinkedin ? { email, mobile, linkedin } : { email, mobile };
+  }, [email, mobile, linkedin, asksLinkedin]);
   const inFlight = useRef(false);
-  const queued = useRef<{ email: string; mobile: string } | null>(null);
+  const queued = useRef<Typed | null>(null);
   const [queuedNext, setQueuedNext] = useState(false);
   const form = useRef<HTMLFormElement>(null);
 
-  const send = async (sent: { email: string; mobile: string }): Promise<void> => {
+  const send = async (sent: Typed): Promise<void> => {
     inFlight.current = true;
     setSaving(true);
     setFieldError(null);
@@ -205,9 +240,10 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
         // The fields show what was stored, as the server wrote it, unless they were edited while it was saving.
         setEmail((now) => (now === sent.email ? (stored.contacts.email ?? "") : now));
         setMobile((now) => (now === sent.mobile ? (stored.contacts.mobile ?? "") : now));
+        if (sent.linkedin !== undefined) setLinkedin((now) => (now === sent.linkedin ? (stored.contacts.linkedin ?? "") : now));
       }
     } catch (error) {
-      const body = error instanceof ApiRequestError ? (error.body as { error?: { field?: "email" | "mobile"; message?: string } } | null) : null;
+      const body = error instanceof ApiRequestError ? (error.body as { error?: { field?: "email" | "mobile" | "linkedin"; message?: string } } | null) : null;
       if (queued.current === null) {
         if (body?.error?.field) setFieldError({ field: body.error.field, message: body.error.message ?? "" });
         else setSaveError(error instanceof Error ? error.message : "Saving failed.");
@@ -224,7 +260,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
       // Focus moves to "Saved." only when the user is not typing past the save (item 16): the fields still hold what it
       // sent, and focus is not in one of them.
       const typing = form.current?.contains(document.activeElement) === true && document.activeElement instanceof HTMLInputElement;
-      const edited = current.current.email !== sent.email || current.current.mobile !== sent.mobile;
+      const edited = current.current.email !== sent.email || current.current.mobile !== sent.mobile || current.current.linkedin !== sent.linkedin;
       setSaved((prev) => ({ n: prev.n + 1, focus: !typing && !edited }));
     }
   };
@@ -242,8 +278,8 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
     void send(draft);
   };
 
-  const hint = noContact ? "Add your email or mobile, and save them, to run a test." : dirty ? "Save your contacts to run a test with them." : editor.unsaved ? "Your latest change to the sequence isn’t saved yet; a test runs the saved version." : "";
-  const status = pending ? (press.kind === "run" ? `Starting the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : `Stopping the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.`) : (said?.text ?? hint);
+  const hint = noContact ? (asksLinkedin ? "Add your email, mobile or LinkedIn profile, and save them, to run a test." : "Add your email or mobile, and save them, to run a test.") : dirty ? "Save your contacts to run a test with them." : editor.unsaved ? "Your latest change to the sequence isn’t saved yet; a test runs the saved version." : "";
+  const status = pending ? (press.kind === "reply" ? `Marking the test replied: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : press.kind === "withdrawn" || press.kind === "kept" ? `Marking the test’s invite: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : press.kind === "run" ? `Starting the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : `Stopping the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.`) : (said?.text ?? hint);
 
   return (
     <section aria-labelledby="test-contacts" className="flex min-w-0 flex-col gap-3.5 rounded-box border border-line bg-base-100 px-5 pb-5 pt-4">
@@ -262,7 +298,19 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
       >
         <ContactField id={emailId} label="Your email" icon="email" value={email} onChange={setEmail} type="email" placeholder="you@example.com" error={fieldError?.field === "email" ? fieldError.message : tab.contacts.emailIsALead ? "A lead has this email now, so tests can’t use it. Use another of your own." : null} />
         <ContactField id={mobileId} label="Your mobile, for texts and the test call" icon="sms" value={mobile} onChange={setMobile} type="tel" placeholder="+44 7700 900000" error={fieldError?.field === "mobile" ? fieldError.message : tab.contacts.mobileIsALead ? "A lead has this number now, so tests can’t use it. Use another of your own." : null} />
-        <p className="text-[13.5px] text-muted">Only contacts that are your own. They are never leads: a lead’s email or number is refused.</p>
+        {asksLinkedin && (
+          <ContactField
+            id={linkedinId}
+            label="Your LinkedIn profile, for the invite and messages"
+            icon="linkedin"
+            value={linkedin}
+            onChange={setLinkedin}
+            type="url"
+            placeholder="https://www.linkedin.com/in/your-profile"
+            error={fieldError?.field === "linkedin" ? fieldError.message : tab.contacts.linkedinIsALead ? "A lead has this profile now, so tests can’t use it. Use another of your own." : null}
+          />
+        )}
+        <p className="text-[13.5px] text-muted">Only contacts that are your own. They are never leads: a lead’s email{asksLinkedin ? ", number or profile" : " or number"} is refused.</p>
         <div className="flex flex-wrap items-center gap-3">
           {/* Disabled while a save waits: a second press is queued by Enter in a field, never sent beside it. */}
           <button type="submit" className={`btn btn-sm border-line-strong bg-base-100 font-medium ${DISABLED}`} disabled={saving || !dirty}>
@@ -294,7 +342,10 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
         <p className="text-[13.5px] text-muted">Their merge fields fill the copy. Nothing is sent to them.</p>
       </div>
 
-      <p className="text-[14px] text-ink-2">Sends every step of the current sequence to you, in order, from the real sender accounts. Each wait is cut to about a minute.</p>
+      <p className="text-[14px] text-ink-2">
+        Sends every step of the current sequence to you, in order, from the real sender accounts. Each wait is cut to about a minute
+        {asksLinkedin ? ", except the wait for you to accept the LinkedIn invite on your test profile, which you do by hand" : ""}.
+      </p>
       <div className="flex flex-wrap items-center gap-2.5">
         {running && !(pending && press.kind === "run") ? (
           <>
@@ -349,7 +400,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   );
 }
 
-function ContactField({ id, label, icon, value, onChange, type, placeholder, error }: { id: string; label: string; icon: IconName; value: string; onChange: (v: string) => void; type: "email" | "tel"; placeholder: string; error: string | null }) {
+function ContactField({ id, label, icon, value, onChange, type, placeholder, error }: { id: string; label: string; icon: IconName; value: string; onChange: (v: string) => void; type: "email" | "tel" | "url"; placeholder: string; error: string | null }) {
   const errorId = `${id}-error`;
   return (
     <div className="flex flex-col gap-1.5">
@@ -358,7 +409,7 @@ function ContactField({ id, label, icon, value, onChange, type, placeholder, err
       </label>
       <span className={`input flex w-full items-center gap-2 border-line-strong ${error ? "border-crit" : ""}`}>
         <Icon name={icon} className="size-4 flex-none text-muted" />
-        <input id={id} type={type} className="min-w-0 grow" value={value} placeholder={placeholder} autoComplete={type === "email" ? "email" : "tel"} aria-invalid={error !== null} aria-describedby={error ? errorId : undefined} onChange={(e) => onChange(e.target.value)} />
+        <input id={id} type={type} className="min-w-0 grow" value={value} placeholder={placeholder} autoComplete={type === "email" ? "email" : type === "url" ? "url" : "tel"} aria-invalid={error !== null} aria-describedby={error ? errorId : undefined} onChange={(e) => onChange(e.target.value)} />
       </span>
       {error !== null && (
         <span id={errorId} className="text-[13px] text-crit">
@@ -371,7 +422,7 @@ function ContactField({ id, label, icon, value, onChange, type, placeholder, err
 
 const STEP_ICON: Record<TestStepRow["channel"], IconName> = { email: "email", sms: "sms", call: "call", linkedin: "linkedin" };
 
-function RunPanel({ tab, starting }: { tab: TestRunTabView; starting: boolean }) {
+function RunPanel({ tab, starting, presses }: { tab: TestRunTabView; starting: boolean; presses: Presses }) {
   const run = tab.run;
   return (
     <section aria-labelledby="test-run-heading" className="flex min-w-0 flex-col gap-3 rounded-box border border-line bg-base-100 px-5 pb-5 pt-4">
@@ -393,6 +444,9 @@ function RunPanel({ tab, starting }: { tab: TestRunTabView; starting: boolean })
       ) : (
         <RunRead run={run} tab={tab} />
       )}
+      {/* Outside the run's own read, so a confirmation sees the shown run change under it and closes (item 10). */}
+      {/* While a test is starting, the shown run is being replaced: an open confirmation closes and says so. */}
+      <TestLinkedinControls run={starting && !run?.running ? null : run} presses={presses} />
       {tab.noTestSinceEdit && run !== null && !starting && (
         <p className="flex gap-2 text-[13.5px] text-ink-2">
           <Icon name="warn" className="mt-0.5 size-4 flex-none text-pause" />
@@ -400,7 +454,7 @@ function RunPanel({ tab, starting }: { tab: TestRunTabView; starting: boolean })
         </p>
       )}
       <p className="border-t border-line pt-3 text-[13px] text-muted">
-        Reply to any test message from your email or mobile to check that it stops the test. Email shows sent or failed only: Instantly doesn’t report delivery, and a sent email is not proof it reached the inbox. Test sends count against each sender’s daily limit like any send.
+        Reply to any test message from your email or mobile to check that it stops the test{run?.linkedinReply ? "; a LinkedIn reply is never detected, so mark it here once you have answered on your test profile" : ""}. Email shows sent or failed only: Instantly doesn’t report delivery, and a sent email is not proof it reached the inbox. Test sends count against each sender’s daily limit like any send.
       </p>
     </section>
   );
@@ -442,11 +496,152 @@ function RunRead({ run, tab }: { run: TestRunRead; tab: TestRunTabView }) {
                 </span>
                 <span className="block text-[13px] text-muted [overflow-wrap:anywhere]">{stepDetail(s, run)}</span>
               </span>
-              {state !== "" && <span className={`whitespace-nowrap text-[13.5px] ${now ? "font-medium text-you" : s.state === "failed" ? "text-crit" : "text-muted"}`}>{state}</span>}
+              {/* A long state (a LinkedIn acceptance wait, ticket 24b) wraps beside the step rather than widen a narrow page. */}
+              {state !== "" && <span className={`${state.length > 32 ? "max-w-[46%] text-right" : "whitespace-nowrap"} text-[13.5px] ${now ? "font-medium text-you" : s.state === "failed" ? "text-crit" : "text-muted"}`}>{state}</span>}
             </li>
           );
         })}
       </ol>
+
     </>
+  );
+}
+
+/** A confirmation on the tab, a snapshot of the read it opened on and of the run it was opened for (council on dee365d, item 10). */
+type TestConfirmation = { readonly kind: "reply"; readonly runId: string; readonly status: TestRunRead["status"]; readonly wasRunning: boolean } | { readonly kind: "withdrawn" | "kept"; readonly runId: string; readonly trackId: string; readonly wasRunning: boolean };
+
+/** Why an open confirmation no longer applies to what the tab shows, or null while it does. */
+export function testConfirmationGone(c: TestConfirmation, run: TestRunRead | null): string | null {
+  if (run === null || run.id !== c.runId) return "The test shown here changed since you opened this, so it was closed. Nothing was marked.";
+  if (c.kind === "reply") return run.linkedinReply?.allowed === true && run.status === c.status ? null : "This test changed since you opened this, so it was closed. Nothing was marked.";
+  return run.linkedinTracks.some((t) => t.trackId === c.trackId && t.view.withdrawalStuck) ? null : "The withdrawal was settled since you opened this, so it was closed. Nothing was marked.";
+}
+
+const CONFIRM_TEXT = {
+  reply: "Mark this test replied on LinkedIn? It stops the test, as a reply stops a lead’s outreach in this campaign. Carry on the conversation on LinkedIn.",
+  withdrawn: "Mark the test invite withdrawn? Do this only once LinkedIn no longer shows it as pending on your test profile. The app stops asking LinkedIn about it.",
+  kept: "Mark the test invite still there? The app stops asking LinkedIn to withdraw it and leaves it open on your test profile.",
+} as const;
+
+/**
+ * The run's LinkedIn reply mark and its stuck withdrawal's two answers (ticket 24b; ADR 0004 sections 3.3 and 7): offered
+ * while the read allows them, a refusal said in their place, each confirmed in place against the read and the run it was
+ * opened on. A confirmation whose run is no longer the one shown, or whose press the read no longer offers, closes and says
+ * why; its press names its run in its route, so a late one is applied to that run only and says so (item 10).
+ */
+function TestLinkedinControls({ run, presses }: { run: TestRunRead | null; presses: Presses }) {
+  const [opened, setOpened] = useState<TestConfirmation | null>(null);
+  const [closed, setClosed] = useState<string | null>(null);
+  // Buttons by key, so a cancelled confirmation returns focus to the one that opened it once it is drawn again (item 12).
+  const buttons = useRef(new Map<string, HTMLButtonElement>());
+  const focusBack = useRef<string | null>(null);
+  const closedRef = useRef<HTMLParagraphElement>(null);
+  const rescue = useFocusRescue();
+  // After each render: a cancelled confirmation's button, once it is drawn again, takes focus back.
+  useEffect(() => {
+    const key = focusBack.current;
+    if (key === null) return;
+    const el = buttons.current.get(key);
+    if (el?.isConnected) {
+      el.focus();
+      focusBack.current = null;
+    }
+  });
+  const pending = presses.press !== null;
+  const gone = opened === null ? null : testConfirmationGone(opened, run);
+  if (opened !== null && gone !== null) {
+    setOpened(null);
+    setClosed(gone);
+  }
+  useEffect(() => {
+    if (closed !== null) closedRef.current?.focus();
+  }, [closed]);
+  if (run === null)
+    return closed === null ? null : (
+      <div ref={rescue}>
+        <p ref={closedRef} tabIndex={-1} role="status" className="text-[13.5px] text-ink-2 outline-offset-4">
+          {closed}
+        </p>
+      </div>
+    );
+  const mark = run.linkedinReply;
+  const stuck = run.linkedinTracks.filter((t) => t.view.withdrawalStuck);
+  if (mark === null && stuck.length === 0 && closed === null) return null;
+  const keyOf = (c: TestConfirmation) => (c.kind === "reply" ? "reply" : `${c.kind}:${c.trackId}`);
+  function open(c: TestConfirmation): void {
+    setClosed(null);
+    setOpened(c);
+  }
+  return (
+    <div ref={rescue} className="flex flex-col gap-2 border-t border-line pt-3">
+      {closed !== null && (
+        <p ref={closedRef} tabIndex={-1} data-rescue="1" role="status" className="rounded-field bg-pause-soft px-3 py-2 text-[13.5px] text-base-content outline-offset-4">
+          {closed}
+        </p>
+      )}
+      {opened ? (
+        <ConfirmStrip
+          text={CONFIRM_TEXT[opened.kind]}
+          action={opened.kind === "reply" ? "Mark replied" : WITHDRAWAL_ANSWERS[opened.kind === "withdrawn" ? 0 : 1].label}
+          busy={pending ? "Another change to this test is on its way." : null}
+          onConfirm={() => {
+            const about = { runId: opened.runId, wasRunning: opened.wasRunning };
+            if (opened.kind === "reply") presses.press_("reply", `/api/test-runs/${encodeURIComponent(opened.runId)}/replies`, { channel: "linkedin", expect: { status: opened.status } }, about);
+            else presses.press_(opened.kind, `/api/test-runs/${encodeURIComponent(opened.runId)}/invite-withdrawal`, { trackId: opened.trackId, answer: opened.kind === "withdrawn" ? "withdrawn" : "kept" }, about);
+            setOpened(null);
+          }}
+          onCancel={() => {
+            focusBack.current = keyOf(opened);
+            setOpened(null);
+          }}
+        />
+      ) : (
+        <>
+          {stuck.map((t) => (
+            <div key={t.trackId} className="flex flex-col gap-1.5">
+              {/* The expiry's own line says LinkedIn hasn't answered (council on a6c1700, item 7): only the question here. */}
+              <p className="text-[13.5px] text-ink-2">Was the test invite withdrawn from your test profile?</p>
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Was the test invite withdrawn?">
+                {(["withdrawn", "kept"] as const).map((kind, i) => (
+                  <button
+                    key={kind}
+                    ref={(el) => {
+                      if (el) buttons.current.set(`${kind}:${t.trackId}`, el);
+                    }}
+                    data-rescue="2"
+                    type="button"
+                    className={`btn btn-sm border-line-strong bg-base-100 font-medium ${DISABLED}`}
+                    disabled={pending}
+                    onClick={() => open({ kind, runId: run.id, trackId: t.trackId, wasRunning: run.running })}
+                  >
+                    {WITHDRAWAL_ANSWERS[i]?.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          {mark !== null && !mark.allowed && <p className="text-[13.5px] text-muted">{mark.reason}</p>}
+          {mark?.allowed && (
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                ref={(el) => {
+                  if (el) buttons.current.set("reply", el);
+                }}
+                data-rescue="2"
+                type="button"
+                className={`btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium ${DISABLED}`}
+                disabled={pending}
+                onClick={() => open({ kind: "reply", runId: run.id, status: run.status, wasRunning: run.running })}
+              >
+                <Icon name="linkedin" className="size-4" />
+                Mark replied on LinkedIn
+              </button>
+              {/* Worded for what has gone (council on a6c1700, item 7): a message, or only the invite. */}
+              <span className="text-[13px] text-muted">{testReplyHelper(mark.work)}</span>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }

@@ -1164,6 +1164,14 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE TRIGGER conversations_reply_delete AFTER DELETE ON reply_events BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES (OLD.address, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
     `,
   },
+  {
+    version: 24,
+    name: "a LinkedIn track skipped as a missing channel records why when it finishes (ticket 24b, the re-check of 82cf16d)",
+    sql: `
+      -- Recorded once, at the skip; a skip stored before this has none, and its read says only what is known.
+      ALTER TABLE track_progress ADD COLUMN skip_cause TEXT CHECK (skip_cause IS NULL OR skip_cause IN ('no_profile', 'not_a_member_profile', 'company_lead', 'replaced', 'removed_by_import', 'marked_bad'));
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {

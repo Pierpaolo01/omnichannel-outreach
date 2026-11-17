@@ -9,7 +9,7 @@ import { leadNow, wallOfLead } from "./clock.ts";
 import type { TrackDefinition } from "./definition.ts";
 import type { OutreachStatus } from "../outreach-status.ts";
 import { markedReplyId } from "./reply-identity.ts";
-import { advanceTrack, applyReply, channelReaches, deriveStatus, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
+import { advanceTrack, anyInviteOpen, applyReply, channelReaches, deriveStatus, end, enterMain, enterWinBack, evaluate, finishTrack, hasWorkLeft, liveTracksFor, progressOf, quiesce, runs, synced } from "./progress.ts";
 import { isUncertain } from "./attempt.ts";
 import type { SubjectState } from "./state.ts";
 
@@ -232,7 +232,10 @@ const stepKey = (step: { readonly track: TrackDefinition; readonly stepId: strin
  * or with a provider's answer (what may still be sent). The read carries it with each allowed control; the press sends it.
  */
 export function previewDigest(before: SubjectState, action: LeadControl, after: SubjectState): string {
-  return `${action}|${deriveStatus(after)}|${action === "skip" ? stepKey(skipTarget(before)) : "-"}|${stepKey(currentStep(after))}`;
+  const base = `${action}|${deriveStatus(after)}|${action === "skip" ? stepKey(skipTarget(before)) : "-"}|${stepKey(currentStep(after))}`;
+  // A stop or a move to win-back leaves a sent LinkedIn invite open, and its confirmation says so (ticket 24b; ADR 0004 3.4):
+  // the digest carries it, so a confirmation shown with that sentence is refused once the invite is no longer open.
+  return (action === "stop" || action === "move_to_win_back") && anyInviteOpen(after) ? `${base}|invite_open` : base;
 }
 
 /**
@@ -296,6 +299,19 @@ export function judgeCampaignControl(
 export const NOTHING_SENT_ON_LINKEDIN = "Nothing has been sent to them on LinkedIn in this campaign, so there is no LinkedIn reply to mark.";
 
 /**
+ * The LinkedIn work of this subject that lets the user mark a reply (ADR 0004 section 7; review bot on c20c8f0): work that
+ * reached the person, known sent, or handed over and not yet settled (a refused invite, a withdrawn claim or a final "not
+ * sent" reached nobody); the latest of them, with its kind and whether it is recorded sent. Null when none: the mark is
+ * refused. The rule and the reads that word it take this one answer.
+ */
+export function replyMarkWork(state: SubjectState): { readonly kind: "invite" | "message"; readonly state: "sent" | "handed" } | null {
+  const sent = (w: (typeof state.work)[number]) => w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null;
+  const reached = state.work.filter((w) => w.kind != null && w.firstHandedWall !== null && (w.settled === null || sent(w)));
+  const latest = [...reached].sort((a, b) => (b.firstHandedWall ?? 0) - (a.firstHandedWall ?? 0))[0];
+  return latest?.kind ? { kind: latest.kind, state: sent(latest) ? "sent" : "handed" } : null;
+}
+
+/**
  * Why marking a LinkedIn reply is refused, or null (ADR 0004 section 7, question Q39): a lead's campaign must be launched;
  * a lead that already replied, or ended interested on a call, is not stopped again (ADR 0003 2.4's reply row); and some
  * LinkedIn work of the subject must have been handed over in this campaign, since nothing else could be answered there.
@@ -307,9 +323,8 @@ export function markRepliedRefusal(state: SubjectState): string | null {
   if (subject.ended === "interested_on_call") return "They were interested on a call: outreach to them has ended in this campaign.";
   // Something must have reached the person on LinkedIn (council on 194fc44, item 7): work known sent, or handed over and not
   // yet settled. A refused invite (an unreachable profile), a withdrawn claim or a final "not sent" reached nobody.
-  const reached = (w: (typeof state.work)[number]) => w.kind != null && w.firstHandedWall !== null && (w.settled === null || w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null);
   // A connection that existed before is not outreach (council on b21af02, item 5): only this subject's own work counts.
-  if (!state.work.some(reached)) return NOTHING_SENT_ON_LINKEDIN;
+  if (replyMarkWork(state) === null) return NOTHING_SENT_ON_LINKEDIN;
   return null;
 }
 

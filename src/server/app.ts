@@ -5,7 +5,7 @@ import { planImport } from "../domain/import-plan.ts";
 import { isOutreachStatus, OUTREACH_STATUSES, type OutreachStatus } from "../domain/outreach-status.ts";
 import { LEAD_CONTROLS } from "../domain/sequence/controls.ts";
 import { maySend } from "../domain/sequence/attempt.ts";
-import { campaignControls, controlsView } from "./engine/controls-view.ts";
+import { campaignControls, controlsView, linkedinReplyView } from "./engine/controls-view.ts";
 import { checkScraperFile, parseScraperExport } from "../domain/scraper-export.ts";
 import type { ActivityView, ApiError, CallOutcomeAnswer, CallOutcomeRefusal, Campaign, CompanyRecord, FileCheckResult, PersonRecord, RecordCalls, SmsProviderStatus, TestContactsRefusal, TestRunTab } from "../shared/api.ts";
 import { CAMPAIGN_NAME_MAX, DEFINITION_MAX_BYTES, STEP_BODY_MAX, STEP_SUBJECT_MAX } from "../shared/limits.ts";
@@ -658,7 +658,7 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   // (the P2 seeds of the search on ab6fe8e). Pure: nothing is written; the next round evaluates the same.
   const readOf = (stored: SubjectState, at: number, env: StepEnv): EnrollmentRead => {
     const state = rules.previewAsOf(stored, at, rules.evaluate);
-    return { ...progressView(state, at, env, rules.stepWhen), controls: controlsView(state, at, rules, env), mayStillSend: state.work.filter(maySend).length };
+    return { ...progressView(state, at, env, rules.stepWhen), controls: controlsView(state, at, rules, env), mayStillSend: state.work.filter(maySend).length, linkedinReply: linkedinReplyView(stored, at, rules) };
   };
   const enrollmentRead = async (id: string): Promise<EnrollmentRead | null> => {
     const at = Date.parse(now());
@@ -742,6 +742,20 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
     if (!run) return notFound(c, "test run");
     if (!engine.markReplied) return controlRefused(c, "Marking a reply needs the engine.");
     const answer = await engine.markReplied(run.id, body.data.requestId, body.data.expect ?? null);
+    if (!answer.ok) return controlRefused(c, answer.reason);
+    const tab = await testTab(run.campaignId);
+    return tab ? c.json<TestRunTab & { readonly replayed: boolean }>({ ...tab, replayed: answer.replayed }) : notFound(c, "campaign");
+  });
+
+  // A test run's withdrawal the session keeps answering unknown (council on dee365d, item 3): the same transition and request
+  // binding as a lead's; the answer is the run's tab.
+  app.post("/test-runs/:id/invite-withdrawal", async (c) => {
+    const body = inviteWithdrawalBody.safeParse(await readJson(c));
+    if (!body.success) return invalid(c, body.error);
+    const run = await store.engine.testRun(c.req.param("id"));
+    if (!run) return notFound(c, "test run");
+    if (!engine.markInviteWithdrawal) return controlRefused(c, "Marking a withdrawal needs the engine.");
+    const answer = await engine.markInviteWithdrawal(run.id, body.data.trackId, body.data.answer, body.data.requestId);
     if (!answer.ok) return controlRefused(c, answer.reason);
     const tab = await testTab(run.campaignId);
     return tab ? c.json<TestRunTab & { readonly replayed: boolean }>({ ...tab, replayed: answer.replayed }) : notFound(c, "campaign");

@@ -61,3 +61,33 @@ describe("each blocker kind names its track and channel", () => {
     expect(describeBlocker(blocker, d, null).detail).toBe("It can’t send until a number is connected. Remove the track to launch without it.");
   });
 });
+
+describe("a LinkedIn track's blockers (ticket 24b)", () => {
+  const li = (body: string, note = "Hello"): TrackDefinition => ({
+    id: "li",
+    channel: "linkedin",
+    branch: "main",
+    window: week,
+    start: { kind: "entry" },
+    removed: false,
+    acceptWaitDays: 14,
+    steps: [
+      { id: "li-1", waitDays: 0, subject: "", body: note, threading: "new_subject", removed: false },
+      { id: "li-2", waitDays: 0, subject: "", body, threading: "new_subject", removed: false },
+    ],
+  });
+  const withPool = (tracks: TrackDefinition[], pool: string[]): CampaignDefinition => ({ ...def(tracks), linkedinPool: pool });
+  test("an empty first message is named by its role; an empty note blocks nothing", () => {
+    const d = withPool([li("", "")], ["linkedin:s1"]);
+    const w = launchCheck(d, [{}], [...senders, { id: "linkedin:s1", channel: "linkedin", healthy: true }]).blockers.map((b) => describeBlocker(b, d));
+    expect(w.map((x) => x.title)).toEqual(["The LinkedIn track: First message has no message"]);
+    expect(w[0]!.detail).toBe("Write it, or remove the message.");
+  });
+  test("no connected session: said in the existing blocker's words and the provider's own, with nothing about connecting one here", () => {
+    const d = withPool([li("Thanks.")], []);
+    const [w] = launchCheck(d, [{}], senders).blockers.map((b) => describeBlocker(b, d, null, { provider: "none", message: "No LinkedIn session is connected, so LinkedIn tracks cannot launch." }));
+    expect(w!.title).toBe("The LinkedIn track has no connected LinkedIn session");
+    expect(w!.detail).toBe("No LinkedIn session is connected, so LinkedIn tracks cannot launch. Remove the track to launch without it.");
+    expect(w!.detail).not.toMatch(/connect (one|a session)|until a session/i);
+  });
+});

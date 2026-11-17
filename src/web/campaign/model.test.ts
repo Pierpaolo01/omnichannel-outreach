@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { render } from "../../domain/sequence/copy.ts";
 import { launchCheck } from "../../domain/sequence/blockers.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../shared/api.ts";
-import { fallbackIn, newTrack, removeStep, sendsOnItsOwn, setWindow, stepUsing, threadSubjectOf, trackName, withFallback } from "./model.ts";
+import { DEFAULT_ACCEPT_WAIT_DAYS, fallbackIn, newTrack, removeStep, sendsOnItsOwn, setWindow, stepUsing, threadSubjectOf, trackName, trackSummary, withFallback } from "./model.ts";
 import { draftProblems } from "./saveQueue.ts";
 
 describe("the editor's fallback field rewrites every use of the field in a step", () => {
@@ -112,5 +112,26 @@ describe("a track's name inside a sentence, in the main sequence and the win-bac
     expect(name("wm2")).toBe("win-back SMS track 2");
     const one = { ...def, tracks: def.tracks.filter((x) => x.id !== "wm2") };
     expect(trackName(one, one.tracks.find((x) => x.id === "wm")!)).toBe("the win-back SMS track");
+  });
+});
+
+describe("a new LinkedIn track (ticket 24b; ADR 0004 3.1)", () => {
+  test("a connection invite with no note and an empty first message, the provisional acceptance wait, and nothing the validator refuses but the empty message", () => {
+    const li = newTrack("linkedin");
+    expect(li.channel).toBe("linkedin");
+    expect(li.steps.map((s) => [s.waitDays, s.subject, s.body])).toEqual([[0, "", ""], [0, "", ""]]);
+    expect(li.acceptWaitDays).toBe(DEFAULT_ACCEPT_WAIT_DAYS);
+    const def: CampaignDefinition = { timezone: "UTC", callSkipLimitDays: 2, emailPool: [], linkedinPool: ["linkedin:s1"], tracks: [li] };
+    expect(draftProblems(def)).toEqual([]);
+    expect(launchCheck(def, [{}], [{ id: "linkedin:s1", channel: "linkedin", healthy: true }]).blockers.map((b) => b.kind)).toEqual(["empty_copy"]);
+  });
+
+  test("its summary counts the invite apart from the messages; what goes out on its own names LinkedIn", () => {
+    const li = newTrack("linkedin");
+    expect(trackSummary(li)).toBe("Invite, then 1 message");
+    expect(trackSummary({ ...li, steps: [...li.steps, { ...li.steps[1]!, id: "x", waitDays: 3 }] })).toBe("Invite, then 2 messages");
+    expect(sendsOnItsOwn({ timezone: "UTC", callSkipLimitDays: 2, emailPool: [], tracks: [newTrack("email"), li] })).toBe(
+      "Email goes out on its own, inside each lead’s sending window. LinkedIn invites and messages go out from a LinkedIn session, inside each lead’s sending window.",
+    );
   });
 });

@@ -4,18 +4,23 @@
  * functions. Nothing here writes, and nothing beside the engine decides what a test does.
  */
 import { stepWhen, type StepEnv } from "../domain/sequence/dispatch.ts";
-import { stepWaitApi } from "./engine/step-when-view.ts";
+import { readWait } from "./engine/step-when-view.ts";
 import { isLive, maySend } from "../domain/sequence/attempt.ts";
 import { liveSteps, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { progressOf, unsettledOwnersOf } from "../domain/sequence/progress.ts";
+import { deriveStatus, progressOf, unsettledOwnersOf } from "../domain/sequence/progress.ts";
 import { heldReason } from "../domain/sequence/dispatch.ts";
 import type { EndReason, FinishReason, SubjectState } from "../domain/sequence/state.ts";
 import type { TestRunEnding, TestRunRead, TestRunTab, TestStepRow } from "../shared/api.ts";
-import { stepNoun, trackLabel } from "../shared/track-label.ts";
+import { stepTitle, trackLabel } from "../shared/track-label.ts";
 import type { TestRunRecord } from "./engine/engine-store.ts";
+import { linkedinReplyView } from "./engine/controls-view.ts";
+import type { Rules } from "./engine/rules.ts";
+
+/** The rules the tab reads with: the call views' and the reply mark's (ticket 24b). */
+export type TestTabRules = CallViewRules & Pick<Rules, "markReplied">;
 import type { OutreachStore } from "./persistence/store.ts";
 import { firstListedDay, type CallViewRules } from "./engine/call-views.ts";
-import { conversationOwnersView } from "./engine/views.ts";
+import { conversationOwnersView, linkedinTrackView } from "./engine/views.ts";
 import { startOfLocalDay } from "../domain/sequence/clock.ts";
 
 const iso = (t: number) => new Date(t).toISOString();
@@ -49,7 +54,7 @@ async function leadsOf(store: OutreachStore, campaignId: string): Promise<TestRu
   });
 }
 
-export async function testRunTab(store: OutreachStore, campaignId: string, now: number, rules: CallViewRules, env: StepEnv = {}): Promise<TestRunTab | null> {
+export async function testRunTab(store: OutreachStore, campaignId: string, now: number, rules: TestTabRules, env: StepEnv = {}): Promise<TestRunTab | null> {
   const row = await store.engine.campaign(campaignId);
   const stored = await store.engine.testContacts(campaignId);
   if (!row || !stored) return null;
@@ -58,7 +63,14 @@ export async function testRunTab(store: OutreachStore, campaignId: string, now: 
   return {
     campaignId,
     definitionVersion: row.definitionVersion,
-    contacts: { email: stored.contacts.email?.value ?? null, mobile: stored.contacts.mobile?.value ?? null, emailIsALead: stored.leadHas.email, mobileIsALead: stored.leadHas.mobile },
+    contacts: {
+      email: stored.contacts.email?.value ?? null,
+      mobile: stored.contacts.mobile?.value ?? null,
+      emailIsALead: stored.leadHas.email,
+      mobileIsALead: stored.leadHas.mobile,
+      linkedin: stored.contacts.linkedin?.value ?? null,
+      linkedinIsALead: stored.leadHas.linkedin === true,
+    },
     noTestSinceEdit: await store.engine.noTestSinceEdit(campaignId),
     leads,
     run: latest ? await runRead(store, latest, leads, now, rules, env) : null,
@@ -67,7 +79,7 @@ export async function testRunTab(store: OutreachStore, campaignId: string, now: 
   };
 }
 
-async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunTab["leads"], now: number, rules: CallViewRules, env: StepEnv): Promise<TestRunRead | null> {
+async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunTab["leads"], now: number, rules: TestTabRules, env: StepEnv): Promise<TestRunRead | null> {
   const stored = await store.engine.subject(run.id, now);
   if (!stored) return null;
   // As of the read's instant: what fell due since the worker's last tick is applied (nothing is written).
@@ -81,8 +93,13 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
     renderAs: { id: run.renderAs, name: leads.find((l) => l.id === run.renderAs)?.name ?? "" },
     email: run.contacts.email?.value ?? null,
     mobile: run.contacts.mobile?.value ?? null,
+    linkedin: run.contacts.linkedin?.value ?? null,
+    status: deriveStatus(s),
+    linkedinTracks: s.tracks.filter((t) => s.campaign.definition.tracks.find((d) => d.id === t.trackId)?.channel === "linkedin").map((t) => ({ trackId: t.trackId, view: linkedinTrackView(s, t.trackId) })),
     mayStillSend: s.work.filter(maySend).length,
     steps: stepsOf(s, rules, now, env),
+    // The mark's own rule on the stored run (it reads the run as of the action itself), as a lead's read says it (ticket 24b).
+    linkedinReply: linkedinReplyView(stored, now, rules),
   };
 }
 
@@ -97,11 +114,13 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
   // email and SMS: never said to be due (council on faac357, item 4; the verifier on cc9bf55, item 10).
   const held = (trackId: string) => heldReason(s, trackId, now);
   // Any other reason the read gives (but "with the provider") also comes before the provider's progress.
-  const waitsHere = (track: TrackDefinition, stepId: string): TestStepRow["waits"] => {
+  const waitsHere = (track: TrackDefinition, stepId: string): Pick<TestStepRow, "waits" | "until"> | null => {
     const p = progressOf(s, track.id);
     if (track.channel === "call" || s.subject.ended !== null || !p || p.finishedAt !== null || p.nextStepId !== stepId) return null;
     const when = (rules.stepWhen ?? stepWhen)(s, track.id, now, env);
-    return when?.kind === "waits" && when.why !== "with_provider" ? stepWaitApi(when.why) : null;
+    if (when?.kind !== "waits" || when.why === "with_provider") return null;
+    // The day an acceptance wait ends is the read's fact (ADR 0004 section 9): said as when the wait ends, never a send.
+    return { waits: readWait(when.why, s, track.id, now), ...(when.why === "awaiting_acceptance" && when.until !== undefined ? { until: iso(when.until) } : {}) };
   };
   for (const track of tracks) {
     const label = trackLabel(def, track);
@@ -117,7 +136,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
         stepId: step.id,
         channel: track.channel,
         branch: track.branch,
-        name: track.channel === "call" ? (track.branch === "win_back" ? "Win-back call" : "Call") : `${stepNoun(label, track.channel)} ${liveSteps(track).indexOf(step) + 1 || i + 1}`,
+        name: track.channel === "call" ? (track.branch === "win_back" ? "Win-back call" : "Call") : stepTitle(label, track.channel, liveSteps(track).indexOf(step) + 1 || i + 1),
         track: label.label,
         taskId: task?.id ?? null,
         outcome: logged?.outcome ?? null,
@@ -137,7 +156,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
       else if (s.subject.ended === null && p && p.finishedAt === null && p.nextStepId === step.id && held(track.id) !== null) {
         const hold = held(track.id);
         rows.push(hold === null ? { ...base, state: "due", at: iso(p.dueWall ?? 0) } : { ...base, state: "held", at: null, hold, holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test })) });
-      } else if (waitsHere(track, step.id)) rows.push({ ...base, state: "due", at: null, waits: waitsHere(track, step.id) });
+      } else if (waitsHere(track, step.id)) rows.push({ ...base, state: "due", at: null, ...waitsHere(track, step.id) });
       else if (live) rows.push({ ...base, state: "with_provider", at: live.handedWall === null ? null : iso(live.handedWall) });
       // A step of a track that finished without reaching it: skipped, with why its track finished (council on ffa202c, item 13).
       else if (p?.finishReason) {
@@ -150,7 +169,8 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
         const when = (rules.stepWhen ?? stepWhen)(s, track.id, now, env);
         switch (when?.kind) {
           case "waits":
-            rows.push({ ...base, state: "due", at: null, waits: stepWaitApi(when.why) });
+            // The day an acceptance wait ends is the read's fact (ADR 0004 section 9): said as when the wait ends, never a send.
+            rows.push({ ...base, state: "due", at: null, waits: readWait(when.why, s, track.id, now), ...(when.why === "awaiting_acceptance" && when.until !== undefined ? { until: iso(when.until) } : {}) });
             break;
           case "ready":
             rows.push({ ...base, state: "due", at: iso(now) });

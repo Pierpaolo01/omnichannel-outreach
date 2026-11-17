@@ -14,6 +14,8 @@ export interface LeadConfirmation {
   readonly control: AllowedControl;
   readonly expect: LeadExpectation;
   readonly campaignState: RecordLead["campaignState"];
+  /** A LinkedIn invite this campaign sent is still open on LinkedIn, as the read it opened on says (ticket 24b; Q38). */
+  readonly inviteOpen: boolean;
 }
 
 /** What a confirmation sends with its control: the lead's status in the read, and the digest of the whole preview it showed. */
@@ -27,14 +29,15 @@ const allowedIn = (lead: Pick<RecordLead, "controls">, action: LeadControlApi): 
 /** The snapshot of a lead control's confirmation, from the read it opens on; null when that read refuses the control. */
 export function openLeadConfirmation(lead: RecordLead, action: LeadControlApi): LeadConfirmation | null {
   const control = allowedIn(lead, action);
-  return control ? { action, control, expect: expectationOf(lead, control), campaignState: lead.campaignState } : null;
+  return control ? { action, control, expect: expectationOf(lead, control), campaignState: lead.campaignState, inviteOpen: lead.tracks.some((t) => t.linkedin?.inviteOpen === true) } : null;
 }
 
 /** A newer read differs from what the confirmation shows: its control refused, its preview or its precondition changed. */
 export function confirmationChanged(opened: LeadConfirmation, lead: RecordLead): boolean {
   const now = allowedIn(lead, opened.action);
   if (!now) return true;
-  return JSON.stringify(now) !== JSON.stringify(opened.control) || JSON.stringify(expectationOf(lead, now)) !== JSON.stringify(opened.expect) || lead.campaignState.paused !== opened.campaignState.paused;
+  // The open invite is part of what the confirmation says (council on dee365d, item 7), and of the digest the server checks.
+  return JSON.stringify(now) !== JSON.stringify(opened.control) || JSON.stringify(expectationOf(lead, now)) !== JSON.stringify(opened.expect) || lead.campaignState.paused !== opened.campaignState.paused || lead.tracks.some((t) => t.linkedin?.inviteOpen === true) !== opened.inviteOpen;
 }
 
 export interface CampaignConfirmation {

@@ -7,11 +7,11 @@
 import { stepNumber } from "../../domain/sequence/definition.ts";
 import { releasedBy, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
 import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
-import { currentStep, judgeCampaignControl, previewDigest, LEAD_CONTROLS, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
+import { currentStep, judgeCampaignControl, previewDigest, LEAD_CONTROLS, NOTHING_SENT_ON_LINKEDIN, replyMarkWork, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
 import { isLive } from "../../domain/sequence/attempt.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
-import type { CampaignControlView, ControlStepView, ControlView } from "../../shared/api.ts";
+import type { CampaignControlView, ControlStepView, ControlView, LinkedinReplyMark } from "../../shared/api.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 import { trackLabel } from "../../shared/track-label.ts";
 
@@ -34,7 +34,7 @@ function stepView(state: SubjectState, step: NonNullable<ReturnType<typeof curre
 
 function whenOf(state: SubjectState, trackId: string, now: number, env: StepEnv, read: typeof stepWhen): ControlStepView["when"] {
   const when = read(state, trackId, now, env);
-  return when ? stepWhenView(when, now, state.callDay.day, channelOfTrack(state, trackId)) : null;
+  return when ? stepWhenView(when, now, state.callDay.day, channelOfTrack(state, trackId), { state, trackId }) : null;
 }
 
 /** A call step's record: its calls logged so far (skip for now is no call), and whether its open task is a callback. */
@@ -83,6 +83,20 @@ export function effectOf(before: SubjectState, action: LeadControl, after: Subje
 /** Every control of the lead, in a fixed order. */
 export function controlsView(stored: SubjectState, now: number, rules: Rules, env: StepEnv = {}): ControlView[] {
   return LEAD_CONTROLS.map((action) => controlView(stored, action, now, rules, env));
+}
+
+/**
+ * Whether the user may mark the subject replied on LinkedIn now (ADR 0004 section 7; ticket 24b): the mark's own transition
+ * (`rules.markReplied`) on a copy of the subject as of the read, exactly as `Engine.markReplied` judges it before its
+ * confirmation, storing nothing, so the read's refusal is the action's. Null when the campaign has no LinkedIn track.
+ */
+export function linkedinReplyView(stored: SubjectState, now: number, rules: Pick<Rules, "markReplied" | "asOfAction" | "evaluate"> = DEFAULT_RULES): LinkedinReplyMark | null {
+  if (!stored.campaign.definition.tracks.some((t) => t.channel === "linkedin")) return null;
+  const s = rules.asOfAction(stored, now, rules.evaluate);
+  const marked = rules.markReplied(s, "read", now);
+  const work = replyMarkWork(s);
+  // Allowed only with the work that allows it, said by its kind and state (review bot on c20c8f0).
+  return marked.ok && work !== null ? { allowed: true, work } : { allowed: false, reason: marked.ok ? NOTHING_SENT_ON_LINKEDIN : marked.reason };
 }
 
 /** The campaign's pause and resume, judged on its row exactly as `Engine.setCampaignPause` judges them. */

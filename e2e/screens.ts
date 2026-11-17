@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
 import type { BeforeLaunchView, CampaignDefinition, CampaignListItem, CompanyRecord, ControlStepView, ControlView, EnrollmentRead, ImportRecord, LeadControlApi, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, RecordCalls, RecordColleagues, RecordControls, RecordLead, SequenceView, SummaryEntry, TodayView } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
+import { fakeLinkedinApp, type FakeLinkedinApp, type LinkedinScenario } from "./fake-linkedin.ts";
 import { FAKE_INBOX, FAKE_NUMBERS, OWN_TEST_EMAIL, OWN_TEST_MOBILE, TWO_CHANNELS, fakeCallsApp, fakeInterruptionApp, fakePeopleApp, fakeProviderApp, fakeTestRunApp, fakeMeasuresApp, type MeasuresScenario, type CallsScenario, type FakeCallsApp, type FakePeopleApp, type FakeProviderApp, type FakeTestRunApp, type InterruptionScenario } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
 
@@ -215,6 +216,7 @@ export function galleryLead(id: string, campaignId: string, status: OutreachStat
     reply: status === "replied" ? { channel: "email", at: "2026-11-10T14:05:00.000Z" } : null,
     sender: null,
     smsSender: null,
+    linkedinReply: null,
     zone: "Europe/London",
     tracks: [{ trackId: "e1", channel: "email", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], linkedin: null, hold: null, holdOwners: [], nextStep: { stepId: "s2", number: 2, when: { kind: "at", at: "2026-11-11T09:00:00.000Z" } }, callTask: null, steps: [] }],
     branch: status === "in_win_back" ? "win_back" : "main",
@@ -662,7 +664,7 @@ async function everyEntry(page: Page, size: "many" | "one"): Promise<void> {
       ...body,
       sendingInterrupted: { since: new Date(at - 20 * 60_000).toISOString(), cause: "providers_unreachable", lastFailedRead: { channel: "email", part: "observation", at: new Date(at - 60_000).toISOString() }, lastRoundFailedAt: null },
       waitingOnProvider: [{ channel: "email", since: new Date(Date.parse(body.overdueCallbacks[0]?.dueAt ?? "2026-11-09T09:00:00Z")).toISOString(), sends: size === "one" ? 1 : 312 }, { channel: "sms", since: null, sends: 47 }],
-      waitingForCapacity: Array.from({ length: count }, (_, i) => ({ ...lead(i + 1), enrollmentId: `e-${i}`, campaignId: (campaigns[(i + 1) % 2] ?? campaigns[0]!).id, trackId: "t1", stepId: "s1", channel: i % 2 === 0 ? ("email" as const) : ("sms" as const), dueAt: "2026-11-09T08:00:00.000Z", accountIds: ["inbox-a"], resetsAt: "2026-11-10T00:00:00.000Z" })),
+      waitingForCapacity: Array.from({ length: count }, (_, i) => ({ ...lead(i + 1), enrollmentId: `e-${i}`, campaignId: (campaigns[(i + 1) % 2] ?? campaigns[0]!).id, trackId: "t1", stepId: "s1", channel: i % 2 === 0 ? ("email" as const) : ("sms" as const), dueAt: "2026-11-09T08:00:00.000Z", accountIds: ["inbox-a"], resetsAt: "2026-11-10T00:00:00.000Z" , action: null, noAllowance: false})),
       noUsableChannel: Array.from({ length: size === "one" ? 1 : 40 }, (_, i) => ({ ...lead(i + 1), enrollmentId: `n-${i}`, campaignId: (campaigns[(i + 1) % 2] ?? campaigns[0]!).id, endedAt: "2026-11-08T15:00:00.000Z", channels: [{ channel: "email" as const, why: "bad" as const, owners: [] }, { channel: "sms" as const, why: "missing" as const, owners: [] }, { channel: "call" as const, why: "declined" as const, owners: [] }] })),
     });
   });
@@ -2223,7 +2225,20 @@ export const SCREENS: readonly Screen[] = [
   { name: "measures: with a test run", open: async (page) => { await measuresScreen(page, "with-test"); await settle(page, "from test runs"); } },
   { name: "measures: a paused campaign", open: async (page) => { await measuresScreen(page, "paused"); await settle(page, "1 callback pending"); } },
   { name: "measures: figures that may be out of date", open: async (page) => { await staleMeasures(page); } },
+  // Ticket 24b: a LinkedIn track on the simulated provider (`fakeLinkedinApp`); no LinkedIn session is connected anywhere.
+  { name: "linkedin: the canvas and the track's inspector", open: async (page) => { await linkedinScreen(page, "ready", (f) => `/campaigns/${f.campaign}?track=li`); await settle(page, "Wait for acceptance"); } },
+  { name: "linkedin: before launch", open: async (page) => { await linkedinScreen(page, "ready", (f) => `/campaigns/${f.campaign}/before-launch`); await settle(page, "have a LinkedIn profile"); } },
+  { name: "linkedin: a test run waiting for you to accept the invite", open: async (page) => { await linkedinScreen(page, "testing", (f) => `/campaigns/${f.campaign}/test-run`); await settle(page, "Waiting for you to accept the invite on your test profile"); } },
+  { name: "linkedin: a record with a withdrawal LinkedIn never confirmed", open: async (page) => { await linkedinScreen(page, "later", async (f) => `/leads/people/${await f.person("Nia Cole")}`); await settle(page, "It’s still there"); } },
+  { name: "linkedin: today with a withdrawal to check", open: async (page) => { await linkedinScreen(page, "later", () => "/"); await settle(page, "Check whether Nia Cole’s LinkedIn invite was withdrawn"); } },
 ];
+
+/** Opens a page of ticket 24b's simulated-LinkedIn app, at its clock. */
+async function linkedinScreen(page: Page, scenario: LinkedinScenario, path: (f: FakeLinkedinApp) => string | Promise<string>): Promise<void> {
+  const f = await fakeLinkedinApp(scenario, `linkedin-screens-${scenario}`);
+  await page.clock.setFixedTime(f.h.clock);
+  await page.goto(`${f.url}${await path(f)}`);
+}
 
 /**
  * Standing check (e2e/focus.spec.ts): a keyboard action that removes or replaces the focused
@@ -2534,14 +2549,14 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
     focused: (page) => page.getByRole("menuitem", { name: "Email track" }),
   },
   {
-    name: "Up on Add track opens its menu on the last item, Phone track",
+    name: "Up on Add track opens its menu on the last item, LinkedIn track",
     open: async (page) => {
       const id = await campaignWith(page, "Focus: menu opens on last");
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
     },
     act: (page) => page.keyboard.press("ArrowUp"),
-    focused: (page) => page.getByRole("menuitem", { name: "Phone track" }),
+    focused: (page) => page.getByRole("menuitem", { name: "LinkedIn track" }),
   },
   // Ticket 14c: phone tracks.
   {
@@ -2550,6 +2565,8 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       const id = await campaignWith(page, "Focus: add a phone track");
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
+      // Up opens the menu on its last item, LinkedIn track (ticket 24b); Phone track is the one above it.
+      await page.keyboard.press("ArrowUp");
       await page.keyboard.press("ArrowUp");
     },
     act: (page) => page.keyboard.press("Enter"),
@@ -2645,11 +2662,13 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
     focused: (page) => page.getByLabel("Email 1 subject"),
   },
   {
-    name: "the win-back branch's Add menu offers email and SMS tracks only, and adding an SMS track moves focus to its text",
+    name: "the win-back branch's Add menu offers no phone track, and adding an SMS track moves focus to its text",
     open: async (page) => {
       const id = await campaignWith(page, "Focus: add a win-back SMS track", WITH_A_BRANCH);
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add win-back track" }).focus();
+      // Email, SMS, then LinkedIn (ticket 24b): Up opens on LinkedIn, and SMS is above it.
+      await page.keyboard.press("ArrowUp");
       await page.keyboard.press("ArrowUp");
     },
     act: (page) => page.keyboard.press("Enter"),

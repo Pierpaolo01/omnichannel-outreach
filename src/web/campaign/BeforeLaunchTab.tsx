@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LoadProjectionView, PreviewLead, SmsProviderStatus } from "../../shared/api.ts";
-import { stepNoun, trackLabel } from "../../shared/track-label.ts";
+import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LinkedinProviderStatus, LoadProjectionView, PreviewLead, SmsProviderStatus } from "../../shared/api.ts";
+import { stepTitle, trackLabel } from "../../shared/track-label.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -22,6 +22,8 @@ export function BeforeLaunchTab({ campaignId, editor }: { campaignId: string; ed
   // Only checks for the current version are shown: while a newer version loads, the loading
   // state shows, not the older checks (PR 41 council, item 2).
   const facts = result.state === "ready" ? result.data : null;
+  // LinkedIn is said only for a campaign with a LinkedIn track (re-check of a6c1700, item 12).
+  const hasLinkedin = editor.view.definition.tracks.some((t) => !t.removed && t.channel === "linkedin");
   return (
     <div className="flex flex-col gap-4">
       <LaunchBar editor={editor} facts={facts} />
@@ -42,10 +44,12 @@ export function BeforeLaunchTab({ campaignId, editor }: { campaignId: string; ed
             <Blockers campaignId={campaignId} editor={editor} />
             <Warnings facts={facts} editor={editor} />
             <Card title="Channel coverage">
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <div className={`grid grid-cols-1 gap-2 ${hasLinkedin ? "sm:grid-cols-2 min-[1400px]:grid-cols-4" : "sm:grid-cols-3"}`}>
                 <Coverage n={facts.coverage.email} of={facts.coverage.leads} what="have an email" />
                 <Coverage n={facts.coverage.mobile} of={facts.coverage.leads} what="have a mobile" />
                 <Coverage n={facts.coverage.phone} of={facts.coverage.leads} what="have a phone number" />
+                {/* Ticket 24b: a member profile from the import, by the engine's own rule, only for a campaign with a LinkedIn track. */}
+                {hasLinkedin && <Coverage n={facts.coverage.linkedin} of={facts.coverage.leads} what="have a LinkedIn profile" />}
               </div>
             </Card>
             <Card title="Missing merge fields">
@@ -152,6 +156,7 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
   const { blockers, nothingToLaunch } = editor.view.launch;
   const def = editor.view.definition;
   const sms = useApi<SmsProviderStatus>("/api/sms-provider").result;
+  const linkedin = useApi<LinkedinProviderStatus>("/api/linkedin-provider").result;
   const open = (trackId: string, stepId?: string) => navigate(`${campaignPath(campaignId)}?track=${encodeURIComponent(trackId)}${stepId ? `&step=${encodeURIComponent(stepId)}` : ""}`);
   return (
     <section aria-labelledby="blocks-launch">
@@ -164,14 +169,14 @@ function Blockers({ campaignId, editor }: { campaignId: string; editor: Sequence
           <span>
             <b className="font-semibold">{nothingToLaunch ? "No track yet." : "Nothing blocks launch."}</b>
             <span className="block text-ink-2">
-              {nothingToLaunch ? "With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, or no connected sender." : "Every message has copy, every merge field has a fallback where a lead lacks it, and every email and SMS track has a sender."}
+              {nothingToLaunch ? "With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, or no connected sender." : `Every message has copy, every merge field has a fallback where a lead lacks it, and ${editor.view.definition.tracks.some((t) => !t.removed && t.channel === "linkedin") ? "every email, SMS and LinkedIn track has a sender." : "every email and SMS track has a sender."}`}
             </span>
           </span>
         </div>
       ) : (
         <ul className="flex flex-col gap-2">
           {blockers.map((b) => {
-            const { title, detail, actions } = describeBlocker(b, def, sms.state === "ready" ? sms.data : null);
+            const { title, detail, actions } = describeBlocker(b, def, sms.state === "ready" ? sms.data : null, linkedin.state === "ready" ? linkedin.data : null);
             return (
               <li key={JSON.stringify(b)} className="flex flex-wrap items-start gap-x-2.5 gap-y-2 rounded-field bg-crit-soft px-3.5 py-3 text-[14px]">
                 <Icon name="bad" className="mt-0.5 size-[18px] text-crit" />
@@ -205,9 +210,10 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
   const noEmail = facts.coverage.leads - facts.coverage.email;
   const noMobile = facts.coverage.leads - facts.coverage.mobile;
   const noPhone = facts.coverage.leads - facts.coverage.phone;
-  const after = (channel: "email" | "sms" | "call") => live.some((t) => t.start.kind === "after" && live.find((x) => x.id === (t.start as { trackId: string }).trackId)?.channel === channel);
+  const noProfile = facts.coverage.leads - facts.coverage.linkedin;
+  const after = (channel: "email" | "sms" | "call" | "linkedin") => live.some((t) => t.start.kind === "after" && live.find((x) => x.id === (t.start as { trackId: string }).trackId)?.channel === channel);
   // Each warning names the tracks it is about, by their own channel and order.
-  const tracksOn = (channel: "email" | "sms" | "call") => and(live.filter((t) => t.channel === channel).map((t) => trackName(editor.view.definition, t)));
+  const tracksOn = (channel: "email" | "sms" | "call" | "linkedin") => and(live.filter((t) => t.channel === channel).map((t) => trackName(editor.view.definition, t)));
   if (live.some((t) => t.channel === "email") && noEmail > 0) {
     items.push({ title: `${noEmail} ${noEmail === 1 ? "lead has" : "leads have"} no email`, detail: `They skip ${tracksOn("email")}${after("email") ? ", and the tracks after it start sooner" : ""}.` });
   }
@@ -217,13 +223,14 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
   if (live.some((t) => t.channel === "call") && noPhone > 0) {
     items.push({ title: `${noPhone} ${noPhone === 1 ? "lead has" : "leads have"} no phone number`, detail: `They skip ${tracksOn("call")}${after("call") ? ", and the tracks after it start sooner" : ""}. A company’s main line counts for everyone at the company.` });
   }
+  if (live.some((t) => t.channel === "linkedin") && noProfile > 0) {
+    items.push({ title: `${noProfile} ${noProfile === 1 ? "lead has" : "leads have"} no LinkedIn profile`, detail: `They skip ${tracksOn("linkedin")}${after("linkedin") ? ", and the tracks after it start sooner" : ""}. Only a decision maker’s member profile from the import counts: company leads and company pages are never invited.` });
+  }
   // ADR 0003 7.2: an empty call script is a warning, never a blocker.
   if (live.some((t) => t.channel === "call") && !(editor.view.definition.callScript ?? "").trim()) {
     items.push({ title: "The call script is empty", detail: "Your call tasks will show no talking points. Write them in a phone track, in the sequence." });
   }
-  for (const a of facts.load?.accounts ?? []) {
-    if (a.usedToday > 0) items.push({ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: `Other campaigns or test runs sent or reserved them, so fewer first ${a.channel === "sms" ? "texts" : "emails"} can go today.` });
-  }
+  for (const a of facts.load?.accounts ?? []) items.push(...usedTodayWarnings(a));
   // A sender the win-back branch uses counts too: its emails and texts go from the same pools (ticket 16b).
   const sending = editor.view.definition.tracks.filter((t) => !t.removed);
   for (const a of editor.view.accounts.filter((x) => !x.healthy && sending.some((t) => t.channel === x.channel))) {
@@ -345,22 +352,28 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
                   <span className="flex items-start gap-1.5 [overflow-wrap:anywhere]">
                     <Icon name={a.channel} className="mt-0.5 size-4 text-muted" />
                     <span>
-                      <span className="sr-only">{a.channel === "sms" ? "SMS number " : "Email inbox "}</span>
+                      <span className="sr-only">{a.channel === "sms" ? "SMS number " : a.channel === "linkedin" ? "LinkedIn session " : "Email inbox "}</span>
                       {a.label}
                       <span className="block text-[12.5px] text-muted">
-                        At most one {a.channel === "sms" ? "text" : "email"} every {gap(a.gapSeconds)}
+                        At most one {a.channel === "sms" ? "text" : a.channel === "linkedin" ? "invite or message" : "email"} every {gap(a.gapSeconds)}
                       </span>
                     </span>
                   </span>
                 </td>
                 <td className="py-2.5 max-[560px]:p-0">{blocked ? "—" : `${a.busiestDay} a day`}</td>
                 <td className="py-2.5 max-[560px]:p-0">
-                  <span className={a.usedToday >= a.capacity ? "font-medium text-pause" : ""}>
-                    {a.usedToday} of {a.capacity}
-                  </span>
-                  <span className="mt-1 block h-1 w-24 overflow-hidden rounded-sm bg-line" aria-hidden="true">
-                    <span className={`block h-full ${a.usedToday >= a.capacity ? "bg-pause" : "bg-base-content"}`} style={{ width: `${Math.min(100, (a.usedToday / Math.max(1, a.capacity)) * 100)}%` }} />
-                  </span>
+                  {/* A LinkedIn session's two allowances, each with its use (council on dee365d, item 4); never their sum. */}
+                  {(a.kinds ? [{ what: "invites", ...a.kinds.invite }, { what: "messages", ...a.kinds.message }] : [{ what: "", capacity: a.capacity, usedToday: a.usedToday }]).map((r) => (
+                    <span key={r.what} className="block [&+&]:mt-1.5">
+                      <span className={r.usedToday >= r.capacity ? "font-medium text-pause" : ""}>
+                        {r.usedToday} of {r.capacity}
+                        {r.what ? ` ${r.what}` : ""}
+                      </span>
+                      <span className="mt-1 block h-1 w-24 overflow-hidden rounded-sm bg-line" aria-hidden="true">
+                        <span className={`block h-full ${r.usedToday >= r.capacity ? "bg-pause" : "bg-base-content"}`} style={{ width: `${Math.min(100, (r.usedToday / Math.max(1, r.capacity)) * 100)}%` }} />
+                      </span>
+                    </span>
+                  ))}
                 </td>
               </tr>
             ))}
@@ -390,7 +403,8 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
         </table>
       )}
       {load.withheldBy !== null ? (
-        <p className={`${load.accounts.length > 0 || callRow !== null ? "mt-2" : ""} text-[13.5px] text-crit`}>
+        // Critical only for a sender a blocker also names; a figure withheld for want of a model is no fault (item 9).
+        <p className={`${load.accounts.length > 0 || callRow !== null ? "mt-2" : ""} text-[13.5px] ${load.withheldBy.tracks.some((t) => t.why === "no_sender") ? "text-crit" : "text-ink-2"}`}>
           {/* Worded from the tracks the server names, never guessed from this campaign's channels. */}
           {withheldExplanation(load.withheldBy)}
         </p>
@@ -422,6 +436,22 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
 }
 
 /** Why one sender keeps the figure from being projected (ADR 0003, ticket 13b): said with the sender. */
+/**
+ * What other campaigns and test runs already used of a sender today. A LinkedIn session's invites and messages are two
+ * allowances, said apart (council on dee365d, item 4): messages used never mean fewer invites can go.
+ */
+export function usedTodayWarnings(a: LoadProjectionView["accounts"][number]): { title: string; detail: string }[] {
+  const why = "Other campaigns or test runs sent or reserved them";
+  if (a.kinds) {
+    const { invite, message } = a.kinds;
+    return [
+      ...(invite.usedToday > 0 ? [{ title: `${a.label} has ${invite.usedToday} of its ${invite.capacity} invites a day used today`, detail: `${why}, so fewer invites can go today.` }] : []),
+      ...(message.usedToday > 0 ? [{ title: `${a.label} has ${message.usedToday} of its ${message.capacity} messages a day used today`, detail: `${why}, so fewer LinkedIn messages can go today.` }] : []),
+    ];
+  }
+  return a.usedToday > 0 ? [{ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: `${why}, so fewer first ${a.channel === "sms" ? "texts" : "emails"} can go today.` }] : [];
+}
+
 function heldSaid(c: LoadProjectionView["cannotProject"][number]): string {
   switch (c.reason) {
     case "quota":
@@ -461,6 +491,7 @@ function Preview({ campaignId, editor, leads, horizonDays }: { campaignId: strin
     const parts: string[] = [];
     if (live.some((t) => t.channel === "email")) parts.push(l.email ? `Email to ${l.email}.` : "No email, so the email track is skipped for them.");
     if (live.some((t) => t.channel === "sms")) parts.push(l.mobile ? "Texts to their own mobile." : l.kind === "company" ? "A company lead is never texted, so the SMS track is skipped." : "No mobile of their own, so the SMS track is skipped for them.");
+    if (live.some((t) => t.channel === "linkedin")) parts.push(l.linkedin ? "A connection invite to their LinkedIn profile, then messages once they accept." : l.kind === "company" ? "A company lead has no member profile, so the LinkedIn track is skipped." : "No LinkedIn profile, so the LinkedIn track is skipped for them.");
     if (live.some((t) => t.channel === "call")) parts.push(l.phone ? "Calls on your list, to a number of theirs or their company’s main line." : `No phone number, so ${live.filter((t) => t.channel === "call").length > 1 ? "the phone tracks are" : "the phone track is"} skipped for them.`);
     return parts.join(" ");
   };
@@ -579,14 +610,17 @@ const WIN_BACK_ENTRY: Record<CopyPreview["winBackEntry"], string> = {
 /** One message of Copy for a lead: its heading with the day it goes, or why it has none, and its copy rendered for the lead. */
 function PreviewMessage({ s, def, named, horizonDays, entry }: { s: CopyPreview["steps"][number]; def: CampaignDefinition; named: boolean; horizonDays: number | null; entry?: CopyPreview["winBackEntry"] }) {
   const track = def.tracks.find((t) => t.id === s.trackId);
-  const sms = s.channel === "sms";
+  // A LinkedIn message reads like a text: no subject, a message bubble (ticket 24b).
+  const sms = s.channel === "sms" || s.channel === "linkedin";
+  const linkedin = s.channel === "linkedin";
+  const invite = linkedin && s.number === 1;
   // A step of the win-back branch is named for it, as the shared label says (ticket 16c): "Win-back email 1".
-  const noun = `${stepNoun(trackLabel(def, { id: s.trackId, channel: s.channel }), sms ? "sms" : "email")} ${s.number}`;
+  const noun = stepTitle(trackLabel(def, { id: s.trackId, channel: s.channel }), s.channel, s.number);
   return (
     <li className="overflow-hidden rounded-field border border-line">
       <div className="flex items-center justify-between gap-3 border-b border-line bg-raised px-3.5 py-2 text-[13px]">
         <span className="flex min-w-0 items-center gap-1.5 font-semibold">
-          <Icon name={sms ? "sms" : "email"} className="size-4 flex-none text-muted" />
+          <Icon name={s.channel} className="size-4 flex-none text-muted" />
           <span className="[overflow-wrap:anywhere]">
             {noun}
             {named && track ? <span className="font-normal text-muted"> · {trackTitle(def, track)}</span> : null}
@@ -596,7 +630,7 @@ function PreviewMessage({ s, def, named, horizonDays, entry }: { s: CopyPreview[
       </div>
       <div className="px-3.5 py-3 text-[14px] leading-[1.55]">
         {s.skipped ? (
-          <p className="text-muted">{sms ? "Skipped: this lead has no mobile of their own to text." : "Skipped: this lead has no email."}</p>
+          <p className="text-muted">{linkedin ? "Skipped: this lead has no LinkedIn member profile." : sms ? "Skipped: this lead has no mobile of their own to text." : "Skipped: this lead has no email."}</p>
         ) : (
           <>
             {!sms && (
@@ -605,11 +639,13 @@ function PreviewMessage({ s, def, named, horizonDays, entry }: { s: CopyPreview[
               </p>
             )}
             <p className={`whitespace-pre-wrap text-ink-2 [overflow-wrap:anywhere] ${sms ? "w-fit max-w-[42ch] rounded-[14px_14px_14px_4px] bg-raised px-3 py-2 shadow-[inset_0_0_0_1px_var(--color-line)]" : ""}`}>
-              <Segments segments={s.body} empty={`No copy yet. Launch is blocked until this ${sms ? "text" : "email"} has copy.`} />
+              <Segments segments={s.body} empty={invite ? "No note: the invite goes without one." : `No copy yet. Launch is blocked until this ${linkedin ? "message" : sms ? "text" : "email"} has copy.`} />
             </p>
+            {invite && <p className="mt-2 text-[13px] text-muted">The note goes while the session’s note allowance for the month lasts; after that, the invite goes without it.</p>}
+            {linkedin && s.number === 2 && <p className="mt-2 text-[13px] text-muted">Sent once they accept the invite, or after its wait if your session is already connected to them.</p>}
             {s.missing.length > 0 && (
               <p className="mt-2 text-[13px] font-medium text-crit">
-                This lead has no {s.missing.map(fieldLabel).join(" or ")} and the field has no fallback, so this {sms ? "text" : "email"} can’t be sent to them.
+                This lead has no {s.missing.map(fieldLabel).join(" or ")} and the field has no fallback, so this {linkedin ? (invite ? "invite" : "message") : sms ? "text" : "email"} can’t be sent to them.
               </p>
             )}
           </>

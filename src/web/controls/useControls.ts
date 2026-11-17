@@ -1,17 +1,14 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import type { ApiError, LeadControlApi } from "../../shared/api.ts";
+import type { ApiError } from "../../shared/api.ts";
 import { browserStorage } from "../calls/storage.ts";
 import { useBulkPending } from "../bulk/useBulk.tsx";
-import { ControlRequests, NoControlAnswer, controlKey, shownResult, isControlKey, type CampaignExpectation, type ControlResult, type ControlTarget, type LeadExpectation, type PressEntry, type PressOutcome, type SendAnswer } from "./requests.ts";
+import { ControlRequests, NoControlAnswer, controlKey, controlRequestOf, shownResult, isControlKey, type CampaignExpectation, type ControlResult, type ControlTarget, type LeadExpectation, type PressEntry, type PressOutcome, type RecordControl, type SendAnswer } from "./requests.ts";
 
 /** A 4xx whose code says the server refused the request is definite; anything else is no answer (as the call desk reads it). */
 const DEFINITE = new Set(["control_refused", "not_found", "invalid_request"]);
 
 async function sendControl(entry: PressEntry): Promise<SendAnswer> {
-  const { target } = entry;
-  const path = target.kind === "lead" ? `/api/enrollments/${encodeURIComponent(target.id)}/controls` : `/api/campaigns/${encodeURIComponent(target.id)}/${entry.action}`;
-  // Every send carries what the confirmation showed: the server applies the control only while it still holds (ticket 17b).
-  const body = target.kind === "lead" ? { requestId: entry.requestId, action: entry.action, expect: entry.expect } : { requestId: entry.requestId, expect: entry.expect };
+  const { path, body } = controlRequestOf(entry);
   let response: Response;
   try {
     response = await fetch(path, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(body) });
@@ -26,7 +23,7 @@ async function sendControl(entry: PressEntry): Promise<SendAnswer> {
 }
 
 export interface Controls {
-  press(target: ControlTarget, action: LeadControlApi, expect: LeadExpectation | CampaignExpectation): Promise<PressOutcome>;
+  press(target: ControlTarget, action: RecordControl, expect: LeadExpectation | CampaignExpectation, trackId?: string): Promise<PressOutcome>;
   /** The press stored for a target, whichever tab made it. */
   pending(target: ControlTarget): PressEntry | null;
   /** Its last send from this page had no answer. */
@@ -107,13 +104,13 @@ export function useControls(targets: readonly ControlTarget[], refresh: () => Pr
   }, [requests]);
 
   const press = useCallback(
-    (target: ControlTarget, action: LeadControlApi, expect: LeadExpectation | CampaignExpectation) => {
+    (target: ControlTarget, action: RecordControl, expect: LeadExpectation | CampaignExpectation, trackId?: string) => {
       setResults((prev) => {
         const next = new Map(prev);
         next.delete(controlKey(target));
         return next;
       });
-      return requests.press(target, action, expect).then((out) => {
+      return requests.press(target, action, expect, trackId).then((out) => {
         if (out.ok) ownRef.current.add(out.entry.requestId);
         return out;
       });

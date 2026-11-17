@@ -146,12 +146,38 @@ export function heldTrackItems(held: NeedsAttention["heldTracks"]): AttentionIte
  * earliest reset the read gives.
  */
 export function capacityItems(waiting: NeedsAttention["waitingForCapacity"], today: string, userZone: string): AttentionItem[] {
+  // A LinkedIn step whose kind no session has any allowance for (council on dee365d, item 15): never "full for the day",
+  // no reset promised, and nothing that sends the user looking for a setting; said in an entry of its own per campaign.
+  const none = new Map<string, NeedsAttention["waitingForCapacity"][number][]>();
+  for (const w of waiting.filter((x) => x.noAllowance)) none.set(w.campaign.id, [...(none.get(w.campaign.id) ?? []), w]);
   const groups = new Map<string, NeedsAttention["waitingForCapacity"][number][]>();
-  for (const w of waiting) groups.set(w.campaign.id, [...(groups.get(w.campaign.id) ?? []), w]);
-  return [...groups.values()].map((steps) => {
+  for (const w of waiting.filter((x) => !x.noAllowance)) groups.set(w.campaign.id, [...(groups.get(w.campaign.id) ?? []), w]);
+  return [...[...groups.values()].map((steps) => fullItem(steps, today, userZone)), ...[...none.values()].map(noAllowanceItem)];
+}
+
+/** LinkedIn steps that no session they may use has any allowance for, of their kind: they wait, with no time promised. */
+function noAllowanceItem(steps: readonly NeedsAttention["waitingForCapacity"][number][]): AttentionItem {
+  const first = steps[0] as NeedsAttention["waitingForCapacity"][number];
+  const leads = new Set(steps.map((w) => w.enrollmentId)).size;
+  const kinds = [...new Set(steps.map((w) => w.action))];
+  const what = kinds.length === 1 && kinds[0] === "invite" ? "invites" : kinds.length === 1 && kinds[0] === "message" ? "LinkedIn messages" : "invites or messages";
+  const body = `No LinkedIn session ${leads === 1 ? "it" : "they"} may use has an allowance for ${what}, so ${leads === 1 ? "it waits" : "they wait"}. With no allowance there is no room on any day, so no time is given; nothing is dropped.`;
+  if (leads === 1) return { key: `no-allowance-${first.campaign.id}`, tone: "pause", title: `${leadName(first)}’s LinkedIn step can’t go yet`, body: `In ${first.campaign.name}: ${body}`, action: recordAction(first) };
+  return {
+    key: `no-allowance-${first.campaign.id}`,
+    tone: "pause",
+    title: `${leads} leads in ${first.campaign.name} have LinkedIn steps that can’t go yet`,
+    body,
+    action: { label: "Open campaign", href: `/campaigns/${encodeURIComponent(first.campaign.id)}/leads`, ariaLabel: `Open ${first.campaign.name}` },
+  };
+}
+
+function fullItem(steps: readonly NeedsAttention["waitingForCapacity"][number][], today: string, userZone: string): AttentionItem {
+  {
     const first = steps[0] as NeedsAttention["waitingForCapacity"][number];
     const leads = new Set(steps.map((w) => w.enrollmentId)).size;
-    const byChannel = (["email", "sms"] as const satisfies readonly Channel[]).flatMap((c) => {
+    // LinkedIn too (ticket 24b): a LinkedIn step waiting for its session's allowance read "their due  waits" before.
+    const byChannel = (["email", "sms", "linkedin"] as const satisfies readonly Channel[]).flatMap((c) => {
       const n = steps.filter((w) => w.channel === c).length;
       return n > 0 ? [{ words: CHANNEL_WORDS[c], n }] : [];
     });
@@ -168,7 +194,7 @@ export function capacityItems(waiting: NeedsAttention["waitingForCapacity"], tod
       body: capital(waits),
       action: { label: "Open campaign", href: `/campaigns/${encodeURIComponent(first.campaign.id)}/leads`, ariaLabel: `Open ${first.campaign.name}` },
     };
-  });
+  }
 }
 
 /** What a channel is called where a lead has none or it is marked wrong. */

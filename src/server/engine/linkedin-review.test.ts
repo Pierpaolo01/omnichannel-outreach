@@ -483,20 +483,22 @@ describe("the review bot on e261ffa: a connection check's answer is one session'
 
   // The search's seed 24062 (offsets 30 to 99, before the push of this round): outside the window the checks age unasked,
   // and the read went back to every session's room, promising the window's next opening for an invite that can never go.
-  test("seed 24062: out of the window, a clear session with no invite room beside a pending one still reads a capacity wait, never a time", async () => {
+  test("seed 24062: out of the window, a clear session with no invite room beside a pending one reads no allowance, never a time", async () => {
     const w = await world(["s1", "s2"], { s1: room, s2: none });
     w.h.linkedin.profiles.set(PAT, { sessions: { s1: { pendingElsewhere: true } } });
     const a = await w.campaign("Spring", [{ ...li("a", "a"), window: [{ day: 1, start: 9, end: 10 }] }]);
+    // The only clear session has no invite allowance, so the read says no allowance, never a time nor full for the day
+    // (ticket 24b; review bot on a6c1700, case b: the engine's sending_capacity on its eligible sessions, read as such).
     await w.h.advanceTo(MONDAY_9 + 30 * MIN);
-    expect((await w.read(a.lead)).tracks[0]?.nextStep?.when).toMatchObject({ kind: "waits", why: "sending_capacity" });
+    expect((await w.read(a.lead)).tracks[0]?.nextStep?.when).toMatchObject({ kind: "waits", why: "no_allowance" });
     await w.h.advanceTo(MONDAY_9 + 3 * H);
     const read = (await w.read(a.lead)).tracks[0];
     expect(read?.hold).toBeNull();
-    expect(read?.nextStep?.when).toMatchObject({ kind: "waits", why: "sending_capacity" });
+    expect(read?.nextStep?.when).toMatchObject({ kind: "waits", why: "no_allowance" });
     expect(w.h.linkedin.handoverLog).toEqual([]);
   });
 
-  test("the pending hold only when every session is pending; a clear session out of invite room with another pending is a capacity wait", async () => {
+  test("the pending hold only when every session is pending; a clear session with no invite allowance beside a pending one reads no allowance", async () => {
     const all = await world(["s1", "s2"]);
     all.h.linkedin.profiles.set(PAT, { pendingElsewhere: true });
     const a = await all.campaign("Spring", [li("a", "a")]);
@@ -509,7 +511,8 @@ describe("the review bot on e261ffa: a connection check's answer is one session'
     await mixed.h.advanceTo(MONDAY_9 + H);
     const read = (await mixed.read(b.lead)).tracks[0];
     expect(read?.hold).toBeNull();
-    expect(read?.nextStep?.when).toMatchObject({ kind: "waits", why: "sending_capacity" });
+    // The clear session has no invite allowance (ticket 24b): no allowance on the sessions the invite may go from.
+    expect(read?.nextStep?.when).toMatchObject({ kind: "waits", why: "no_allowance" });
     expect(mixed.h.linkedin.handoverLog).toEqual([]);
   });
 });

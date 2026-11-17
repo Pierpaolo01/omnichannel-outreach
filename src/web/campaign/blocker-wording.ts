@@ -4,7 +4,8 @@
  * (`trackId`, or for a merge field every message that uses it with no fallback), and by that track's
  * own channel and order ("the SMS track", "email track 2"), never by its position or a default channel.
  */
-import type { CampaignDefinition, LaunchBlocker, SmsProviderStatus, TrackDefinition } from "../../shared/api.ts";
+import type { CampaignDefinition, LaunchBlocker, LinkedinProviderStatus, SmsProviderStatus, TrackDefinition } from "../../shared/api.ts";
+import { stepTitle } from "../../shared/track-label.ts";
 import { fieldLabel, STEP_NOUN, trackName } from "./model.ts";
 import { whyNoSmsNumber } from "./sms-wording.ts";
 
@@ -22,16 +23,21 @@ export interface BlockerWording {
 
 const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const and = (items: readonly string[]): string => (items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1) ?? ""}`);
+/** A step's title in its track, which the sentence names beside it: "Email 2", "Text 1", a LinkedIn step by its role ("First message"). */
+const stepName = (track: TrackDefinition | undefined, number: number): string => {
+  const channel = track?.channel ?? "email";
+  return channel === "call" ? `${STEP_NOUN.call} ${number}` : stepTitle({ branch: "main" }, channel, number);
+};
 const channelOf = (track: TrackDefinition | undefined): TrackDefinition["channel"] => track?.channel ?? "email";
 
-export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition, sms: SmsProviderStatus | null = null): BlockerWording {
+export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition, sms: SmsProviderStatus | null = null, linkedin: LinkedinProviderStatus | null = null): BlockerWording {
   const trackOf = (id: string) => def.tracks.find((t) => t.id === id);
   const named = (track: TrackDefinition | undefined) => (track ? trackName(def, track) : "a track");
 
   if (b.kind === "missing_merge_field") {
     const places = b.uses.map((u) => {
       const track = trackOf(u.trackId);
-      return { ...u, text: `${STEP_NOUN[channelOf(track)]} ${u.stepNumber} of ${named(track)}` };
+      return { ...u, text: `${stepName(track, u.stepNumber)} of ${named(track)}` };
     });
     const field = fieldLabel(b.field);
     return {
@@ -42,17 +48,24 @@ export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition, sms: 
   }
 
   const track = trackOf(b.trackId);
-  const channel = track ? channelOf(track) : b.kind === "no_sender" && b.channel === "sms" ? "sms" : "email";
+  const channel = track ? channelOf(track) : b.kind === "no_sender" && (b.channel === "sms" || b.channel === "linkedin") ? b.channel : "email";
   const name = capitalise(named(track));
   if (b.kind === "empty_copy") {
-    const noun = `${STEP_NOUN[channel]} ${b.stepNumber}`;
+    const noun = stepName(track, b.stepNumber);
     const what = b.part === "subject" ? `${noun} has no subject` : `${noun} has no ${channel === "email" ? "copy" : "message"}`;
     return {
       title: `${name}: ${what}`,
-      detail: b.part === "subject" ? "Give it a subject, or let it continue the thread." : `Write it, or remove the ${channel === "sms" ? "text" : "email"}.`,
+      detail: b.part === "subject" ? "Give it a subject, or let it continue the thread." : `Write it, or remove the ${channel === "sms" ? "text" : channel === "linkedin" ? "message" : "email"}.`,
       actions: [{ label: "Write it", trackId: b.trackId, stepId: b.stepId }],
     };
   }
+  // LinkedIn (ADR 0004 1.1): the domain's own words, and the provider read's; nothing says a session can be connected here.
+  if (channel === "linkedin")
+    return {
+      title: `${name} has no connected LinkedIn session`,
+      detail: [linkedin?.message ?? null, "Remove the track to launch without it."].filter((x) => x !== null).join(" "),
+      actions: [{ label: "Open track", trackId: b.trackId }],
+    };
   return {
     title: `${name} has no connected sender ${channel === "sms" ? "number" : "inbox"}`,
     detail: channel === "sms" ? ["It can’t send until a number is connected.", whyNoSmsNumber(sms), "Remove the track to launch without it."].filter((x) => x !== null).join(" ") : "It can’t send until an inbox is connected.",

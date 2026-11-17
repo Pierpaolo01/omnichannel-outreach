@@ -162,7 +162,12 @@ export type StepWaitApi =
   /** A LinkedIn message waiting for its invite to be accepted (ADR 0004 section 9): `until` is the day the wait ends, a fact. */
   | "awaiting_acceptance"
   /** An invite to the profile already pending on LinkedIn that this application did not send (question Q42). */
-  | "invite_pending_elsewhere";
+  | "invite_pending_elsewhere"
+  /**
+   * A LinkedIn step no session it may use has any allowance for, of the step's kind (council on dee365d, item 15): the
+   * engine's `sending_capacity` with every such session's allowance zero or unset, so nothing resets it. No time.
+   */
+  | "no_allowance";
 
 /**
  * When a pending step goes, as the engine decides it at the read's instant (`stepWhen`): ready (its time has come and nothing
@@ -235,7 +240,18 @@ export interface EnrollmentRead extends EnrollmentProgress {
    * withdrawal is asked again until then; a send is recorded once and starts nothing while the lead is held.
    */
   readonly mayStillSend: number;
+  /**
+   * Whether the user may mark this lead replied on LinkedIn now (ADR 0004 section 7), by the engine's own rule
+   * (`markRepliedRefusal`), with its reason when refused; null when the campaign has no LinkedIn track (ticket 24b).
+   */
+  readonly linkedinReply: LinkedinReplyMark | null;
 }
+
+/** The LinkedIn reply mark as a read allows it: allowed, or refused with the engine's reason (ticket 24b). */
+export type LinkedinReplyMark =
+  /** `work`: the LinkedIn work that lets the mark be made (review bot on c20c8f0), its kind and whether it is recorded sent. */
+  | { readonly allowed: true; readonly work: { readonly kind: "invite" | "message"; readonly state: "sent" | "handed" } }
+  | { readonly allowed: false; readonly reason: string };
 
 /** One enrollment's read on a person's or company lead's record (ticket 17b), with its campaign's launch and pause as read at the same instant. */
 export interface RecordLead extends EnrollmentRead {
@@ -454,6 +470,17 @@ export interface SenderAccountViewApi {
   readonly usedToday: number;
   /** An account-level wait after a quota (402) or rate-limit (429) refusal. */
   readonly waiting: "quota" | "rate_limited" | null;
+  /**
+   * A LinkedIn session's room per kind of action (ADR 0004 6; council on dee365d, item 4): its invites and its messages a
+   * day, each with what is used today. `capacity` and `usedToday` above add the two and are not said for a session.
+   */
+  readonly kinds?: SessionKinds;
+}
+
+/** A LinkedIn session's daily allowances, each with its use today (sent on the reset day plus reservations). */
+export interface SessionKinds {
+  readonly invite: { readonly capacity: number; readonly usedToday: number };
+  readonly message: { readonly capacity: number; readonly usedToday: number };
 }
 
 /**
@@ -551,7 +578,12 @@ export interface StepProgressView {
 
 /** What the engine stores of a LinkedIn track, for the record's sentences (ADR 0004 section 9). Part b words it. */
 export interface LinkedinTrackView {
-  /** The invite's note as it went: with it, without it because the note allowance was used, none written; null before it went. */
+  /**
+   * The invite's work (council on dee365d, item 11): `sent` once the engine records it sent (by the session, a lookup or the
+   * user's mark); `handed` while it is with the session and not known to have gone; null before the handover, or refused.
+   */
+  readonly invite: "sent" | "handed" | null;
+  /** The note chosen at the handover: with it, without it because the note allowance was used, none written; null before it. Said as gone only with `invite` sent. */
   readonly note: "with" | "withheld" | "none" | null;
   /** How the track connected, and when (the acceptance or the pre-send check); null while not connected. */
   readonly connection: "accepted" | "already_connected" | null;
@@ -562,6 +594,14 @@ export interface LinkedinTrackView {
   readonly acceptedAfterFinish: boolean;
   /** The withdrawal after the acceptance wait: wanted, done, found accepted first, or kept by the user; null when none. */
   readonly withdrawal: "wanted" | "withdrawn" | "accepted_first" | "kept_by_user" | null;
+  /** With `wanted`: the session has been asked at least once, and answered unknown (council on a6c1700, item 9). */
+  readonly withdrawalAsked: boolean;
+  /**
+   * Why the track was skipped as a missing channel (council on a6c1700, item 10), from stored facts: no LinkedIn address in
+   * the import; an address that is not a member profile; a company lead; the profile it started with replaced by a
+   * re-import; the profile marked unreachable. Null for any other finish.
+   */
+  readonly skipCause: import("../domain/sequence/state.ts").LinkedinSkipCause | "unrecorded" | null;
   /** The session answered the withdrawal unknown too many times: listed in Needs attention for the user. */
   readonly withdrawalStuck: boolean;
   /** An invite this application sent is still open on LinkedIn (sent, not accepted, not withdrawn), whatever the lead's state. */
@@ -678,6 +718,8 @@ export interface NeedsAttention {
    */
   readonly heldCapacity: readonly {
     readonly accountId: string;
+    /** The account's channel: a LinkedIn session's held work is said apart from a summed capacity (council on dee365d, item 4). */
+    readonly channel: "email" | "sms" | "linkedin";
     readonly held: number;
     readonly capacity: number;
     /** Sends already counted on the inbox's current reset day. */
@@ -707,6 +749,10 @@ export interface NeedsAttention {
     readonly dueAt: string;
     readonly accountIds: readonly string[];
     readonly resetsAt: string;
+    /** A LinkedIn step's kind of action, whose allowance it waits on (council on dee365d, item 15); null on email and SMS. */
+    readonly action: "invite" | "message" | null;
+    /** Every account it may use has no allowance of that kind (zero or never set): no reset brings room, so none is promised. */
+    readonly noAllowance: boolean;
   })[];
   /**
    * Leads left with no usable channel, from any cause (ticket 20a; follow-up 42 item 50), most recently ended first, with
@@ -752,6 +798,8 @@ export interface PreviewLead {
   readonly mobile: boolean;
   /** A good phone number to call: their own, or the company's main line. */
   readonly phone: boolean;
+  /** A usable LinkedIn member profile of the decision maker's (ADR 0004 section 5); a company lead has none (Q35). */
+  readonly linkedin: boolean;
   /** Merge fields the live copy uses that this lead has no value for. */
   readonly lacks: readonly string[];
 }
@@ -760,8 +808,8 @@ export interface PreviewLead {
 export interface BeforeLaunchView {
   readonly campaignId: string;
   readonly leads: readonly PreviewLead[];
-  /** Spec "Before launch": how many leads have an email, a mobile or a phone number. */
-  readonly coverage: { readonly leads: number; readonly email: number; readonly mobile: number; readonly phone: number };
+  /** Spec "Before launch": how many leads have an email, a mobile, a phone number or a LinkedIn member profile (ticket 24b). */
+  readonly coverage: { readonly leads: number; readonly email: number; readonly mobile: number; readonly phone: number; readonly linkedin: number };
   /** Every merge field the live copy uses, with how many leads lack it and the fallbacks written for it. */
   readonly mergeFields: readonly {
     readonly field: string;
@@ -801,6 +849,8 @@ export interface LoadProjectionView {
     /** The most this campaign would send from it on one day. */
     readonly busiestDay: number;
     readonly gapSeconds: number;
+    /** A LinkedIn session's room per kind (council on dee365d, item 4); its summed `capacity` is not said. */
+    readonly kinds?: SessionKinds;
   }[];
   /**
    * Calendar days, counting launch day as day 1, until every lead some live track can reach has had
@@ -1103,6 +1153,15 @@ export interface SmsProviderStatus {
   readonly numbers: readonly { readonly id: string; readonly label: string; readonly healthy: boolean; readonly capacity: number; readonly usedToday: number }[];
 }
 
+/**
+ * GET /api/linkedin-provider (ADR 0004 1.1): `none` in the running application, where no LinkedIn session is connected;
+ * `test-simulator` only in tests, which drive a simulated session that is not a LinkedIn session.
+ */
+export interface LinkedinProviderStatus {
+  readonly provider: "none" | "test-simulator";
+  readonly message: string;
+}
+
 /** Why a sender inbox of the email provider cannot send now. */
 export type InboxHoldReasonApi = "sending_off" | "not_active" | "no_daily_limit" | "stale" | "invalid_report";
 
@@ -1288,8 +1347,25 @@ export interface WithheldTrack {
   readonly channel: "email" | "sms" | "call" | "linkedin";
   /** As the canvas names it: "the SMS track", "email track 2". */
   readonly label: string;
-  /** Its channel has no connected sender, so its leads and every track after it would wait. */
-  readonly why: "no_sender";
+  /**
+   * `no_sender`: its channel has no connected sender, so its leads and every track after it would wait. `not_modelled`: a
+   * LinkedIn track, which the estimate does not model yet (ticket 24b: it cannot foresee acceptances, and does not run the
+   * connection check), so no figure is shown rather than a wrong one.
+   */
+  readonly why: "no_sender" | "not_modelled";
+  /**
+   * Another subject's track (council on dee365d, item 8; on a6c1700, items 3 to 5): a campaign, or a running test, competing
+   * with this one, whose LinkedIn track is still to finish for some of its leads, which the estimate cannot simulate; with
+   * why it competes. Absent for this campaign's own tracks.
+   */
+  readonly competing?: {
+    readonly name: string;
+    /** A running test run of campaign `name`; `own` when it is this campaign's own test. */
+    readonly test: boolean;
+    readonly own: boolean;
+    /** It shares a sender inbox, an SMS number or a LinkedIn session with this campaign, the call list, or senders through another campaign. */
+    readonly why: "inbox" | "number" | "session" | "calls" | "through_another";
+  };
 }
 
 export interface WithheldBy {
@@ -1659,6 +1735,9 @@ export interface TestRunTab {
     /** A lead's record now has it: it cannot be used (question Q29). */
     readonly emailIsALead: boolean;
     readonly mobileIsALead: boolean;
+    /** The user's own test LinkedIn profile (ADR 0004 section 8), and whether a person's record now has it. */
+    readonly linkedin: string | null;
+    readonly linkedinIsALead: boolean;
   };
   readonly noTestSinceEdit: boolean;
   /** The leads a test may render its copy for, by name. */
@@ -1684,9 +1763,17 @@ export interface TestRunRead {
   readonly renderAs: { readonly id: string; readonly name: string };
   readonly email: string | null;
   readonly mobile: string | null;
+  /** The test LinkedIn profile it sends to (ADR 0004 section 8). */
+  readonly linkedin: string | null;
   /** Its messages still with a provider, which may still be sent after it ended. */
   readonly mayStillSend: number;
   readonly steps: readonly TestStepRow[];
+  /** The run's outreach status at the read, which a reply mark's confirmation sends back as its expectation (ticket 24b). */
+  readonly status: OutreachStatus;
+  /** Each LinkedIn track's own facts for this run, as a lead's read gives them (council on dee365d, items 2 and 3). */
+  readonly linkedinTracks: readonly { readonly trackId: string; readonly view: LinkedinTrackView }[];
+  /** Whether the user may mark this test replied on LinkedIn now, by the engine's rule; null with no LinkedIn track (ticket 24b). */
+  readonly linkedinReply: LinkedinReplyMark | null;
 }
 
 /** What happened to one step of the canvas in a test run, from its stored facts only. */
@@ -1723,6 +1810,8 @@ export interface TestStepRow {
   readonly at: string | null;
   /** For a due step with no time the engine can promise: why it waits (`StepWaitApi`); null otherwise. */
   readonly waits: StepWaitApi | null;
+  /** With `awaiting_acceptance`: the day the acceptance wait ends, a fact of the read (ADR 0004 section 9), never a send. */
+  readonly until?: string;
   /** For a call: its task, and the outcome logged. */
   readonly taskId: string | null;
   readonly outcome: string | null;

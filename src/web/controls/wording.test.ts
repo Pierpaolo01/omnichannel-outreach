@@ -38,6 +38,7 @@ function lead(status: OutreachStatus, fields: Partial<RecordLead> = {}): RecordL
     reply: null,
     sender: null,
     smsSender: null,
+    linkedinReply: null,
     zone: ZONE,
     tracks: [],
     branch: "main",
@@ -82,7 +83,7 @@ describe("when a step goes, in one wording function (ADR 0003 \"Reads that say w
       campaign_not_launched: true, campaign_paused: true, lead_paused: true, callback: true, ended: true, with_provider: true, unresolved: true, render_failed: true,
       provider_skipped: true, no_thread: true, sms_conversation_unsettled: true, no_window: true, sender_unavailable: true, sending_capacity: true, call_capacity: true, on_call_list: true,
       no_transport: true, waiting_on_provider: true, reply_pending: true, no_destination: true, call_hours_closed: true, awaiting_acceptance: true, invite_pending_elsewhere: true,
-      sender_slot: true, sender_rate_limited: true, sender_waiting: true,
+      sender_slot: true, sender_rate_limited: true, sender_waiting: true, no_allowance: true,
     };
     for (const why of Object.keys(reasons) as StepWaitApi[]) {
       const words = stepWhenPhrase({ kind: "waits", why, channel: "email" }, ZONE);
@@ -184,7 +185,7 @@ describe("the controls offered: exactly the ones the read allows, in a fixed ord
       controls: [refused("pause", "Outreach to them has ended in this campaign (stopped manually)."), allowed("move_to_win_back", { next: step() }), allowed("resume_from_next_step", { next: step() }), refused("skip", "x")],
     });
     expect(offeredControls(r).map((c) => c.action)).toEqual(["resume_from_next_step", "move_to_win_back"]);
-    expect(CONTROL_LABEL).toEqual({ pause: "Pause", resume: "Resume", skip: "Skip this step", stop: "Stop", resume_from_next_step: "Resume from the next step", move_to_win_back: "Move to win-back" });
+    expect(CONTROL_LABEL).toEqual({ pause: "Pause", resume: "Resume", skip: "Skip this step", stop: "Stop", resume_from_next_step: "Resume from the next step", move_to_win_back: "Move to win-back", mark_replied: "Mark replied on LinkedIn", invite_withdrawn: "It’s withdrawn", invite_kept: "It’s still there" });
   });
 });
 

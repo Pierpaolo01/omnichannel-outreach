@@ -95,6 +95,11 @@ export interface TrackProgress {
   /** For `skipped_conversation_taken`: the conversations that caused the skip, as they were then (question Q7 answered). */
   readonly conversationOwners?: readonly ConversationCause[] | null;
   /**
+   * For a LinkedIn track that finished `skipped_missing_channel`: why, recorded when it finished and never re-derived
+   * (ticket 24b, the re-check of 82cf16d): a later import, a later bad mark or a new decision maker leaves it as it was.
+   */
+  readonly skipCause?: LinkedinSkipCause;
+  /**
    * A LinkedIn track's connection (ADR 0004 3.2), set once: the invite accepted, or the sender already connected. Its point
    * on the lead's clock is `connectedAt` and `connectedWall`. Absent or null on other tracks and until connected.
    */
@@ -447,9 +452,17 @@ export interface LeadDetail {
   readonly order: number;
 }
 
+/** Why a LinkedIn track was skipped as a missing channel, as recorded when it finished (ticket 24b). */
+export type LinkedinSkipCause = "no_profile" | "not_a_member_profile" | "company_lead" | "replaced" | "removed_by_import" | "marked_bad";
+
 export interface LeadFacts {
   /** The prospect's zone: the person's, else the company's, else the campaign default (3.4). */
   readonly zone: string;
+  /**
+   * What the import holds for a decision maker's LinkedIn address (ticket 24b, council on a6c1700, item 10): a member
+   * profile, an address that is not one (a company page, a search), or none. Absent for a company lead or a test run.
+   */
+  readonly importedProfile?: "member" | "not_member" | "none";
   readonly details: readonly LeadDetail[];
   /**
    * Every detail id an attempt or track names, resolved to the live detail it stands for now.

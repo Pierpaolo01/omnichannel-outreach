@@ -67,6 +67,8 @@ const capacity = (enrollmentId: string, person: typeof SAM | null, campaign: typ
   dueAt: "2026-11-15T08:00:00Z",
   accountIds: ["inbox-a"],
   resetsAt,
+  action: null,
+  noAllowance: false,
 });
 
 describe("sending not running now, by the read's cause", () => {
@@ -241,7 +243,7 @@ describe("the order of Needs attention (ticket 20b): the prototype's, with the n
         heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e9", trackId: "t1", channel: "email", reason: "unresolved", owners: [] }],
         accountWaits: [{ accountId: "inbox-c", reason: "quota", until: null }],
         senderProblems: [{ accountId: "sms-1", channel: "sms", label: "+31 97 0102 3344", problem: "disconnected" }],
-        heldCapacity: [{ accountId: "inbox-d", held: 1, capacity: 30, sentToday: 4, work: [] }],
+        heldCapacity: [{ accountId: "inbox-d", channel: "email", held: 1, capacity: 30, sentToday: 4, work: [] }],
         anomalies: [{ what: "Something odd.", at: "2026-11-15T08:00:00Z" }],
         waitingForCapacity: [capacity("e1", SAM, CLINICS, "email", "2026-11-15T23:00:00Z")],
         noUsableChannel: [{ enrollmentId: "e2", campaignId: CLINICS.id, person: NIA, company: HARBOUR, campaign: CLINICS, endedAt: "2026-11-15T08:00:00Z", channels: [{ channel: "email", why: "missing", owners: [] }] }],
@@ -301,7 +303,7 @@ describe("a notice states what is known and promises nothing (the re-check of ff
       heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e9", trackId: "t1", channel: "email", reason: "unresolved", owners: [] }],
       accountWaits: [{ accountId: "inbox-c", reason: "quota", until: null }, { accountId: "inbox-e", reason: "rate_limited", until: "2026-11-15T12:00:00Z" }],
       senderProblems: [{ accountId: "sms-1", channel: "sms", label: "+31 97 0102 3344", problem: "disconnected" }],
-      heldCapacity: [{ accountId: "inbox-d", held: 1, capacity: 30, sentToday: 4, work: [] }],
+      heldCapacity: [{ accountId: "inbox-d", channel: "email", held: 1, capacity: 30, sentToday: 4, work: [] }],
       waitingForCapacity: [capacity("e1", SAM, CLINICS, "email", "2026-11-15T23:00:00Z")],
       waitingOnProvider: [{ channel: "email", since: "2026-11-15T08:10:00Z", sends: 3 }, { channel: "sms", since: null, sends: 1 }],
     });

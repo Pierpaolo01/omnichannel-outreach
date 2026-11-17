@@ -10,6 +10,7 @@ import { STATUS_LABEL } from "../status.tsx";
 import type { DeskSnapshot } from "./callDesk.ts";
 import { dayLabel, zonedInstants, type CallbackChoice } from "./callbackTime.ts";
 import { capacityItems, heldTrackItems, noUsableChannelItem, providerWaitItems, sendingInterruptedItem } from "./interruption.ts";
+import { withdrawalStuckItems } from "../campaign/linkedin-wording.ts";
 import { conversationTaken, conversationUnsettled } from "../campaign/sms-wording.ts";
 
 /** The outcome buttons, as the approved prototype labels them. */
@@ -437,7 +438,7 @@ export function carriedItem(today: Pick<TodayView, "carriedOver" | "carriedOverL
  */
 export const SAID_ON_TODAY: Record<keyof NeedsAttention, string> = {
   overdueCallbacks: "from Today's own read, which names whose they are (overdueItem)",
-  inviteWithdrawalsUnknown: "not yet: part b of ticket 24 words it (ADR 0004 3.3); the read already lists each one",
+  inviteWithdrawalsUnknown: "withdrawalStuckItems (ticket 24b), one entry per lead, after held tracks: the record takes the two answers",
   sendingInterrupted: "sendingInterruptedItem, from this read, so it and the provider entries share one instant",
   waitingOnProvider: "providerWaitItems",
   senderProblems: "one entry per account",
@@ -487,9 +488,11 @@ export function attentionItems(n: NeedsAttention, today: Pick<TodayView, "overdu
     items.push({ key: `stalled-${s.accountId}`, tone: "pause", title: `Sends from ${s.accountId} are stalled`, body: `${s.holding.length} ${s.holding.length === 1 ? "send waits" : "sends wait"} on it. Nothing is dropped.` });
   }
   for (const c of n.heldCapacity) {
-    items.push({ key: `held-${c.accountId}`, tone: "pause", title: `${c.held} of ${c.accountId}’s ${c.capacity} sends today are held`, body: "The provider hasn’t confirmed whether those messages went, so their room stays taken while it hasn’t." });
+    // A LinkedIn session's capacity is two allowances (council on dee365d, item 4): its held work is said without a sum.
+    items.push({ key: `held-${c.accountId}`, tone: "pause", title: c.channel === "linkedin" ? `${c.held} of ${c.accountId}’s LinkedIn steps today ${c.held === 1 ? "is" : "are"} held` : `${c.held} of ${c.accountId}’s ${c.capacity} sends today are held`, body: "The provider hasn’t confirmed whether those messages went, so their room stays taken while it hasn’t." });
   }
   items.push(...heldTrackItems(n.heldTracks));
+  items.push(...withdrawalStuckItems(n.inviteWithdrawalsUnknown ?? []));
   items.push(...capacityItems(n.waitingForCapacity, today.date, userZone));
   for (const [i, a] of n.anomalies.entries()) items.push({ key: `anomaly-${i}`, tone: "end", title: "The provider reported something unexpected", body: a.what });
   const ended = noUsableChannelItem(n.noUsableChannel, today.date, userZone);

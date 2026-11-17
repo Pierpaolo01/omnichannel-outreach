@@ -3,7 +3,8 @@ import { useLocation, useSearch } from "wouter";
 import { skipLimitOf } from "../../domain/sequence/calls.ts";
 import { MERGE_FIELDS } from "../../domain/sequence/copy.ts";
 import { NO_WIN_BACK_BRANCH, declinedPathOf, winBackAvailable, type DeclinedPath } from "../../domain/sequence/definition.ts";
-import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, SmsProviderStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
+import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, LinkedinProviderStatus, SmsProviderStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
+import { stepTitle } from "../../shared/track-label.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -114,7 +115,7 @@ export function SequenceTab({ campaignId, editor, paused = false }: { campaignId
    * Adds a track through the arrangement rule, to the main sequence or the win-back branch, opens it,
    * and moves focus to its first message, or a phone track's call script.
    */
-  const add = (channel: "email" | "sms" | "call", branch: TrackDefinition["branch"] = "main") => {
+  const add = (channel: "email" | "sms" | "call" | "linkedin", branch: TrackDefinition["branch"] = "main") => {
     let added: TrackDefinition | undefined;
     editor.update((d) => {
       const out = arrange(d, { kind: "add", channel, branch });
@@ -151,6 +152,7 @@ export function SequenceTab({ campaignId, editor, paused = false }: { campaignId
               <span>
                 <b className="font-semibold text-base-content">{facts.coverage.phone}</b> a phone number
               </span>
+
             </p>
           )}
           {/* The present state, from the draft and the stored version (council on 93bed86, item 15). */}
@@ -169,6 +171,10 @@ export function SequenceTab({ campaignId, editor, paused = false }: { campaignId
                 <button type="button" className="btn gap-1.5 border-line-strong bg-base-100 font-medium" disabled={editor.locked} onClick={() => add("call")}>
                   <Icon name="call" className="size-4" />
                   Phone track
+                </button>
+                <button type="button" className="btn gap-1.5 border-line-strong bg-base-100 font-medium" disabled={editor.locked} onClick={() => add("linkedin")}>
+                  <Icon name="linkedin" className="size-4" />
+                  LinkedIn track
                 </button>
               </div>
             </>
@@ -326,7 +332,7 @@ function Canvas({
   selectedId: string | null;
   editor: SequenceEditor;
   onSelect: (trackId: string) => void;
-  onAdd: (channel: "email" | "sms" | "call", branch?: TrackDefinition["branch"]) => void;
+  onAdd: (channel: "email" | "sms" | "call" | "linkedin", branch?: TrackDefinition["branch"]) => void;
 }) {
   const main = treeOf(tracks);
   const branch = treeOf(branchTracks);
@@ -499,7 +505,7 @@ function addAfterRemoving(removed: TrackDefinition, result: CampaignDefinition):
  * tracks): a dashed box in `hand`, its name, its own Add (email or SMS: the branch holds no phone
  * track, so none is offered), and its tracks; while it has none, what it is and what makes it appear.
  */
-function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, children }: { empty: boolean; launched: boolean; locked: boolean; stacked: boolean; gutter: number; width: number; onAdd: (channel: "email" | "sms") => void; children: ReactNode }) {
+function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, children }: { empty: boolean; launched: boolean; locked: boolean; stacked: boolean; gutter: number; width: number; onAdd: (channel: "email" | "sms" | "linkedin") => void; children: ReactNode }) {
   const headingId = useId();
   return (
     <section
@@ -516,7 +522,7 @@ function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, ch
         <h3 id={headingId} className="text-[13px] font-semibold text-hand">
           Win-back branch <span className="font-normal text-ink-2">· for leads who decline on a call</span>
         </h3>
-        {!launched && !empty && <AddTrackMenu id={ADD_WIN_BACK_ID} label="Add win-back track" channels={["email", "sms"]} disabled={locked} onAdd={(channel) => channel !== "call" && onAdd(channel)} />}
+        {!launched && !empty && <AddTrackMenu id={ADD_WIN_BACK_ID} label="Add win-back track" channels={["email", "sms", "linkedin"]} disabled={locked} onAdd={(channel) => channel !== "call" && onAdd(channel)} />}
       </div>
       {empty ? (
         <div className="flex max-w-[460px] flex-col items-start gap-2 pt-1">
@@ -530,6 +536,10 @@ function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, ch
               <button type="button" className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium" disabled={locked} aria-label="Add a win-back SMS track" onClick={() => onAdd("sms")}>
                 <Icon name="sms" className="size-4" />
                 SMS track
+              </button>
+              <button type="button" className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium" disabled={locked} aria-label="Add a win-back LinkedIn track" onClick={() => onAdd("linkedin")}>
+                <Icon name="linkedin" className="size-4" />
+                LinkedIn track
               </button>
             </div>
           )}
@@ -617,34 +627,40 @@ function DeclinedEdges({ edges }: { edges: readonly DeclinedEdge[] }) {
   );
 }
 
+/** The channel's word on a track's node. */
+const CHANNEL_ON_NODE: Record<TrackDefinition["channel"], string> = { email: "Email", sms: "SMS", call: "Phone", linkedin: "LinkedIn" };
+
 function TrackNode({ track, def, selected, blockers, launched, onSelect }: { track: TrackDefinition; def: CampaignDefinition; selected: boolean; blockers: readonly LaunchBlocker[]; launched: boolean; onSelect: () => void }) {
   const steps = liveSteps(track);
   const issues = launched ? 0 : trackIssues(track, blockers);
   const title = trackTitle(def, track);
   // A phone track's declined path, as the reference's card says it; none chosen is said as the engine reads it (Q14).
+  // A LinkedIn track's acceptance wait (ticket 24b), as its inspector sets it.
+  const acceptWait = track.channel === "linkedin" && Number.isFinite(track.acceptWaitDays) ? `Waits ${days(track.acceptWaitDays ?? 0)} for acceptance` : null;
   const declined = track.channel === "call" ? (track.declinedPath ? `If declined: ${DECLINED_ON_NODE[track.declinedPath]}` : `If declined: ${DECLINED_ON_NODE[declinedPathOf(track)]}, not chosen yet`) : null;
   return (
     <button
       id={nodeId(track.id)}
       type="button"
       aria-pressed={selected}
-      aria-label={`${title}: ${trackSummary(track)}${issues > 0 ? `, ${issues} to fix` : ""}. Starts ${startsText(def, track)}.${declined ? ` ${declined}.` : ""} ${selected ? "Close" : "Open"} it in the inspector.`}
+      aria-label={`${title}: ${trackSummary(track)}${issues > 0 ? `, ${issues} to fix` : ""}. Starts ${startsText(def, track)}.${declined ? ` ${declined}.` : ""}${acceptWait ? ` ${acceptWait}.` : ""} ${selected ? "Close" : "Open"} it in the inspector.`}
       onClick={onSelect}
       className={`flex w-[230px] max-w-full cursor-pointer flex-col gap-[3px] rounded-[11px] border bg-base-100 px-3 pb-3 pt-2.5 text-left hover:border-ink-2 ${
         selected ? "border-base-content shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-base-content)_14%,transparent)]" : issues > 0 ? "border-crit" : "border-line-strong"
       }`}
     >
       <span className="flex items-center gap-1.5 text-[12px] font-medium text-muted">
-        <Icon name={track.channel === "call" ? "call" : track.channel === "sms" ? "sms" : "email"} className="size-[15px]" />
-        {track.channel === "call" ? "Phone" : track.channel === "sms" ? "SMS" : "Email"}
+        <Icon name={track.channel} className="size-[15px]" />
+        {CHANNEL_ON_NODE[track.channel]}
         {issues > 0 && <span className="ml-auto flex items-center gap-1 font-semibold text-crit before:size-[7px] before:rounded-full before:bg-current before:content-['']">{issues} to fix</span>}
       </span>
       <span className="text-[14.5px] font-semibold leading-[1.3]">{title}</span>
       <span className="text-[12.5px] text-muted">{trackSummary(track)}</span>
       {declined && <span className={`text-[12.5px] font-medium ${track.declinedPath ? "text-hand" : "text-muted"}`}>{declined}</span>}
+      {acceptWait && <span className="text-[12.5px] text-muted">{acceptWait}</span>}
       <span className="mt-[5px] flex gap-[3px]" aria-hidden="true">
         {steps.map((s) => (
-          <i key={s.id} className={`h-1 flex-1 rounded-sm ${s.body.trim() || track.channel === "call" ? "bg-line-strong" : "shadow-[inset_0_0_0_1px_var(--color-crit)]"}`} />
+          <i key={s.id} className={`h-1 flex-1 rounded-sm ${s.body.trim() || track.channel === "call" || (track.channel === "linkedin" && s.id === steps[0]?.id) ? "bg-line-strong" : "shadow-[inset_0_0_0_1px_var(--color-crit)]"}`} />
         ))}
       </span>
     </button>
@@ -661,14 +677,14 @@ function AddTrackMenu({
   onAdd,
   id = ADD_TRACK_ID,
   label = "Add track",
-  channels = ["email", "sms", "call"],
+  channels = ["email", "sms", "call", "linkedin"],
 }: {
   disabled: boolean;
-  onAdd: (channel: "email" | "sms" | "call") => void;
+  onAdd: (channel: "email" | "sms" | "call" | "linkedin") => void;
   id?: string;
   label?: string;
   /** What it offers: the win-back branch's menu offers no phone track (ticket 16b). */
-  channels?: readonly ("email" | "sms" | "call")[];
+  channels?: readonly ("email" | "sms" | "call" | "linkedin")[];
 }) {
   const [focusIndex, setFocusIndex] = useState<number | null>(null);
   const open = focusIndex !== null;
@@ -682,6 +698,7 @@ function AddTrackMenu({
       { key: "email", label: "Email track", icon: "email" },
       { key: "sms", label: "SMS track", icon: "sms" },
       { key: "call", label: "Phone track", icon: "call" },
+      { key: "linkedin", label: "LinkedIn track", icon: "linkedin" },
     ] as const
   ).filter((e) => channels.includes(e.key));
   useEffect(() => {
@@ -801,7 +818,10 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
   const steps = liveSteps(track);
   const titleId = useId();
   const sms = track.channel === "sms";
-  const noun = STEP_NOUN[sms ? "sms" : "email"];
+  // A LinkedIn track (ticket 24b): its steps are the connection invite, then messages, named by their role.
+  const linkedin = track.channel === "linkedin";
+  const channel = linkedin ? "linkedin" : sms ? "sms" : "email";
+  const noun = STEP_NOUN[channel];
   // One lock from the editor state, read by every authoring control (PR 41 council, items 9 and 12).
   const locked = editor.locked;
   const changeTrack = (change: (t: TrackDefinition) => TrackDefinition) =>
@@ -812,11 +832,16 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
         <EditorNotices editor={editor} onLoadedStored={onLoadedStored} />
         {factsFailed && <ErrorState title="Lead counts for the fallbacks didn’t load." message="The copy still saves." onRetry={onRetryFacts} />}
         {/* Only the editing controls lock on a running campaign; every message still opens. */}
-        <div role="group" aria-label={sms ? "Texts" : "Emails"} className="flex min-w-0 flex-col">
+        {linkedin && (
+          <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">
+            A LinkedIn track sends a connection invite to the decision maker’s member profile from the import, then messages once they accept. Accepting is not a reply: the messages go on until they answer and you mark them replied. Someone your session is already connected to gets no invite; the first message goes to them instead.
+          </p>
+        )}
+        <div role="group" aria-label={linkedin ? "Invite and messages" : sms ? "Texts" : "Emails"} className="flex min-w-0 flex-col">
           {steps.map((step, i) => (
             <StepBlock
               key={step.id}
-              channel={sms ? "sms" : "email"}
+              channel={channel}
               step={step}
               index={i}
               steps={steps}
@@ -841,7 +866,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
                 className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium"
                 onClick={() => {
                   const added = newStep(steps.length === 0);
-                  changeTrack((t) => ({ ...t, steps: [...t.steps, sms ? { ...added, threading: "new_subject" } : added] }));
+                  changeTrack((t) => ({ ...t, steps: [...t.steps, sms || linkedin ? { ...added, threading: "new_subject" } : added] }));
                   onOpenStep(added.id);
                 }}
               >
@@ -851,6 +876,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
             </div>
           )}
         </div>
+        {linkedin && <AcceptWaitControl track={track} locked={locked} launched={editor.launched} onChange={(days) => changeTrack((t) => ({ ...t, acceptWaitDays: days }))} />}
         <TimingAndSender track={track} editor={editor} onWindow={(window) => changeTrack((t) => ({ ...t, window }))} />
         <RemoveTrack track={track} editor={editor} onRemoved={onRemoved} />
     </InspectorFrame>
@@ -1128,6 +1154,7 @@ const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1
 /** What a branch chip counts, said (council on aaf82b7): "1 email", "2 texts". */
 const messageCount = (t: TrackDefinition): string => {
   const n = liveSteps(t).length;
+  if (t.channel === "linkedin") return trackSummary(t).toLowerCase();
   return `${n} ${t.channel === "sms" ? (n === 1 ? "text" : "texts") : n === 1 ? "email" : "emails"}`;
 };
 
@@ -1141,7 +1168,7 @@ function SaveStatus({ editor }: { editor: SequenceEditor }) {
 }
 
 interface StepProps {
-  channel: "email" | "sms";
+  channel: "email" | "sms" | "linkedin";
   step: StepDefinition;
   index: number;
   steps: readonly StepDefinition[];
@@ -1155,16 +1182,20 @@ interface StepProps {
 }
 
 function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle, onChange, onRemove, locked }: StepProps) {
-  const sms = channel === "sms";
-  const noun = STEP_NOUN[channel];
-  const name = `${noun} ${index + 1}`;
+  // A LinkedIn step is a message like a text (no subject, no thread), named by its role (ticket 24b).
+  const linkedin = channel === "linkedin";
+  const sms = channel === "sms" || linkedin;
+  const name = stepTitle({ branch: "main" }, channel, index + 1);
+  const noun = linkedin ? (index === 0 ? "note" : "message") : STEP_NOUN[channel].toLowerCase();
   const first = index === 0;
+  // The invite's note may be empty: a plain invite is a choice, never a blocker (ADR 0004 3.1).
+  const invite = linkedin && first;
   const issues = stepBlockers(step, editor.view.launch.blockers).length;
   const bodyId = useId();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [waitText, setWaitText] = useState<string | null>(null);
   const threadSubject = threadSubjectOf(steps, index);
-  const summary = sms ? step.body.trim() || "No message yet" : first ? step.subject || "No subject yet" : step.threading === "continue_thread" ? "Continues the thread" : `New subject: ${step.subject || "none yet"}`;
+  const summary = invite ? step.body.trim() || "No note: a plain invite" : sms ? step.body.trim() || "No message yet" : first ? step.subject || "No subject yet" : step.threading === "continue_thread" ? "Continues the thread" : `New subject: ${step.subject || "none yet"}`;
 
   const insertField = (field: string) => {
     const el = textarea.current;
@@ -1202,7 +1233,7 @@ function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle,
               aria-label={`Days to wait before ${name}`}
             />
           </label>
-          days after {noun} {index}
+          {linkedin ? (index === 1 ? "days after they accept the invite" : `days after ${lowerFirst(stepTitle({ branch: "main" }, "linkedin", index))}`) : `days after ${STEP_NOUN[channel]} ${index}`}
         </div>
       )}
       <div className={`rounded-field border bg-base-100 ${open ? "border-line-strong" : "border-line"} ${first ? "" : ""}`}>
@@ -1252,11 +1283,11 @@ function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle,
             <textarea
               ref={textarea}
               id={`body-${step.id}`}
-              className={`textarea ${sms ? "min-h-[96px]" : "min-h-[150px]"} w-full [field-sizing:content] border-line-strong text-[14px] leading-[1.55] ${step.body.trim() ? "" : "border-crit bg-crit-soft/40"}`}
+              className={`textarea ${sms ? "min-h-[96px]" : "min-h-[150px]"} w-full [field-sizing:content] border-line-strong text-[14px] leading-[1.55] ${step.body.trim() || invite ? "" : "border-crit bg-crit-soft/40"}`}
               value={step.body}
-              placeholder={editor.launched ? `Write this ${noun.toLowerCase()}. An empty ${noun.toLowerCase()} can’t be applied.` : `Write this ${noun.toLowerCase()}. Launch is blocked while it’s empty.`}
+              placeholder={invite ? "Write a note, or leave it empty to send the invite without one." : editor.launched ? `Write this ${noun}. An empty ${noun} can’t be applied.` : `Write this ${noun}. Launch is blocked while it’s empty.`}
               onChange={(e) => onChange((s) => ({ ...s, body: e.target.value }))}
-              aria-label={`${name} ${sms ? "message" : "copy"}`}
+              aria-label={`${name} ${invite ? "note" : sms ? "message" : "copy"}`}
               aria-describedby={sms ? `${bodyId}-count` : undefined}
             />
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1267,9 +1298,13 @@ function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle,
                 </span>
               )}
             </div>
+            {invite && <p className="text-[12.5px] text-muted">The note goes with the invite while this session’s note allowance for the month lasts; after that, invites go without it.</p>}
+            {linkedin && index === 1 && <p className="text-[12.5px] text-muted">It waits for them to accept the invite, or goes once its wait has passed if your session is already connected to them.</p>}
             {/* Once launched the counts would leave out leads that ended, so none is shown (PR 41 council, item 4). */}
             <Fallbacks step={step} noun={noun} facts={locked || editor.launched ? null : facts} onChange={onChange} />
-            {steps.length > 1 && !locked && (
+            {invite && steps.length > 1 && !locked && <p className="text-[12.5px] text-muted">The connection invite stays first and can’t be removed while this track has messages.</p>}
+            {/* A LinkedIn track keeps its invite and at least one message (ADR 0004 3.1). */}
+            {steps.length > (linkedin ? 2 : 1) && !invite && !locked && (
               <div>
                 <button type="button" className="btn btn-sm btn-ghost px-2 font-medium text-muted" onClick={onRemove}>
                   Remove {name}
@@ -1310,6 +1345,43 @@ function MergeFieldMenu({ onPick }: { onPick: (field: string) => void }) {
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+/**
+ * A LinkedIn track's acceptance wait (ticket 24b; ADR 0004 3.1): whole days, at least 1, after the invite is sent. What a
+ * change does to leads already waiting is the running-edit panel's to say, from the server's read (`accept_wait`).
+ */
+function AcceptWaitControl({ track, locked, launched, onChange }: { track: TrackDefinition; locked: boolean; launched: boolean; onChange: (days: number) => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const hint = useId();
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <label className="flex flex-wrap items-center gap-2 text-[14px]">
+        Wait for acceptance
+        <input
+          type="number"
+          min={1}
+          step={1}
+          inputMode="numeric"
+          disabled={locked}
+          className="input input-sm w-[62px] border-line-strong text-right"
+          value={text ?? (Number.isFinite(track.acceptWaitDays) ? String(track.acceptWaitDays) : "")}
+          aria-label="Days to wait for the invite to be accepted"
+          aria-describedby={hint}
+          onChange={(e) => {
+            setText(e.target.value);
+            onChange(e.target.value.trim() === "" ? Number.NaN : Number(e.target.value));
+          }}
+          onBlur={() => setText(null)}
+        />
+        days
+      </label>
+      <p id={hint} className="text-[12.5px] text-muted">
+        Counted in calendar days from when the invite is sent; time a lead is paused doesn’t count. If they haven’t accepted by then, this track ends for them and the app asks LinkedIn to withdraw the invite; their other tracks carry on.
+        {launched ? " A change reaches every lead still waiting, counted from when their invite was sent." : ""}
+      </p>
     </div>
   );
 }
@@ -1361,7 +1433,8 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
   const zones = timeZones(editor.draft.timezone);
   const sms = track.channel === "sms";
   const call = track.channel === "call";
-  const accounts = editor.view.accounts.filter((a) => a.channel === (sms ? "sms" : "email"));
+  const linkedin = track.channel === "linkedin";
+  const accounts = editor.view.accounts.filter((a) => a.channel === (linkedin ? "linkedin" : sms ? "sms" : "email"));
   // A phone track's window is its calling hours, in the prospect's local time (ADR 0003 1.1).
   const windowName = call ? "Calling hours" : "Sending window";
   const hoursWord = call ? "Calling" : "Sending";
@@ -1380,6 +1453,13 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
               Your list on Today and Calls, when each call falls due
               <div className="text-[12.5px] text-muted">You dial every call yourself; nothing dials automatically. A phone track needs no sender.</div>
             </>
+          ) : linkedin && accounts.length === 0 ? (
+            // ADR 0004 1.1: the running app has no session; nothing here suggests one can be connected from the application.
+            <>
+              <span className="font-semibold text-crit">No connected LinkedIn session.</span>
+              <LinkedinProviderReason />
+              <div className="text-[12.5px] text-muted">Launch is blocked while this track has no session.</div>
+            </>
           ) : accounts.length === 0 ? (
             <>
               <span className="font-semibold text-crit">{sms ? "No connected SMS number." : "No connected sender inbox."}</span>
@@ -1397,8 +1477,15 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
                   </li>
                 ))}
               </ul>
-              <div className="text-[12.5px] text-muted">Each lead keeps one {sms ? "number" : "inbox"} for the whole campaign.</div>
+              <div className="text-[12.5px] text-muted">{linkedin ? "Each lead keeps the session that first reaches them, for the whole campaign." : `Each lead keeps one ${sms ? "number" : "inbox"} for the whole campaign.`}</div>
             </>
+          )}
+          {linkedin && (
+            <ul className="mt-1.5 flex list-disc flex-col gap-0.5 pl-4 text-[12.5px] text-muted" aria-label="What limits LinkedIn steps">
+              <li>Invites go only to a decision maker’s own member profile from the import. A lead without one, and every company lead, skips this track, and the tracks after it start.</li>
+              <li>Each session sends only within the invites and messages a day and the notes a month you allow it; with none set, it sends nothing. Messages go before new invites.</li>
+              <li>A person another campaign already reached from the same session is skipped here, and that campaign is named on their record.</li>
+            </ul>
           )}
           {sms && (
             <ul className="mt-1.5 flex list-disc flex-col gap-0.5 pl-4 text-[12.5px] text-muted" aria-label="What limits texts">
@@ -1570,6 +1657,12 @@ function SmsProviderReason() {
   const { result } = useApi<SmsProviderStatus>("/api/sms-provider");
   const why = whyNoSmsNumber(result.state === "ready" ? result.data : null);
   return why ? <div className="text-[12.5px] text-ink-2">{why}</div> : null;
+}
+
+/** Why no LinkedIn session is connected, in the provider read's own words (GET /api/linkedin-provider); nothing while unknown. */
+function LinkedinProviderReason() {
+  const { result } = useApi<LinkedinProviderStatus>("/api/linkedin-provider");
+  return result.state === "ready" ? <div className="text-[12.5px] text-ink-2">{result.data.message}</div> : null;
 }
 
 /** One line on why no inbox is connected, from GET /api/email-provider; nothing if it is unknown. */

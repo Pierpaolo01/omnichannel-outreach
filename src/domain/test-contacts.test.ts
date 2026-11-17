@@ -29,3 +29,12 @@ describe("what the page has unsaved is decided by the server's own reading (revi
     expect(contactsUnsaved({ email: "", mobile: "" }, { email: null, mobile: null })).toBe(false);
   });
 });
+
+describe("the test LinkedIn profile is compared by its key too (ticket 24b)", () => {
+  const stored = { email: null, mobile: null, linkedin: "https://www.linkedin.com/in/fictional-user-test-profile" };
+  test("the same profile typed another way is saved; another one, or one cleared, is not", () => {
+    expect(contactsUnsaved({ email: "", mobile: "", linkedin: "http://linkedin.com/in/Fictional-User-Test-Profile/" }, stored)).toBe(false);
+    expect(contactsUnsaved({ email: "", mobile: "", linkedin: "https://www.linkedin.com/in/fictional-other" }, stored)).toBe(true);
+    expect(contactsUnsaved({ email: "", mobile: "", linkedin: "" }, stored)).toBe(true);
+  });
+});

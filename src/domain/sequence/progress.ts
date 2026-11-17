@@ -9,7 +9,7 @@ import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalD
 import { render } from "./copy.ts";
 import { holdsConversations, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
-import type { Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, LeadDetail, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
+import type { Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, LeadDetail, LinkedinSkipCause, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Running, status and reach.
@@ -215,7 +215,10 @@ export function withdrawalDue(w: ProviderWork, now: number, carried = true): boo
 export function finishTrack(state: SubjectState, trackId: string, reason: FinishReason, at: number, atWall: number): SubjectState {
   const progress = progressOf(state, trackId);
   if (!progress || progress.finishedAt !== null) return state;
-  const finished = withTrack(state, trackId, (t) => ({ ...t, finishedAt: at, finishedWall: atWall, finishReason: reason }));
+  // A LinkedIn track skipped as a missing channel records why, as the facts stand at its finish (ticket 24b): a read never
+  // works it out again from today's import, marks or decision makers.
+  const cause = reason === "skipped_missing_channel" && channelOf(state, trackId) === "linkedin" ? { skipCause: linkedinSkipCauseOf(state, progress.destinationDetailId) } : {};
+  const finished = withTrack(state, trackId, (t) => ({ ...t, finishedAt: at, finishedWall: atWall, finishReason: reason, ...cause }));
   const closed = { ...finished, callTasks: finished.callTasks.map((t) => (t.trackId === trackId && t.open ? { ...t, open: false, closedWall: atWall } : t)) };
   return quiesce(closed, trackId);
 }
@@ -1581,4 +1584,56 @@ export function connectionChecked(state: SubjectState, trackId: string, session:
     smsBindings: binds ? [...s.smsBindings, { sender: session, recipient: destination, owner: s.subject.id, ownerCampaignId: s.campaign.id, ownerCampaignName: null, ownerIsTest: s.subject.kind === "test_run", ownerEnded: false, ownerSent: true, ownerAnswered: false, channel: "linkedin" as const }] : s.smsBindings,
   };
   return attend(connect(s, trackId, "already_connected", at, atWall), now);
+}
+
+/**
+ * The invite work that counts for a LinkedIn track (council on a6c1700, item 8): the one known sent (by the session, a lookup
+ * or the user's mark), else the latest handed over and not yet settled; never an earlier attempt that settled not sent,
+ * withdrawn or refused. The record's read, `inviteOpenOn` and with it the controls' digest read this one choice.
+ */
+export function invitingWork(state: SubjectState, trackId: string): { readonly work: SubjectState["work"][number]; readonly sent: boolean } | null {
+  const handed = state.work.filter((w) => w.trackId === trackId && w.kind === "invite" && w.firstHandedWall !== null);
+  const sent = handed.find((w) => w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null);
+  if (sent) return { work: sent, sent: true };
+  const open = handed.filter((w) => w.settled === null).sort((a, b) => (b.firstHandedWall ?? 0) - (a.firstHandedWall ?? 0))[0];
+  return open ? { work: open, sent: false } : null;
+}
+
+/**
+ * Whether an invite this subject sent on a LinkedIn track is still open on LinkedIn (ADR 0004 3.4; ticket 24b): sent, not
+ * accepted, not connected, not withdrawn and not found accepted. Only the acceptance expiry asks for a withdrawal, so an
+ * invite stays open through a stop, a reply, a move to win-back, an ending with no channel or a removing edit. The one test
+ * the record's read and the controls' preview digest share.
+ */
+export function inviteOpenOn(state: SubjectState, trackId: string): boolean {
+  const p = state.tracks.find((x) => x.trackId === trackId);
+  const sent = invitingWork(state, trackId)?.sent === true;
+  const withdrawal = p?.inviteWithdrawal ?? null;
+  return sent && p?.acceptedWall == null && (p?.connection ?? null) === null && withdrawal !== "withdrawn" && withdrawal !== "accepted_first";
+}
+
+/** Whether any LinkedIn track of the subject has an invite still open on LinkedIn (`inviteOpenOn`). */
+export const anyInviteOpen = (state: SubjectState): boolean => state.tracks.some((t) => inviteOpenOn(state, t.trackId));
+
+/**
+ * Why a LinkedIn track is skipped as a missing channel, from the facts at its finish (ticket 24b): a profile it started with
+ * that is no longer theirs (another member profile imported since, or none); a bad mark; the import's own address (none,
+ * or one that is not a member profile); or a company lead, which has no member profile (Q35).
+ */
+export function linkedinSkipCauseOf(state: SubjectState, startedWith: string | null): LinkedinSkipCause {
+  if (startedWith !== null) return state.lead.importedProfile === "member" ? "replaced" : "removed_by_import";
+  if (state.lead.details.some((d) => d.channel === "linkedin" && d.bad)) return "marked_bad";
+  switch (state.lead.importedProfile) {
+    case undefined:
+      return "company_lead";
+    case "not_member":
+      return "not_a_member_profile";
+    case "none":
+    case "member":
+      return "no_profile";
+    default: {
+      const unhandled: never = state.lead.importedProfile;
+      throw new Error(`An imported profile with no cause: ${String(unhandled)}`);
+    }
+  }
 }

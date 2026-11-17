@@ -35,18 +35,27 @@ export const DEFAULT_SKIP_LIMIT_DAYS = 2;
  * which has no copy, and the default skip limit (ADR 0003, ticket 14c). In the win-back branch
  * (ticket 16b) it starts when the lead enters the branch, which is what `entry` means there.
  */
-export function newTrack(channel: "email" | "sms" | "call", branch: TrackDefinition["branch"] = "main"): TrackDefinition {
+export function newTrack(channel: "email" | "sms" | "call" | "linkedin", branch: TrackDefinition["branch"] = "main"): TrackDefinition {
   return {
     id: newId("track"),
     channel,
     branch,
     window: [1, 2, 3, 4, 5].map((day) => ({ day, start: 9, end: 17 })),
-    steps: [newStep(true)],
+    // A LinkedIn track (ADR 0004 3.1): the connection invite, whose note starts empty (a plain invite is a choice), and the
+    // first message, sent once connected; the validator wants both.
+    steps: channel === "linkedin" ? [newStep(true), { ...newStep(true), waitDays: 0 }] : [newStep(true)],
     start: { kind: "entry" },
     removed: false,
     ...(channel === "call" ? { callSkipLimitDays: DEFAULT_SKIP_LIMIT_DAYS } : {}),
+    ...(channel === "linkedin" ? { acceptWaitDays: DEFAULT_ACCEPT_WAIT_DAYS } : {}),
   };
 }
+
+/**
+ * The acceptance wait a new LinkedIn track starts with (ticket 24b, **provisional**, for the principal): the decision leaves
+ * it configurable and names no default; 14 days is the editor's starting value only, changed per track.
+ */
+export const DEFAULT_ACCEPT_WAIT_DAYS = 14;
 
 export const liveSteps = (track: TrackDefinition): StepDefinition[] => track.steps.filter((s) => !s.removed);
 
@@ -54,7 +63,7 @@ export const liveSteps = (track: TrackDefinition): StepDefinition[] => track.ste
 export const emailTrackOf = (def: CampaignDefinition): TrackDefinition | undefined =>
   def.tracks.find((t) => !t.removed && t.channel === "email" && t.branch === "main");
 
-/** What one step of a track on this channel is called: Email 1, Text 1, Call 1. */
+/** What one step of a track on this channel is called: Email 1, Text 1, Call 1 (a LinkedIn step by its role: `stepTitle`). */
 export const STEP_NOUN = { email: "Email", sms: "Text", call: "Call", linkedin: "LinkedIn step" } as const;
 
 /**
@@ -71,6 +80,11 @@ export const trackTitle = (def: CampaignDefinition, track: TrackDefinition): str
 
 export function trackSummary(track: TrackDefinition): string {
   if (track.channel === "call") return "One call";
+  // A LinkedIn track: the invite, then the messages it opens (ADR 0004 3.1).
+  if (track.channel === "linkedin") {
+    const messages = Math.max(0, liveSteps(track).length - 1);
+    return `Invite, then ${messages} ${messages === 1 ? "message" : "messages"}`;
+  }
   const steps = liveSteps(track);
   const days = steps.reduce((sum, s) => sum + (Number.isFinite(s.waitDays) ? s.waitDays : 0), 0);
   const n = steps.length;
@@ -165,5 +179,6 @@ export function sendsOnItsOwn(def: CampaignDefinition): string {
     : channels.has("sms") ? "Texts go out on their own, inside each lead’s sending window."
     : channels.has("email") ? "Email goes out on its own, inside each lead’s sending window."
     : "";
-  return [own, calls].filter(Boolean).join(" ");
+  const linkedin = channels.has("linkedin") ? "LinkedIn invites and messages go out from a LinkedIn session, inside each lead’s sending window." : "";
+  return [own, linkedin, calls].filter(Boolean).join(" ");
 }

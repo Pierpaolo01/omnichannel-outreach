@@ -228,7 +228,7 @@ async function start(): Promise<FakeProviderApp> {
 }
 
 /** Serves the harness's HTTP app with the built client, on a port of its own. */
-async function serveHarness(harness: EngineHarness): Promise<string> {
+export async function serveHarness(harness: EngineHarness): Promise<string> {
   const web = new Hono();
   web.all("/api/*", (c) => harness.fetch(c.req.raw));
   web.use("/assets/*", serveStatic({ root: "dist" }));

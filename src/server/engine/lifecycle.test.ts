@@ -506,7 +506,7 @@ describe("review round 2, ruling 2: a reservation belongs to provider work and i
     // Unsettled, the work holds its reservation.
     expect((await h.store.engine.work(pat.idempotencyKey))?.settled).toBeNull();
     const listed = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.heldCapacity;
-    expect(listed).toEqual([{ accountId: "inbox-a", held: 1, capacity: 1, sentToday: 0, work: [expect.objectContaining({ attemptId: pat.id, enrollmentId: lead("Pat Oneil"), stepId: "s1", destination: "pat@harbour.example", unresolvedSince: expect.any(String) })] }]);
+    expect(listed).toEqual([{ accountId: "inbox-a", channel: "email", held: 1, capacity: 1, sentToday: 0, work: [expect.objectContaining({ attemptId: pat.id, enrollmentId: lead("Pat Oneil"), stepId: "s1", destination: "pat@harbour.example", unresolvedSince: expect.any(String) })] }]);
     expect(port.deliveries).toEqual([]);
     expect(await h.engine.markAttempt(pat.id, "not_sent")).toBe(true);
     await h.advanceTo(MONDAY_9 + 2 * DAY + H);

@@ -11,7 +11,7 @@ import { emptyDefinition, poolOf, type CampaignDefinition, type DeclinedPath } f
 import { callableOnDay, skipDeadlineOf, skipLimitOf } from "../../domain/sequence/calls.ts";
 import { bindingUnsent, deriveStatus, releaseUnsentBindings } from "../../domain/sequence/progress.ts";
 import { maySend, occupyingKeys } from "../../domain/sequence/attempt.ts";
-import type { ConversationCause } from "../../domain/sequence/state.ts";
+import type { ConversationCause, LinkedinSkipCause } from "../../domain/sequence/state.ts";
 import type {
   AccountState,
   Attempt,
@@ -1272,7 +1272,7 @@ export class SqliteEngineStore implements EngineStore {
     // A test run (ADR 0003 "Ticket 21") reaches its own test contacts and nothing else, renders as the lead it names, and
     // keeps the campaign's zone (question Q2's interim); every other part of its state is loaded as a lead's is.
     const reach = test ? this.testReach(test, definition) : this.leadReach(e, definition);
-    const { details, phones, resolved, zone, mergeData, owner } = reach;
+    const { details, phones, resolved, zone, mergeData, owner, importedProfile } = reach;
 
     const tracks = this.sql("SELECT * FROM track_progress WHERE subject_id = ? ORDER BY track_id").all(subjectId).map(toTrack);
     const attempts = this.sql("SELECT * FROM attempts WHERE subject_id = ? ORDER BY claimed_wall, rowid").all(subjectId).map(toAttempt);
@@ -1281,7 +1281,7 @@ export class SqliteEngineStore implements EngineStore {
       .map((r): CallAttempt => ({ id: str(r, "id"), requestId: str(r, "request_id"), taskId: str(r, "task_id"), outcome: str(r, "outcome") as CallOutcome, redial: num(r, "redial") === 1, callbackAt: numOrNull(r, "callback_at"), declinedPath: declinedPathOrNull(strOrNull(r, "declined_path")), numberDetailId: strOrNull(r, "number_detail_id"), note: str(r, "note"), at: num(r, "at"), atWall: num(r, "at_wall") }));
     if (!test) this.resolveReferenced(resolved, owner, [...tracks.map((t) => t.destinationDetailId), ...attempts.map((a) => a.destinationDetailId), ...callAttempts.map((c) => c.numberDetailId)]);
     if (!test) this.resolveProfiles(resolved, strOrNull(e, "person_id"), details, [...tracks.map((t) => t.destinationDetailId), ...attempts.map((a) => a.destinationDetailId)]);
-    return this.assemble(subjectId, test ? "test_run" : "enrollment", e, c, definition, now, { details, phones, resolved, zone, mergeData, owner, tracks, attempts, callAttempts });
+    return this.assemble(subjectId, test ? "test_run" : "enrollment", e, c, definition, now, { details, phones, resolved, zone, mergeData, owner, tracks, attempts, callAttempts, ...(importedProfile ? { importedProfile } : {}) });
   }
 
   /** The reach of a test run: its test contacts, as details of its own (ids `test:<run>:email|mobile`), never a CRM record's. */
@@ -1386,9 +1386,11 @@ export class SqliteEngineStore implements EngineStore {
     // The decision maker's LinkedIn profile from the import (ADR 0004 section 5): a company lead has none (question Q35).
     const profile = personId === null ? null : this.profileOf(personId);
     if (profile) details.push(profile);
+    const importedUrl = personId === null ? null : (strOrNull(this.sql("SELECT linkedin_url FROM people WHERE id = ?").get(personId) ?? {}, "linkedin_url") ?? "").trim();
 
     return {
       details,
+      ...(importedUrl === null ? {} : { importedProfile: importedUrl === "" ? ("none" as const) : linkedinProfileKey(importedUrl) === null ? ("not_member" as const) : ("member" as const) }),
       phones,
       resolved: {},
       zone: prospectZone([strOrNull(person ?? {}, "timezone"), company ? strOrNull(company, "timezone") : null], definition.timezone),
@@ -1441,7 +1443,7 @@ export class SqliteEngineStore implements EngineStore {
     now: number,
     p: Reach & { readonly tracks: TrackProgress[]; readonly attempts: Attempt[]; readonly callAttempts: CallAttempt[] },
   ): SubjectState {
-    const { details, phones, resolved, zone, mergeData, owner, tracks, attempts, callAttempts } = p;
+    const { details, phones, resolved, zone, mergeData, owner, tracks, attempts, callAttempts, importedProfile } = p;
     const accountIds = new Set([
       ...definition.emailPool,
       ...poolOf(definition, "sms"),
@@ -1524,7 +1526,7 @@ export class SqliteEngineStore implements EngineStore {
         // The lead's LinkedIn profile is a destination of conversations too (ADR 0004, question Q41): its session's pairs.
         .all({ kind: owner?.kind ?? "", owner: owner?.id ?? "", own: JSON.stringify(owner ? [] : details.filter((d) => d.mobile).map((d) => d.key)), profiles: JSON.stringify(details.filter((d) => d.channel === "linkedin").map((d) => d.key)), subject: subjectId })
         .map((b) => ({ channel: strOrNull(b, "pair_channel") === "linkedin" ? ("linkedin" as const) : ("sms" as const), sender: str(b, "sender_number"), recipient: str(b, "recipient_key"), owner: str(b, "owner_subject"), ownerCampaignId: strOrNull(b, "owner_campaign"), ownerCampaignName: strOrNull(b, "owner_campaign_name"), ownerIsTest: Number(b["owner_is_test"]) === 1, ownerEnded: b["owner_ended"] != null, ownerSent: Number(b["owner_sent"]) === 1, ownerAnswered: Number(b["owner_answered"]) === 1 })),
-      lead: { zone, details, resolved, mergeData, phones },
+      lead: { zone, details, resolved, mergeData, phones, ...(importedProfile ? { importedProfile } : {}) },
       markBad: [],
       accounts,
       callTasks: this.sql("SELECT * FROM call_tasks WHERE subject_id = ? ORDER BY placed_wall, rowid").all(subjectId).map(toCallTask),
@@ -1567,12 +1569,12 @@ export class SqliteEngineStore implements EngineStore {
         `INSERT OR REPLACE INTO track_progress (subject_id, track_id, start_at, start_basis_at, start_basis_wall, start_zone, started_at,
            destination_detail_id, next_step_id, basis_at, basis_wall, due_at, due_wall, due_zone, finished_at, finished_wall, finish_reason, conversation_owners,
            connection, connected_at, connected_wall, accepted_wall, accept_by, accept_by_wall, accept_by_zone, invite_withdrawal, invite_withdrawal_last_wall,
-           invite_withdrawal_unknowns, connection_checks, accept_by_days)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           invite_withdrawal_unknowns, connection_checks, accept_by_days, skip_cause)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id, t.trackId, t.startAt, t.startBasisAt, t.startBasisWall, t.startZone, t.startedAt, t.destinationDetailId, t.nextStepId, t.basisAt, t.basisWall, t.dueAt, t.dueWall, t.dueZone, t.finishedAt, t.finishedWall, t.finishReason, t.conversationOwners ? JSON.stringify(t.conversationOwners) : null,
           t.connection ?? null, t.connectedAt ?? null, t.connectedWall ?? null, t.acceptedWall ?? null, t.acceptBy ?? null, t.acceptByWall ?? null, t.acceptByZone ?? null, t.inviteWithdrawal ?? null, t.inviteWithdrawalLastWall ?? null,
-          t.inviteWithdrawalUnknowns ?? 0, t.connectionChecks ? JSON.stringify(t.connectionChecks) : null, t.acceptByDays ?? null,
+          t.inviteWithdrawalUnknowns ?? 0, t.connectionChecks ? JSON.stringify(t.connectionChecks) : null, t.acceptByDays ?? null, t.skipCause ?? null,
         ],
       );
       // Stored once and only forward (ADR 0004 10.4): a connection never changes once set, a withdrawal never moves back.
@@ -1856,6 +1858,7 @@ function toTrack(r: Row): TrackProgress {
     finishedWall: numOrNull(r, "finished_wall"),
     finishReason: strOrNull(r, "finish_reason") as FinishReason | null,
     ...(r["conversation_owners"] == null ? {} : { conversationOwners: JSON.parse(str(r, "conversation_owners")) as ConversationCause[] }),
+    ...(r["skip_cause"] == null ? {} : { skipCause: str(r, "skip_cause") as LinkedinSkipCause }),
     // A LinkedIn track's fields (ADR 0004 3.2), present only once set, so no other track's state reads any differently.
     ...(r["connection"] == null ? {} : { connection: str(r, "connection") === "accepted" ? ("accepted" as const) : ("already_connected" as const), connectedAt: numOrNull(r, "connected_at"), connectedWall: numOrNull(r, "connected_wall") }),
     ...(r["accepted_wall"] == null ? {} : { acceptedWall: num(r, "accepted_wall") }),
@@ -1990,6 +1993,8 @@ interface Reach {
   readonly mergeData: MergeData;
   /** The lead's owner; null for a test run, which has no record. */
   readonly owner: Owner | null;
+  /** What the import holds for a decision maker's LinkedIn address (ticket 24b); absent for a company lead or a test run. */
+  readonly importedProfile?: "member" | "not_member" | "none";
 }
 
 /** A test contact's detail id on its run (ADR 0003 "Ticket 21"): names no CRM record, and the triggers of migration 18 accept it only for a test run. */
@@ -2028,7 +2033,8 @@ function toTestRun(r: Row): TestRunRecord {
     id: str(r, "id"),
     campaignId: str(r, "campaign_id"),
     renderAs: str(r, "render_as"),
-    contacts: { email: contact("email_value", "email_key"), mobile: contact("mobile_value", "mobile_key") },
+    // The test profile too (ticket 24b: the Test run tab read it as none, a part a omission); `linkedin` absent when none.
+    contacts: { email: contact("email_value", "email_key"), mobile: contact("mobile_value", "mobile_key"), ...(r["linkedin_key"] == null ? {} : { linkedin: contact("linkedin_value", "linkedin_key") }) },
     startedWall: num(r, "started_wall"),
     definitionVersion: num(r, "definition_version"),
     definitionEditedAt: strOrNull(r, "definition_edited_at"),

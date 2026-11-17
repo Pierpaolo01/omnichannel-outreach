@@ -63,6 +63,8 @@ describe("leads waiting for sending capacity", () => {
         dueAt: new Date(MONDAY_9).toISOString(),
         accountIds: ["inbox-a"],
         resetsAt: "2026-11-03T00:00:00.000Z",
+        action: null,
+        noAllowance: false,
       },
     ]);
     await h.advanceTo(Date.parse("2026-11-03T01:00:00Z"));

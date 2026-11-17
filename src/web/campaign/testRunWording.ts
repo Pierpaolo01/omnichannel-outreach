@@ -4,7 +4,8 @@ import { stepWaitWords } from "../controls/wording.ts";
 
 const capitalise = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
 import { conversationTaken } from "./sms-wording.ts";
-import { holdReasonClause } from "../calls/wording.ts";
+import { expiryLine } from "./linkedin-wording.ts";
+import { dateIn, holdReasonClause } from "../calls/wording.ts";
 
 /**
  * The Test run tab's words (ticket 21), from the read only: what each step's stored facts say, never more. Email has no
@@ -54,7 +55,7 @@ export function endingTitle(ending: TestRunEnding, run: RunFacts | null): string
 export function endingDetail(ending: TestRunEnding, run: RunFacts): string {
   switch (ending) {
     case "your_reply":
-      return "A reply from your test email or mobile stopped it, as a prospect’s reply stops their outreach.";
+      return "A reply from your test email or mobile, or one you marked on LinkedIn, stopped it, as a prospect’s reply stops their outreach.";
     case "finished":
       return finishedDetail(run);
     case "no_contact_left":
@@ -72,6 +73,31 @@ export function endingDetail(ending: TestRunEnding, run: RunFacts): string {
   }
 }
 
+/** The failure reasons a step's result can carry (the engine's words), each said for itself (council on dee365d, item 13). */
+const FAILURE_REASONS = ["invalid address", "invalid number", "profile unreachable", "not connected"] as const;
+type FailureReason = (typeof FAILURE_REASONS)[number];
+const isFailureReason = (r: string | null): r is FailureReason => (FAILURE_REASONS as readonly (string | null)[]).includes(r);
+
+/** Why a step failed, from its own reason through one exhaustive switch; with none known, by its channel as before. */
+export function failureWords(row: Pick<TestStepRow, "channel" | "reason">): string {
+  if (!isFailureReason(row.reason)) return row.channel === "sms" ? "number not reachable" : row.channel === "linkedin" ? "profile not reachable" : "bounced";
+  switch (row.reason) {
+    case "invalid address":
+      return "bounced";
+    case "invalid number":
+      return "number not reachable";
+    case "profile unreachable":
+      return "profile not reachable";
+    // Q37's interim: the connection is gone, and the profile is still the person's; it is not marked wrong.
+    case "not connected":
+      return "no longer connected on LinkedIn, so the message couldn’t go";
+    default: {
+      const unhandled: never = row.reason;
+      throw new Error(`A failure reason with no words: ${String(unhandled)}`);
+    }
+  }
+}
+
 /** The step's state on the right of its row. `soon`: a due step whose time is at most two minutes from the read. */
 export function stepStateText(row: TestStepRow, zone: string, readAt: string): string {
   const at = row.at === null ? "" : timeIn(zone, row.at, readAt);
@@ -79,14 +105,18 @@ export function stepStateText(row: TestStepRow, zone: string, readAt: string): s
     case "sent":
       return `Sent ${at}`;
     case "failed":
-      return row.channel === "sms" ? `Failed ${at}: number not reachable` : `Failed ${at}: bounced`;
+      return `Failed ${at}: ${failureWords(row)}`;
     case "skipped":
       return "Skipped";
     case "with_provider":
-      return row.channel === "sms" ? "With the SMS provider" : "With Instantly";
+      return row.channel === "sms" ? "With the SMS provider" : row.channel === "linkedin" ? "With the LinkedIn session" : "With Instantly";
     case "held":
       return "On hold";
     case "due": {
+      // A test's first message waits for the user to accept the invite by hand (ADR 0004 section 8, Q40): the day the wait
+      // ends is the read's fact, never when the message goes.
+      if (row.at === null && row.waits === "awaiting_acceptance")
+        return `Waiting for you to accept the invite on your test profile${row.until !== undefined ? `; the wait ends ${dateIn(zone, row.until)}` : ""}`;
       // No time the engine can promise: the read's reason, in the one wording function (ADR 0003 "Reads that say when").
       if (row.at === null && row.waits !== null) return capitalise(stepWaitWords(row.waits, row.channel));
       const ms = row.at === null ? Infinity : Date.parse(row.at) - Date.parse(readAt);
@@ -120,18 +150,25 @@ const OUTCOMES: Readonly<Record<string, string>> = {
 const outcomeWord = (outcome: string | null): string => (outcome === null ? "" : (OUTCOMES[outcome] ?? outcome));
 
 /** The line under a step's name: where it goes, or why it waits. */
-export function stepDetail(row: TestStepRow, run: Pick<TestRunRead, "email" | "mobile" | "running">): string {
+export function stepDetail(row: TestStepRow, run: Pick<TestRunRead, "email" | "mobile" | "running"> & Partial<Pick<TestRunRead, "linkedin" | "linkedinTracks">>): string {
   if (row.state === "not_reached") {
     if (!run.running) return "Not reached";
     if (row.branch === "win_back") return "Runs if you log Not interested and the path is Win back";
     return row.channel === "call" ? "A test call goes on your Calls list when it is due" : "Waits for the steps before it";
   }
   if (row.state === "skipped" && row.reason === "sms_conversation_taken") return `Skipped: ${conversationTaken(row.owners ?? [], row.channel, "your test")}`;
-  if (row.state === "skipped") return row.reason === "missing_channel" ? `Skipped: no test ${row.channel === "email" ? "email" : "mobile"} saved` : SKIPPED_BECAUSE[row.reason ?? ""] ?? "Skipped";
+  // An acceptance wait that ran out: said from the run's own withdrawal state, through the record's function (item 2).
+  if (row.state === "skipped" && row.reason === "invite_not_accepted") {
+    const view = run.linkedinTracks?.find((t) => t.trackId === row.trackId)?.view;
+    const said = expiryLine(view?.withdrawal ?? null, "this test", view ?? { withdrawalAsked: false, withdrawalStuck: false });
+    return `Skipped: ${said.charAt(0).toLowerCase()}${said.slice(1)}`;
+  }
+  if (row.state === "skipped") return row.reason === "missing_channel" ? `Skipped: no test ${row.channel === "email" ? "email" : row.channel === "linkedin" ? "LinkedIn profile" : "mobile"} saved` : SKIPPED_BECAUSE[row.reason ?? ""] ?? "Skipped";
   if (row.channel === "call") return row.state === "on_your_list" ? "Log any outcome to continue. The canvas paths apply." : `To ${run.mobile ?? "your mobile"}`;
   if (row.state === "held") return `On hold because ${row.hold ? holdReasonClause(row.hold, row.holdOwners ?? [], row.channel) : "something waits on you"}. Nothing is dropped.`;
+  if (row.state === "due" && row.waits === "awaiting_acceptance") return "Accept it by hand on your test profile. A test doesn’t shorten the wait for acceptance; the messages after it wait about a minute each.";
   if (row.state === "due") return "The wait is cut to about a minute";
-  return `To ${(row.channel === "sms" ? run.mobile : run.email) ?? ""}`;
+  return `To ${(row.channel === "sms" ? run.mobile : row.channel === "linkedin" ? (run.linkedin ?? null) : run.email) ?? ""}`;
 }
 
 /** "4 of 8 steps done": steps with a result (sent, failed, skipped or logged) of the steps the run can reach in the main sequence and any branch it entered. */
@@ -147,7 +184,8 @@ function finishedDetail(run: RunFacts): string {
   const steps = reachable(run);
   const sent = steps.filter(went).length;
   if (sent === steps.length) return "Every step of the sequence went to your test contacts.";
-  const missing = (contact: "email" | "mobile") => steps.filter((s) => s.state === "skipped" && s.reason === "missing_channel" && (contact === "email" ? s.channel === "email" : s.channel !== "email"));
+  const missing = (contact: "email" | "mobile" | "linkedin") =>
+    steps.filter((s) => s.state === "skipped" && s.reason === "missing_channel" && (contact === "email" ? s.channel === "email" : contact === "linkedin" ? s.channel === "linkedin" : s.channel === "sms" || s.channel === "call"));
   const parts: string[] = [`${sent} of ${steps.length} ${steps.length === 1 ? "step" : "steps"} went to your test contacts.`];
   const noMobile = missing("mobile");
   if (noMobile.length > 0) {
@@ -156,6 +194,7 @@ function finishedDetail(run: RunFacts): string {
     const what = [texts ? "the texts" : null, calls === 1 ? "the call" : calls > 1 ? "the calls" : null].filter((x): x is string => x !== null).join(" and ");
     parts.push(`${what.charAt(0).toUpperCase()}${what.slice(1)} ${noMobile.length === 1 ? "was" : "were"} skipped: no test mobile was saved.`);
   }
+  if (missing("linkedin").length > 0) parts.push(`The LinkedIn ${missing("linkedin").length === 1 ? "step was" : "steps were"} skipped: no test LinkedIn profile was saved.`);
   if (missing("email").length > 0) parts.push(`The ${missing("email").length === 1 ? "email was" : "emails were"} skipped: no test email was saved.`);
   const other = steps.filter((s) => !went(s) && !(s.state === "skipped" && s.reason === "missing_channel")).length;
   if (other > 0) parts.push(`${other} ${other === 1 ? "other step did" : "other steps did"} not go: each says why below.`);
@@ -170,4 +209,7 @@ const SKIPPED_BECAUSE: Readonly<Record<string, string>> = {
   unworked: "Skipped: the call was not worked in time",
   win_back: "Skipped: the test moved to the win-back branch",
   interested: "Skipped: you logged Interested",
+  // LinkedIn (ticket 24b): the invite skipped for an existing connection; a step its track left when the wait ran out.
+  already_connected: "Skipped: your session is already connected to your test profile",
+
 };

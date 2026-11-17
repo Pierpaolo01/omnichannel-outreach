@@ -6,6 +6,19 @@ import type { StepWait, StepWhen } from "../../domain/sequence/dispatch.ts";
 import type { StepWaitApi, StepWhenView } from "../../shared/api.ts";
 import { dateOfDay } from "./call-views.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
+import { noAllowanceOnAnySession } from "../../domain/sequence/dispatch.ts";
+
+/**
+ * How the reads say the engine's `sending_capacity` for a LinkedIn step no session it may use has any allowance for
+ * (council on dee365d, item 15): `no_allowance`. The generated LinkedIn runs' mutation "no allowance reads as full for the
+ * day" swaps it back; nothing else does.
+ */
+export const viewRules: { noAllowanceReadAs: "no_allowance" | "sending_capacity" } = { noAllowanceReadAs: "no_allowance" };
+
+/** A wait as the reads say it: the engine's reason, with `sending_capacity` said as `no_allowance` where that is the cause. */
+export function readWait(why: StepWait, state: SubjectState, trackId: string, now: number): StepWaitApi {
+  return why === "sending_capacity" && noAllowanceOnAnySession(state, trackId, now) ? viewRules.noAllowanceReadAs : stepWaitApi(why);
+}
 
 /** A track's channel in the subject's definition in force (a removed track keeps its channel). */
 export function channelOfTrack(state: SubjectState, trackId: string): "email" | "sms" | "call" | "linkedin" {
@@ -54,12 +67,12 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
  * A wait carries its track's channel, so every reason is worded in that channel's words (council on b21af02, item 1): a
  * transport's wait names the transport's channel, which is the track's.
  */
-export function stepWhenView(when: StepWhen, now: number, today: number, channel: "email" | "sms" | "call" | "linkedin"): StepWhenView {
+export function stepWhenView(when: StepWhen, now: number, today: number, channel: "email" | "sms" | "call" | "linkedin", at?: { readonly state: SubjectState; readonly trackId: string }): StepWhenView {
   switch (when.kind) {
     case "waits":
       return {
         kind: "waits",
-        why: stepWaitApi(when.why),
+        why: at ? readWait(when.why, at.state, at.trackId, now) : stepWaitApi(when.why),
         channel: when.channel ?? channel,
         ...(when.until !== undefined ? { until: new Date(when.until).toISOString() } : {}),
       };

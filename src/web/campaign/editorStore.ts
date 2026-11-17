@@ -85,6 +85,9 @@ export const emailInboxIds = (view: SequenceView): string[] => view.accounts.fil
 /** The connected SMS numbers: the SMS pool follows them (ticket 13b). None in the running app, which has no SMS provider. */
 export const smsNumberIds = (view: SequenceView): string[] => view.accounts.filter((a) => a.channel === "sms").map((a) => a.id);
 
+/** The connected LinkedIn sessions: the LinkedIn pool follows them (ticket 24b). None in the running app, which has no session. */
+export const linkedinSessionIds = (view: SequenceView): string[] => view.accounts.filter((a) => a.channel === "linkedin").map((a) => a.id);
+
 /** How long after an edit its save is sent. */
 export const SAVE_DELAY_MS = 600;
 
@@ -106,7 +109,7 @@ export class EditorStore {
     this.deps = deps;
     this.state = { view: initial, draft: initial.definition, save: { kind: "idle" }, unsaved: false, pending: null, locked: false, problems: problemsOf(initial.definition, initial) };
     this.queue = new SaveQueue({
-      read: () => ({ draft: this.state.draft, accountIds: emailInboxIds(this.state.view), smsNumberIds: smsNumberIds(this.state.view), version: this.state.view.definitionVersion }),
+      read: () => ({ draft: this.state.draft, accountIds: emailInboxIds(this.state.view), smsNumberIds: smsNumberIds(this.state.view), linkedinSessionIds: linkedinSessionIds(this.state.view), version: this.state.view.definitionVersion }),
       put: (definition, options, save) => {
         const sent = withFaults(definition, deps.faults, this.lastSent);
         this.lastSent = definition;
@@ -302,11 +305,12 @@ export class EditorStore {
   private syncPool(): void {
     const view = this.state.view;
     if (view.launchedAt !== null) return;
-    const live = (channel: "email" | "sms") => view.definition.tracks.some((t) => !t.removed && t.channel === channel);
+    const live = (channel: "email" | "sms" | "linkedin") => view.definition.tracks.some((t) => !t.removed && t.channel === channel);
     const same = (a: readonly string[], b: readonly string[]) => [...a].sort().join("\n") === [...b].sort().join("\n");
     const emailDiffers = live("email") && !same(view.definition.emailPool, emailInboxIds(view));
     const smsDiffers = live("sms") && !same(view.definition.smsPool ?? [], smsNumberIds(view));
-    if ((!emailDiffers && !smsDiffers) || this.queue.inConflict) return;
+    const linkedinDiffers = live("linkedin") && !same(view.definition.linkedinPool ?? [], linkedinSessionIds(view));
+    if ((!emailDiffers && !smsDiffers && !linkedinDiffers) || this.queue.inConflict) return;
     this.queue.edited();
     void this.queue.save();
   }

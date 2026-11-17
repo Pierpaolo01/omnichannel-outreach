@@ -46,7 +46,7 @@ describe("the Test run tab says only what the run's facts say (ticket 21)", () =
     expect(endingTitle("your_reply", null)).toBe("Stopped by your reply");
     expect(endingTitle("edited", null)).toBe("Stopped by an edit");
     const steps = [row({}), row({ stepId: "e2", state: "due" }), row({ stepId: "w1", branch: "win_back", state: "not_reached", at: null })];
-    expect(progressText({ id: "t", running: true, ending: null, startedAt: READ, endedAt: null, renderAs: { id: "l", name: "Pat" }, email: null, mobile: null, mayStillSend: 0, steps })).toBe("1 of 2 steps done");
+    expect(progressText({ id: "t", running: true, ending: null, startedAt: READ, endedAt: null, renderAs: { id: "l", name: "Pat" }, email: null, mobile: null, linkedin: null, status: "active", mayStillSend: 0, steps, linkedinTracks: [], linkedinReply: null })).toBe("1 of 2 steps done");
   });
 
   test("a finished test says what went and what was skipped and why, never that every step ran when some did not (council on ffa202c, item 13)", () => {
@@ -66,5 +66,34 @@ describe("a Test run row inside a repeated hour says which one (verifier on cc9b
   test("both 01:30s of 25 October 2026 in London", () => {
     expect(stepStateText(row({ state: "due", at: "2026-10-25T00:30:00Z" }), "Europe/London", read)).toBe("Earliest Sun 01:30 BST");
     expect(stepStateText(row({ state: "due", at: "2026-10-25T01:30:00Z" }), "Europe/London", read)).toBe("Earliest Sun 01:30 GMT");
+  });
+});
+
+describe("a test run's LinkedIn steps (ticket 24b; ADR 0004 section 8)", () => {
+  const li = (fields: Partial<TestStepRow>): TestStepRow => row({ trackId: "li", channel: "linkedin", track: "LinkedIn track", ...fields });
+  const run = { email: null, mobile: null, linkedin: "https://www.linkedin.com/in/fictional-user-test-profile", running: true };
+  test("the first message waits for you to accept the test invite, with the day the wait ends as a fact; the wait is not cut short (Q40)", () => {
+    const waiting = li({ stepId: "m1", name: "First message", state: "due", at: null, waits: "awaiting_acceptance", until: "2026-11-16T00:00:00.000Z" });
+    expect(stepStateText(waiting, "Europe/London", READ)).toBe("Waiting for you to accept the invite on your test profile; the wait ends Mon 16 Nov");
+    expect(stepDetail(waiting, run)).toBe("Accept it by hand on your test profile. A test doesn’t shorten the wait for acceptance; the messages after it wait about a minute each.");
+  });
+  test("where it goes, with the provider's words; skips and failures in LinkedIn's terms", () => {
+    expect(stepDetail(li({ name: "Connection invite" }), run)).toBe(`To ${run.linkedin}`);
+    expect(stepStateText(li({ state: "with_provider" }), "Europe/London", READ)).toBe("With the LinkedIn session");
+    expect(stepStateText(li({ state: "failed", reason: "profile unreachable" }), "Europe/London", READ)).toBe("Failed 10:41: profile not reachable");
+    // A removed connection is not a bad profile (Q37; council on dee365d, item 13).
+    expect(stepStateText(li({ stepId: "m1", state: "failed", reason: "not connected" }), "Europe/London", READ)).toBe("Failed 10:41: no longer connected on LinkedIn, so the message couldn’t go");
+    expect(stepDetail(li({ state: "skipped", reason: "missing_channel" }), run)).toBe("Skipped: no test LinkedIn profile saved");
+    expect(stepDetail(li({ state: "skipped", reason: "already_connected" }), run)).toBe("Skipped: your session is already connected to your test profile");
+    // The expiry is said from the run's own withdrawal state, through the record's function (council on dee365d, item 2):
+    // never "withdrawn" while LinkedIn only ever answered unknown, on every message row.
+    const view = (withdrawal: "wanted" | "withdrawn" | "accepted_first" | "kept_by_user") => ({ ...run, linkedinTracks: [{ trackId: "li", view: { invite: "sent" as const, note: null, connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal, withdrawalAsked: false, skipCause: null, withdrawalStuck: false, inviteOpen: withdrawal !== "withdrawn", pendingElsewhereSince: null } }] });
+    for (const stepId of ["m1", "m2"]) expect(stepDetail(li({ stepId, state: "skipped", reason: "invite_not_accepted" }), view("wanted"))).toBe("Skipped: no acceptance was recorded within the track’s wait, so the LinkedIn track ended for this test. The invite is to be withdrawn; the app hasn’t asked LinkedIn yet.");
+    expect(stepDetail(li({ stepId: "m1", state: "skipped", reason: "invite_not_accepted" }), view("withdrawn"))).toBe("Skipped: no acceptance was recorded within the track’s wait, so the LinkedIn track ended for this test, and the invite was withdrawn.");
+    expect(stepDetail(li({ stepId: "m1", state: "skipped", reason: "invite_not_accepted" }), view("kept_by_user"))).not.toContain("and the invite was withdrawn");
+  });
+  test("a finished run names a missing test profile apart from a missing mobile", () => {
+    const steps = [li({ state: "skipped", reason: "missing_channel" }), li({ stepId: "m1", state: "skipped", reason: "missing_channel" }), row({})];
+    expect(endingDetail("finished", { steps })).toBe("1 of 3 steps went to your test contacts. The LinkedIn steps were skipped: no test LinkedIn profile was saved.");
   });
 });

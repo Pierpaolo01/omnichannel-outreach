@@ -7,7 +7,7 @@ import { ErrorState, Section } from "./components.tsx";
 import { DECLINED_PATH_LINE, OUTCOME_TITLE, dateIn, declineTrackLine, dialledLine } from "./calls/wording.ts";
 import { dayLabel } from "./calls/callbackTime.ts";
 import { Icon, type IconName } from "./icons.tsx";
-import { stepNoun } from "../shared/track-label.ts";
+import { lowerLabel, stepTitle } from "../shared/track-label.ts";
 import { useNow, clockTime } from "./time.ts";
 import { conversationTaken } from "./campaign/sms-wording.ts";
 
@@ -90,6 +90,12 @@ const REASON: Readonly<Record<string, string>> = {
   block_list: "The address is on Instantly’s block list.",
   "invalid address": "Instantly refused the address as invalid. It is marked wrong.",
   "invalid number": "The number was refused as invalid. It is marked wrong.",
+  // LinkedIn (ticket 24b; ADR 0004 sections 3 and 5).
+  no_profile: "No LinkedIn member profile in the import.",
+  already_connected: "Your LinkedIn session was already connected to them, so no invite was needed.",
+  "profile unreachable": "LinkedIn refused the profile as unreachable. It is marked wrong.",
+  // Q37: the connection is gone (they removed it); the profile stays theirs and is not marked wrong.
+  "not connected": "LinkedIn refused the message: they are no longer connected. The profile isn’t marked wrong.",
 };
 
 const PLAIN = "bg-raised text-muted shadow-[inset_0_0_0_1px_var(--color-line)]";
@@ -98,7 +104,7 @@ const HAND = "bg-hand-soft text-hand";
 const CALL = "bg-call-soft text-call";
 
 /** "the email track", "SMS track 2": a track label inside a sentence. */
-const inSentence = (label: { label: string; several: boolean }) => (label.several ? label.label : `the ${label.label.startsWith("SMS") ? label.label : label.label.toLowerCase()}`);
+const inSentence = (label: { label: string; several: boolean }) => (label.several ? label.label : `the ${lowerLabel(label.label)}`);
 
 /**
  * What one timeline entry says. `track` names the entry's track when its campaign has several on
@@ -166,24 +172,25 @@ export function describeEntry(entry: ActivityEntry, userZone: string): { icon: I
     }
   }
   const sms = entry.channel === "sms";
-  // What a step is called comes from its track's label, so a win-back step reads "Win-back email 1" (council on 4fd9ca4, item 5).
-  const noun = stepNoun(entry.track, entry.channel);
+  // What a step is called comes from its track's label, so a win-back step reads "Win-back email 1" (council on 4fd9ca4, item 5),
+  // and a LinkedIn step by its role, "Connection invite" (ticket 24b).
+  const named = (n: number) => stepTitle(entry.track, entry.channel, n);
   const track = entry.track.several ? entry.track.label : null;
-  const icon: IconName = sms ? "sms" : "email";
+  const icon: IconName = entry.channel === "linkedin" ? "linkedin" : sms ? "sms" : "email";
   switch (entry.kind) {
     case "sent":
-      return { icon, tone: PLAIN, title: `${noun} ${entry.stepNumber} sent`, body: null, track };
+      return { icon, tone: PLAIN, title: `${named(entry.stepNumber)} sent`, body: null, track };
     case "failed":
-      return { icon: "bad", tone: CRIT, title: `${noun} ${entry.stepNumber} failed`, body: `${entry.to}: ${REASON[entry.reason] ?? entry.reason}`, track };
+      return { icon: "bad", tone: CRIT, title: `${named(entry.stepNumber)} failed`, body: `${entry.to}: ${REASON[entry.reason] ?? entry.reason}`, track };
     case "skipped": {
       // A taken conversation names the campaign that keeps it (question Q7 answered), through the one wording function.
       const body = entry.reason === "sms_conversation_taken" ? `${conversationTaken(entry.owners ?? [], entry.channel).replace(/^t/, "T")}, so a reply couldn’t show which campaign it answers.` : (REASON[entry.reason] ?? entry.reason);
-      return { icon: "system", tone: PLAIN, title: entry.stepNumber === null ? `${entry.track.label} skipped` : `${noun} ${entry.stepNumber} skipped`, body, track: entry.stepNumber === null ? null : track };
+      return { icon: "system", tone: PLAIN, title: entry.stepNumber === null ? `${entry.track.label} skipped` : `${named(entry.stepNumber)} skipped`, body, track: entry.stepNumber === null ? null : track };
     }
     case "bounced":
       return sms
-        ? { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Bad number" : `${noun} ${entry.stepNumber}: bad number`, body: `${entry.to} was reported invalid and is marked wrong. Nothing more is texted to it.`, track }
-        : { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Email bounced" : `${noun} ${entry.stepNumber} bounced`, body: `${entry.to} is marked wrong. Nothing more is sent to it.`, track };
+        ? { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Bad number" : `${named(entry.stepNumber)}: bad number`, body: `${entry.to} was reported invalid and is marked wrong. Nothing more is texted to it.`, track }
+        : { icon: "bad", tone: CRIT, title: entry.stepNumber === null ? "Email bounced" : `${named(entry.stepNumber)} bounced`, body: `${entry.to} is marked wrong. Nothing more is sent to it.`, track };
     case "address_bad":
       return { icon: "system", tone: PLAIN, title: `${entry.track.label} ended`, body: `${entry.to} is marked wrong, so nothing more is sent to it.`, track: null };
     case "released":
@@ -207,7 +214,7 @@ function callSkipHistory(call: { readonly attempts: number; readonly callback: b
 /** One control the user applied, as history: the step it named is said by its track's own name for a step. */
 function controlEntry(entry: Extract<ActivityEntry, { kind: "control" }>): { icon: IconName; tone: string; title: string; body: string | null; track: string | null } {
   const step = entry.step;
-  const name = step === null ? null : step.channel === "call" ? (step.call?.callback ? "Callback" : "Call") : `${stepNoun(step.track, step.channel)} ${step.number}`;
+  const name = step === null ? null : step.channel === "call" ? (step.call?.callback ? "Callback" : "Call") : stepTitle(step.track, step.channel, step.number);
   const track = step?.track.several ? step.track.label : null;
   const at = name === null ? null : name === "Call" ? "the call" : name.charAt(0).toLowerCase() + name.slice(1);
   const plain = (title: string, body: string | null = null) => ({ icon: "system" as const, tone: PLAIN, title, body, track });

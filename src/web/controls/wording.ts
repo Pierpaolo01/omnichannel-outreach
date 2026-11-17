@@ -8,10 +8,12 @@
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
 import { clockTime } from "../time.ts";
 import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead, StepWaitApi, StepWhenView } from "../../shared/api.ts";
-import { stepNoun } from "../../shared/track-label.ts";
+import { lowerLabel, stepTitle } from "../../shared/track-label.ts";
 import { callHoldSentence, dateIn, holdReasonClause, HOURS_CLOSED_PHRASE, listedForPhrase } from "../calls/wording.ts";
 import { dayLabel } from "../calls/callbackTime.ts";
 import { STATUS_GROUP_LABEL } from "../status.tsx";
+import type { RecordControl } from "./requests.ts";
+import { INVITE_STAYS_OPEN } from "../campaign/linkedin-wording.ts";
 
 export type AllowedControl = Extract<ControlView, { readonly allowed: true }>;
 
@@ -26,7 +28,11 @@ export const CONTROL_LABEL = {
   stop: "Stop",
   resume_from_next_step: "Resume from the next step",
   move_to_win_back: "Move to win-back",
-} as const satisfies Record<LeadControlApi, string>;
+  // Ticket 24b: the LinkedIn reply mark and a stuck withdrawal's two answers, pressed and stored like the controls.
+  mark_replied: "Mark replied on LinkedIn",
+  invite_withdrawn: "It’s withdrawn",
+  invite_kept: "It’s still there",
+} as const satisfies Record<RecordControl, string>;
 
 /** While a control is on its way: "Pausing…". */
 export const CONTROL_PENDING = {
@@ -36,7 +42,10 @@ export const CONTROL_PENDING = {
   stop: "Stopping",
   resume_from_next_step: "Resuming from the next step",
   move_to_win_back: "Moving to win-back",
-} as const satisfies Record<LeadControlApi, string>;
+  mark_replied: "Marking replied on LinkedIn",
+  invite_withdrawn: "Marking the invite withdrawn",
+  invite_kept: "Marking the invite still there",
+} as const satisfies Record<RecordControl, string>;
 
 /** The controls the read allows now, in the prototype's order. A refused control is not offered. */
 export function offeredControls(lead: Pick<RecordLead, "controls">): AllowedControl[] {
@@ -54,7 +63,7 @@ const timeIn = (zone: string, iso: string): string => clockTime(zone, iso);
 /** "Tue 3 Nov at 09:00", in the user's zone. */
 export const whenIn = (userZone: string, iso: string): string => `${dateIn(userZone, iso)} at ${timeIn(userZone, iso)}`;
 
-const lower = (label: string): string => (label.startsWith("SMS") ? label : label.charAt(0).toLowerCase() + label.slice(1));
+const lower = lowerLabel;
 const capital = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
 
 /** A step a control names, inside a sentence: "email 2 of 3", "text 1 of 2 on SMS track 2", "win-back email 1 of 2", "the call". */
@@ -65,8 +74,12 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
       return `the call${on}`;
     case "email":
     case "sms":
-    case "linkedin":
-      return `${lower(stepNoun(step.track, step.channel))} ${step.number} of ${step.of}${on}`;
+      return `${lower(stepTitle(step.track, step.channel, step.number))} of ${step.of}${on}`;
+    // A LinkedIn step by its role (ticket 24b): "the first message", "follow-up 2 on LinkedIn track 2".
+    case "linkedin": {
+      const title = lower(stepTitle(step.track, step.channel, step.number));
+      return `${title.startsWith("follow-up") ? title : `the ${title}`}${on}`;
+    }
     default: {
       const unhandled: never = step.channel;
       throw new Error(`A step on a channel with no name: ${String(unhandled)}`);
@@ -92,8 +105,9 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
       return "on hold while their callback is open";
     case "ended":
       return "not going: their outreach in this campaign has ended";
+    // Handed over and not yet reported (council on dee365d, item 11): never a promise that it will go.
     case "with_provider":
-      return "already handed to the provider, which sends it";
+      return "handed to the provider; it isn’t known yet whether it went";
     case "unresolved":
     case "render_failed":
     case "provider_skipped":
@@ -125,6 +139,9 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
       return "waiting for a sender account that can send";
     case "sending_capacity":
       return "waiting for sending capacity: every account it may use is full today";
+    // Item 15: no session it may use has any allowance of the step's kind, so nothing resets it and no time is given.
+    case "no_allowance":
+      return "waiting: no LinkedIn session it may use has an allowance for this kind of step";
     case "call_capacity":
       return "waiting for room on your call list, on a day with calling hours";
     case "on_call_list":
@@ -281,7 +298,7 @@ function callSkipPreview(skips: ControlStepView): string {
 }
 
 /** What a control will do, before the user confirms: the read's preview, the engine's transition on a copy of the lead. */
-export function controlPreviewText(control: AllowedControl, campaign: RecordLead["campaignState"], userZone: string): string {
+export function controlPreviewText(control: AllowedControl, campaign: RecordLead["campaignState"], userZone: string, inviteOpen = false): string {
   const provider = mayStillSendText(control.withProvider);
   const next = control.next;
   switch (control.action) {
@@ -297,11 +314,12 @@ export function controlPreviewText(control: AllowedControl, campaign: RecordLead
       return join(what, next ? `Next: ${stepPhrase(next)}${due(next.when, userZone)}.` : null);
     }
     case "stop":
-      return join("Their outreach in this campaign stops: nothing more goes out and no call is listed. What was sent stays on record.", provider);
+      // Q38's interim (ADR 0004 3.4): a stop never withdraws a LinkedIn invite already sent, so the confirmation says so.
+      return join("Their outreach in this campaign stops: nothing more goes out and no call is listed. What was sent stays on record.", provider, inviteOpen ? INVITE_STAYS_OPEN.stop : null);
     case "resume_from_next_step":
       return join(next ? `They resume at the next unsent step: ${stepPhrase(next)}${due(next.when, userZone)}.` : "They resume at the next unsent step.", campaign.paused ? "It waits while this campaign is paused." : null, "Nothing already sent goes again.");
     case "move_to_win_back":
-      return join(next ? `They move to this campaign’s win-back branch, starting with ${stepPhrase(next)}${due(next.when, userZone)}.` : "They move to this campaign’s win-back branch.", campaign.paused ? "It waits while this campaign is paused." : null, "Their remaining main-sequence steps are dropped.");
+      return join(next ? `They move to this campaign’s win-back branch, starting with ${stepPhrase(next)}${due(next.when, userZone)}.` : "They move to this campaign’s win-back branch.", campaign.paused ? "It waits while this campaign is paused." : null, "Their remaining main-sequence steps are dropped.", inviteOpen ? INVITE_STAYS_OPEN.move_to_win_back : null);
     default: {
       const unhandled: never = control.action;
       throw new Error(`A control with no preview: ${String(unhandled)}`);
