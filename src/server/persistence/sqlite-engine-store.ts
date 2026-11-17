@@ -1199,20 +1199,22 @@ export class SqliteEngineStore implements EngineStore {
    */
   private inmailStanding(id: string, account: Row): InmailStanding {
     const plan = strOrNull(account, "inmail_plan") as InmailStanding["plan"];
-    // A session that never reported, or reports no plan, can send no InMail whatever it spent: nothing more to count.
-    if (plan !== "premium" && plan !== "sales_navigator") return { plan, credits: numOrNull(account, "inmail_credits") ?? 0, spent: 0, committed: 0 };
-    const reported = numOrNull(account, "inmail_reported_wall") ?? 0;
-    const out = "(w.settled IS NULL OR w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL)";
-    const counts =
-      this.sql(
-        `SELECT
-           (SELECT COUNT(*) FROM provider_work w WHERE w.account_id = :id AND w.inmail = 1
-              AND (w.settled IS NULL OR (${out} AND COALESCE(w.sent_wall, w.first_handed_wall, 0) >= :reported))) AS spent,
-           (SELECT COUNT(*) FROM track_progress t JOIN engine_subjects e ON e.id = t.subject_id
-              WHERE t.inmail = 'chosen' AND t.inmail_session = :id AND t.finished_at IS NULL AND e.ended IS NULL
-                AND NOT EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = t.subject_id AND w.track_id = t.track_id AND w.inmail = 1 AND ${out})) AS committed`,
-      ).get({ id, reported }) ?? {};
-    return { plan, credits: numOrNull(account, "inmail_credits") ?? 0, spent: num(counts, "spent"), committed: num(counts, "committed") };
+    const reportedWall = numOrNull(account, "inmail_reported_wall");
+    const credits = numOrNull(account, "inmail_credits") ?? 0;
+    // A session that never reported, or reports no plan, can back no InMail: no holding to count.
+    if (plan !== "premium" && plan !== "sales_navigator") return { plan, credits, reportedWall, holdings: [] };
+    // Every credit held on the session (13.5), earliest acquired first, but those the report already includes: an InMail sent
+    // before the report was read.
+    const holdings = this.sql(
+      `SELECT t.subject_id, t.track_id, t.inmail_hold_wall FROM track_progress t
+         WHERE t.inmail_session = :id AND t.inmail_hold_wall IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = t.subject_id AND w.track_id = t.track_id AND w.inmail = 1
+             AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL) AND COALESCE(w.sent_wall, w.first_handed_wall, 0) < :reported)
+         ORDER BY t.inmail_hold_wall, t.subject_id, t.track_id`,
+    )
+      .all({ id, reported: reportedWall ?? 0 })
+      .map((r) => ({ key: `${str(r, "subject_id")}|${str(r, "track_id")}`, acquiredWall: num(r, "inmail_hold_wall") }));
+    return { plan, credits, reportedWall, holdings };
   }
 
   async allowances(accountId: string): Promise<SocialAllowances | null> {
@@ -1600,13 +1602,13 @@ export class SqliteEngineStore implements EngineStore {
         `INSERT OR REPLACE INTO track_progress (subject_id, track_id, start_at, start_basis_at, start_basis_wall, start_zone, started_at,
            destination_detail_id, next_step_id, basis_at, basis_wall, due_at, due_wall, due_zone, finished_at, finished_wall, finish_reason, conversation_owners,
            connection, connected_at, connected_wall, accepted_wall, accept_by, accept_by_wall, accept_by_zone, invite_withdrawal, invite_withdrawal_last_wall,
-           invite_withdrawal_unknowns, connection_checks, accept_by_days, skip_cause, inmail, inmail_session)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           invite_withdrawal_unknowns, connection_checks, accept_by_days, skip_cause, inmail, inmail_session, inmail_hold_wall, inmail_reported_wall, inmail_replaces)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id, t.trackId, t.startAt, t.startBasisAt, t.startBasisWall, t.startZone, t.startedAt, t.destinationDetailId, t.nextStepId, t.basisAt, t.basisWall, t.dueAt, t.dueWall, t.dueZone, t.finishedAt, t.finishedWall, t.finishReason, t.conversationOwners ? JSON.stringify(t.conversationOwners) : null,
           t.connection ?? null, t.connectedAt ?? null, t.connectedWall ?? null, t.acceptedWall ?? null, t.acceptBy ?? null, t.acceptByWall ?? null, t.acceptByZone ?? null, t.inviteWithdrawal ?? null, t.inviteWithdrawalLastWall ?? null,
           t.inviteWithdrawalUnknowns ?? 0, t.connectionChecks ? JSON.stringify(t.connectionChecks) : null, t.acceptByDays ?? null, t.skipCause ?? null,
-          t.inmail ?? null, t.inmailSession ?? null,
+          t.inmail ?? null, t.inmailSession ?? null, t.inmailHoldWall ?? null, t.inmailReportedWall ?? null, t.inmailReplaces ?? null,
         ],
       );
       // Stored once and only forward (ADR 0004 10.4): a connection never changes once set, a withdrawal never moves back.
@@ -1901,7 +1903,7 @@ function toTrack(r: Row): TrackProgress {
     ...(r["accept_by"] == null ? {} : { acceptBy: num(r, "accept_by"), acceptByWall: numOrNull(r, "accept_by_wall"), acceptByZone: strOrNull(r, "accept_by_zone"), acceptByDays: numOrNull(r, "accept_by_days") }),
     ...(r["invite_withdrawal"] == null ? {} : { inviteWithdrawal: str(r, "invite_withdrawal") as NonNullable<TrackProgress["inviteWithdrawal"]>, inviteWithdrawalLastWall: numOrNull(r, "invite_withdrawal_last_wall"), inviteWithdrawalUnknowns: num(r, "invite_withdrawal_unknowns") }),
     ...(r["connection_checks"] == null ? {} : { connectionChecks: JSON.parse(str(r, "connection_checks")) as NonNullable<TrackProgress["connectionChecks"]> }),
-    ...(r["inmail"] == null ? {} : { inmail: str(r, "inmail") as InmailState, inmailSession: strOrNull(r, "inmail_session") }),
+    ...(r["inmail"] == null ? {} : { inmail: str(r, "inmail") as InmailState, inmailSession: strOrNull(r, "inmail_session"), inmailHoldWall: numOrNull(r, "inmail_hold_wall"), inmailReportedWall: numOrNull(r, "inmail_reported_wall"), inmailReplaces: strOrNull(r, "inmail_replaces") }),
   };
 }
 

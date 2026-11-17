@@ -162,11 +162,24 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
   }
 }
 
-/** Why a chosen InMail can't go now, by its session's own report (ADR 0004 13.3, 13.5). */
-const INMAIL_UNAVAILABLE: Record<"no_plan" | "no_credit", string> = {
-  no_plan: "waiting: your LinkedIn session no longer reports Premium or Sales Navigator, so the InMail can’t go",
-  no_credit: "waiting: your LinkedIn session reports no InMail credit free",
-};
+/** Why a chosen InMail can't go now, as of its session's latest report (ADR 0004 13.5); none promises when it will. */
+function inmailUnavailableWords(cause: NonNullable<Extract<StepWhenView, { kind: "waits" }>["inmail"]>, reportedAt: string | undefined, userZone: string): string {
+  const asOf = reportedAt ? ` (as your session last reported on ${dateIn(userZone, reportedAt)})` : "";
+  switch (cause) {
+    case "no_plan":
+      return `waiting: your LinkedIn session doesn’t report Premium or Sales Navigator${asOf}, so the InMail can’t go`;
+    case "stale_report":
+      return `waiting: your LinkedIn session hasn’t reported for over a day${reportedAt ? ` (its last report was on ${dateIn(userZone, reportedAt)})` : ""}, so no InMail goes on it`;
+    case "no_holding":
+      return `waiting for an InMail credit to be free on your LinkedIn session${asOf}: other leads’ InMails hold its credits`;
+    case "unbacked":
+      return `waiting: your LinkedIn session reports fewer InMail credits${asOf} than InMails chosen before this one`;
+    default: {
+      const unhandled: never = cause;
+      throw new Error(`An InMail wait with no words: ${String(unhandled)}`);
+    }
+  }
+}
 
 /**
  * When a step goes, from the read (`StepWhenView`): ready, when its time has come and nothing of its own holds it, in line
@@ -183,7 +196,7 @@ export function stepWhenPhrase(when: StepWhenView, userZone: string): string {
     case "waits":
       // The day an acceptance wait ends is a fact of the read, said as when the wait ends, never as when a send goes (ADR 0004 9).
       if (when.why === "awaiting_acceptance" && when.until !== undefined) return `${stepWaitWords(when.why, when.channel)}; the wait ends ${dateIn(userZone, when.until)}`;
-      if (when.why === "inmail_unavailable" && when.inmail !== undefined) return INMAIL_UNAVAILABLE[when.inmail];
+      if (when.why === "inmail_unavailable" && when.inmail !== undefined) return inmailUnavailableWords(when.inmail, when.reportedAt, userZone);
       return stepWaitWords(when.why, when.channel);
     // A call goes on the list on a day, never at a time of day (council on 178de98, item 3).
     case "call_day":

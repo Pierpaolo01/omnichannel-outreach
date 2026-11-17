@@ -187,7 +187,7 @@ export type StepWhenView =
   | { readonly kind: "at"; readonly at: string }
   /** `channel` names the step's channel where the reason depends on it (no transport). */
   /** `channel`: the track's, so a reason is worded in its channel's words (council on b21af02, item 1). */
-  | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel: "email" | "sms" | "call" | "linkedin"; readonly until?: string; readonly inmail?: "no_plan" | "no_credit" }
+  | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel: "email" | "sms" | "call" | "linkedin"; readonly until?: string; readonly inmail?: "no_plan" | "stale_report" | "no_holding" | "unbacked"; readonly reportedAt?: string }
   /**
    * A call not yet placed: the user's day (YYYY-MM-DD) it goes on the list, with no time of day; `today` when that is the
    * read's day; `now` when it is ready for the list (due, calling hours open today, room on today's list), with no instant promised.
@@ -625,7 +625,7 @@ export interface LinkedinTrackView {
    * the InMail's own work, `sent` once recorded sent, `handed` while with the session and not known to have gone; `sentAt`,
    * its send's instant once recorded.
    */
-  readonly inmail: { readonly on: boolean; readonly state: import("../domain/sequence/state.ts").InmailState | null; readonly work: "sent" | "handed" | null; readonly sentAt: string | null };
+  readonly inmail: { readonly on: boolean; readonly state: import("../domain/sequence/state.ts").InmailState | null; readonly work: "sent" | "handed" | null; readonly sentAt: string | null; /** The instant of the session's report the expiry judged on (13.5). */ readonly reportedAt: string | null };
 }
 
 export interface TrackProgressView {

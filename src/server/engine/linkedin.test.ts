@@ -297,3 +297,19 @@ describe("the running app presents no LinkedIn integration (ADR 0004 1.1)", () =
     expect(JSON.stringify(launched.body)).toContain("no connected LinkedIn session");
   });
 });
+
+describe("a pending invitation at a message's pre-send check (council on 8b0c846, item 3)", () => {
+  test("the connection removed, then an invitation pending: the follow-up is not handed over, as on the integration tip", { timeout: 120_000 }, async () => {
+    const { h, campaign, delivered } = await world();
+    h.linkedin.profiles.set(PAT, { acceptAfterMs: 20 * H });
+    const c = await campaign([linkedin("li", [invite(), step("m1", 0, "Thanks for connecting."), step("m2", 2, "Following up.")])]);
+    await h.advanceTo(MONDAY_9 + 2 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1"]);
+    // They remove the connection, and an invitation to them is pending from elsewhere: the session answers "pending".
+    h.linkedin.profiles.set(PAT, { connectionRemoved: true, pendingElsewhere: true });
+    await h.advanceTo(MONDAY_9 + 6 * DAY);
+    expect(h.linkedin.handoverLog.filter((x) => x.destination === PAT).map((x) => x.stepId)).toEqual(["inv", "m1"]);
+    const t = (await h.store.engine.subject(c.lead("Pat Oneil"), h.clock))?.tracks.find((x) => x.trackId === "li");
+    expect(t?.finishReason).toBeNull();
+  });
+});

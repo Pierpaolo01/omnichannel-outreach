@@ -77,6 +77,7 @@ export function stepWhenView(when: StepWhen, now: number, today: number, channel
         channel: when.channel ?? channel,
         ...(when.until !== undefined ? { until: new Date(when.until).toISOString() } : {}),
         ...(when.inmail !== undefined ? { inmail: when.inmail } : {}),
+        ...(when.reportedAt != null ? { reportedAt: new Date(when.reportedAt).toISOString() } : {}),
       };
     case "ready":
       return { kind: "ready" };

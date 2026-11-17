@@ -1515,11 +1515,14 @@ export class Engine {
         });
         return false;
       }
-      // Only an invite is stopped by one pending: the InMail's own invite stays open while it goes (ADR 0004 13.3).
-      if (pendingStops && invite) return false;
+      // A pending invitation stops every step as on the integration tip, but the InMail, whose own invite stays open while it
+      // goes (ADR 0004 13.3; council on 8b0c846, item 3: a message to a connection removed with an invitation pending).
+      const inmail = subject !== null && this.rules.actionOfStep(subject, a.trackId, a.stepId) === "inmail";
+      // A message after an InMail known sent goes beside the track's own invite, which the fallback leaves open.
+      const ownInviteOpen = inmail || subject?.tracks.find((p) => p.trackId === a.trackId)?.inmail === "sent";
+      if (pendingStops && !ownInviteOpen) return false;
       // Connected at an InMail's slot: they accepted and the session has not reported it yet. No InMail to a connection; the
       // acceptance, once observed, skips it and connects the track (13.3).
-      const inmail = subject !== null && this.rules.actionOfStep(subject, a.trackId, a.stepId) === "inmail";
       if (asked.kind === "connected" && inmail && inmailSeams.acceptanceSkipsInmail) return false;
       await this.update(a.subjectId, now, (s) => ({ ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: false } : x)) }));
       this.hooks.crashPoint?.("after_presend", a.id);

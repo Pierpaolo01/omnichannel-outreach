@@ -357,20 +357,28 @@ So a follow-up after an InMail goes without a connection, and nothing else does:
 
 **The session's report.** A LinkedIn session reports, with its account listing, its InMail standing: `inmail: { plan: "premium" | "sales_navigator" | "none", credits: n }`, by its own reading of the account. The engine stores the last report with its instant (`sender_accounts.inmail_plan`, `inmail_credits`, `inmail_reported_wall`, migration 25). A session that reports none is not eligible. The engine invents no plan and no credit count; the running app's port lists no session (1.1), so no session is ever eligible there.
 
-**Credits free** on a session = the reported credits, less the InMails the report cannot yet include, less the InMails tracks have chosen and not yet claimed:
-- *spent* = InMail work on the session that is unsettled (a claim's reservation, or work handed and not settled), or was sent at or after the report's instant;
-- *committed* = tracks with `inmail = chosen` on the session whose InMail has no work yet.
+**A credit is held by a named piece of work** (council on `8b0c846`, items 2, 7 and 8: three failures of counts that did not record who holds what). The work is a track's InMail; its holding is stored on the track (`track_progress.inmail_hold_wall`, the instant it was acquired; migration 25), with the session it is held on (`inmail_session`).
 
-Eligible at the expiry: plan Premium or Sales Navigator and `credits − spent − committed ≥ 1`. A track that chose its InMail may claim it while `credits − spent − committed ≥ 0` (its own commitment is counted). So two tracks expiring together on a session with one credit: the first chooses the InMail and commits the credit; the second finds none free and takes the withdrawal path with `no_credit`.
+- **Acquired** in one transaction that reads the session's latest report and every holding on that session. It is acquired by the expiry when it chooses the InMail, and by a lead restarted with its InMail chosen and no holding. A holding is acquired only while the session reports Premium or Sales Navigator, its report is fresh (below), and `credits − counted holdings ≥ 1`. The transaction is an evaluation's write, refused when the standing of a session it acquired on has changed since its snapshot (`inmailJudgedSessions`), and decided again.
+- **Counted** while the InMail has not gone, and after it has gone until a report later than its send includes it. A holding the report has absorbed no longer counts.
+- **Released**, by these named events only: the InMail refused; settled not sent with the track on the withdrawal path; cancelled by an acceptance; the fallback switched off; the user's skip; the track finishing without the InMail having gone; the lead stopped or ended. A holding whose InMail may have gone (handed over and unsettled) is kept through a stop, since that credit may be spent.
+- **A restart acquires again.** It never takes back what another lead now holds. With no credit free it waits, with its reason (`no_holding`) and no time.
+- **Backed.** The session's counted holdings are ranked by acquisition, then by subject and track: the earliest first. A holding is backed while its rank is below the credits the session reports now. When a report falls below the holdings, the latest acquired lose their backing first and wait (`unbacked`). When credits return, they are backed again in the same order. So with `c` credits reported and `n` InMails held, `min(c, n)` are backed: never more, and never fewer for want of sharing.
+- **One function** (`inmailBacking`) answers, for a track's InMail: `backed`, `no_holding`, `no_plan`, `stale_report` or `unbacked`. Dispatch's selection of sessions (`eligibleSessions`), the handover's predicate and every read that explains an InMail's wait all derive from it.
+- **The handover re-reads.** The handover transaction loads the session's latest report and holdings and checks the backing again (predicate 20). A claim whose credit is no longer backed, because of a report of zero, a lost plan or a later report, is withdrawn and waits. Never more InMails are handed over than the credits reported at the handover.
 
-**One selection.** Dispatch's `eligibleSessions` (ticket 24b) gives, for an InMail step, the track's own session only when it is eligible by the rule above; every read that explains why an InMail is not going derives from it (`inmail_unavailable`, with its cause `no_plan` or `no_credit` from the same function, `inmailStanding`).
+**The report's age** (council on `8b0c846`, item 5). A report is fresh for `INMAIL_REPORT_MAX_AGE`, 24 hours (question Q58), from the instant it was read. A session not read for longer, because it was signed out, is not judged eligible on its old report:
+- at the expiry, the track takes the withdrawal path with the cause `stale_report`;
+- after the choice, the InMail waits (`stale_report`).
+
+The instant of the report a judgment used is stored with it (`track_progress.inmail_reported_wall`). Every sentence that says eligibility or its lack says it as of that report: "as your session last reported on {day}".
 
 **The allowance table**, extending section 6:
 
 | Action | Spends | From | Given back |
 | - | - | - | - |
 | InMail | one of the session's **messages per day** (an InMail is a message the session sends) | its claim, as any step's reservation; for good once handed and sent or unsettled | when refused, or withdrawn unsent |
-| InMail | one **credit**, by the session's report | its claim (counted as spent while unsettled); the session's next report after it is sent includes it | when refused, or withdrawn unsent (LinkedIn spends no credit on an InMail that did not go) |
+| InMail | one **credit**, by the session's report: a holding acquired by the expiry's choice, or by a restart | the choice (a holding), counted until a report after the InMail's send includes it | by the named release events above (LinkedIn spends no credit on an InMail that did not go) |
 | Follow-up after an InMail | one message per day, as any message | as before | as before |
 
 No InMail allowance of its own is added (question Q54): the messages per day are the user's guard on how much a session sends, and the credits are LinkedIn's own limit, reported. **A credit is never spent on a retry of an unknown answer without the lookup**: the transport is non-retryable (2.2), so an unknown answer is looked up one settling period later and, if still unknown, held for the user's mark (5.3); the uncertain work keeps its reservation of the message and the credit meanwhile.

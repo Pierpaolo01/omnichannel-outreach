@@ -1177,8 +1177,14 @@ export const MIGRATIONS: readonly Migration[] = [
     name: "the LinkedIn InMail fallback (ticket 27, ADR 0004 section 13): a track's InMail state, which message work is an InMail, and a session's InMail report",
     sql: `
       -- A track's InMail fallback, judged at the acceptance expiry and moving only forward (ADR 0004 13.3, 13.10).
-      ALTER TABLE track_progress ADD COLUMN inmail TEXT CHECK (inmail IS NULL OR inmail IN ('chosen', 'sent', 'accepted', 'no_plan', 'no_credit', 'refused', 'switched_off', 'skipped_by_user'));
+      ALTER TABLE track_progress ADD COLUMN inmail TEXT CHECK (inmail IS NULL OR inmail IN ('chosen', 'sent', 'accepted', 'no_plan', 'no_credit', 'stale_report', 'refused', 'switched_off', 'skipped_by_user'));
       ALTER TABLE track_progress ADD COLUMN inmail_session TEXT;
+      -- The credit a track's InMail holds on its session, by when it was acquired (13.5); the report a judgment read; the
+      -- step the InMail replaces, named at the choice (council on 8b0c846, items 1, 2, 5, 7, 8).
+      ALTER TABLE track_progress ADD COLUMN inmail_hold_wall INTEGER;
+      ALTER TABLE track_progress ADD COLUMN inmail_reported_wall INTEGER;
+      ALTER TABLE track_progress ADD COLUMN inmail_replaces TEXT;
+      CREATE INDEX track_progress_inmail_holdings ON track_progress (inmail_session, inmail_hold_wall) WHERE inmail_hold_wall IS NOT NULL;
       CREATE TRIGGER track_progress_inmail_forward BEFORE UPDATE OF inmail ON track_progress
       WHEN OLD.inmail IS NOT NULL AND NEW.inmail IS NOT OLD.inmail AND NOT (OLD.inmail = 'chosen' AND NEW.inmail IS NOT NULL)
       BEGIN SELECT RAISE(ABORT, 'a track''s InMail state only moves forward'); END;

@@ -90,8 +90,10 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
   if (view.invite === "handed") lines.push(INVITE_HANDED);
   const connected = connectionLine(view, userZone);
   if (connected) lines.push(connected);
-  const inmail = inmailLine(view.inmail, userZone);
+  const inmail = inmailLine(view, userZone);
   if (inmail) lines.push(inmail);
+  // An acceptance recorded after the InMail went, on its own line (council on 8b0c846, item 9).
+  if (view.inmail.state === "sent" && view.acceptedAt && view.connection === null && !view.acceptedAfterFinish) lines.push(`They accepted the invite by ${dateIn(userZone, view.acceptedAt)}, after the InMail went; the follow-ups go on as before.`);
   if (view.inmail.on && view.inmail.state === null && view.invite === "sent" && view.connection === null && track.finishReason === null) lines.push(INMAIL_AT_THE_END);
   if (track.finishReason === "invite_not_accepted") lines.push(expiryLine(view.withdrawal, "them", view));
   // An acceptance recorded after the track ended (council on dee365d, item 14): said as recorded late, with the time
@@ -116,23 +118,31 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
  * stored cause, before the expiry's own line; while still waiting for acceptance with the fallback on, what the end of the
  * wait does. Provisional sentences, for the principal.
  */
-export function inmailLine(inmail: LinkedinTrackView["inmail"], userZone: string): string | null {
+export function inmailLine(view: Pick<LinkedinTrackView, "inmail" | "inviteOpen">, userZone: string): string | null {
+  const inmail = view.inmail;
   const state = inmail.state;
+  // Eligibility is said as of the session's report the expiry read (council on 8b0c846, item 5).
+  const asReported = inmail.reportedAt ? `as your session last reported on ${dateIn(userZone, inmail.reportedAt)}` : "your session had reported nothing about InMail";
+  // The invite is said as open only while the read says so (council on 8b0c846, item 9).
+  const open = view.inviteOpen ? " The invite stays open on LinkedIn." : "";
   switch (state) {
     case null:
       return null;
+    // Chosen is not a promise (item 6): it may wait on a credit; the next step's line says why it waits.
     case "chosen":
       return inmail.work === "handed"
-        ? "No acceptance was recorded within the track’s wait, so an InMail went to the LinkedIn session instead, which hasn’t confirmed whether it went. The invite stays open on LinkedIn."
-        : "No acceptance was recorded within the track’s wait, so an InMail is to go instead; it hasn’t gone yet. The invite stays open on LinkedIn.";
+        ? `No acceptance was recorded within the track’s wait, so the InMail fallback was chosen; the InMail is with the LinkedIn session, which hasn’t confirmed whether it went.${open}`
+        : `No acceptance was recorded within the track’s wait, so the InMail fallback was chosen (${asReported}, it had a credit free). It hasn’t gone.${open}`;
     case "sent":
-      return `No acceptance was recorded within the track’s wait, so the InMail went instead${inmail.sentAt ? ` on ${dateIn(userZone, inmail.sentAt)}` : ""}. The first message isn’t sent; the follow-ups wait their days from the InMail. The invite stays open on LinkedIn.`;
+      return `No acceptance was recorded within the track’s wait, so the InMail went instead${inmail.sentAt ? ` on ${dateIn(userZone, inmail.sentAt)}` : ""}. The first message isn’t sent; the follow-ups wait their days from the InMail.${open}`;
     case "accepted":
       return "They accepted the invite after the wait ended and before any InMail was handed over, so none was sent; the first message follows their acceptance.";
     case "no_plan":
-      return "The InMail fallback didn’t go: when the wait ended, the session that sent the invite didn’t report Premium or Sales Navigator.";
+      return inmail.reportedAt ? `The InMail fallback didn’t go: when the wait ended, the session that sent the invite didn’t report Premium or Sales Navigator, ${asReported}.` : "The InMail fallback didn’t go: when the wait ended, the session that sent the invite had reported nothing about InMail.";
     case "no_credit":
-      return "The InMail fallback didn’t go: when the wait ended, the session that sent the invite had no InMail credit free.";
+      return `The InMail fallback didn’t go: when the wait ended, the session that sent the invite had no InMail credit free, ${asReported}.`;
+    case "stale_report":
+      return `The InMail fallback didn’t go: when the wait ended, the session that sent the invite hadn’t reported for over a day${inmail.reportedAt ? ` (its last report was on ${dateIn(userZone, inmail.reportedAt)})` : ""}, too long to judge it on.`;
     case "refused":
       return "The InMail fallback didn’t go: LinkedIn refused the InMail for this person. Their profile isn’t marked wrong.";
     case "switched_off":

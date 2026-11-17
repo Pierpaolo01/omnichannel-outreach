@@ -12,7 +12,7 @@ import {
   invitePendingUntil,
   inviteClaimable,
   inviteSessions,
-  inmailStanding,
+  inmailBacking,
   linkedinSessionOf,
   applyToAttempt,
   awaitingAcceptance,
@@ -149,7 +149,7 @@ export type StepWhen =
   | { readonly kind: "call_day"; readonly at: number; readonly day: number }
   | { readonly kind: "listed_for"; readonly day: number }
   /** `channel` names the step's channel where the reason depends on it (no transport). */
-  | { readonly kind: "waits"; readonly why: StepWait; readonly channel?: "email" | "sms" | "linkedin"; readonly until?: number; readonly inmail?: "no_plan" | "no_credit" };
+  | { readonly kind: "waits"; readonly why: StepWait; readonly channel?: "email" | "sms" | "linkedin"; readonly until?: number; readonly inmail?: InmailWait; readonly reportedAt?: number | null };
 
 /**
  * A held track's reason as the read gives it (5.4), one case per hold `heldReason` can return, so a hold a later change
@@ -255,8 +255,8 @@ export function stepWhen(state: SubjectState, trackId: string, now: number, env:
 function unclaimedWhen(state: SubjectState, trackId: string, stepId: string, now: number): StepWhen {
   const refusal = claimRefusal(state, { trackId, stepId }, now);
   if (refusal !== null) return { kind: "waits", why: refusalWait(refusal) };
-  const inmail = inmailUnavailable(state, trackId);
-  if (inmail !== null) return { kind: "waits", why: "inmail_unavailable", inmail };
+  const inmail = inmailUnavailable(state, trackId, now);
+  if (inmail !== null) return { kind: "waits", why: "inmail_unavailable", inmail: inmail.cause, reportedAt: inmail.reportedAt };
   const destination = destinationOf(state, trackId);
   const candidates = candidatesOf(state, trackId, now);
   // Predicate 18 on every sender it may use: whichever the claim takes, the handover waits.
@@ -296,25 +296,30 @@ function sessionsFor(state: SubjectState, trackId: string, action: SocialAction 
   const ids = candidatesFor(state, trackId);
   // An InMail goes only from the track's own session while it is eligible by its own report (ADR 0004 13.5): the one
   // selection every read of why an InMail is not going derives from. An inherited claim already holds its credit.
-  if (action === "inmail") return ids.filter((id) => id === inherited || inmailStanding(state.accounts[id], true) === "eligible");
+  if (action === "inmail") return inmailBacking(state, trackId, now) === "backed" ? ids : [];
   if (action !== "invite") return ids;
   const clear = inviteSessions(state, trackId, ids, now);
   return inherited !== null && ids.includes(inherited) && !clear.includes(inherited) ? [...clear, inherited] : clear;
 }
 
 /**
- * Why the track's pending InMail cannot go from its session now (ADR 0004 13.5), from the same standing `sessionsFor`
- * selects by: its plan or its credits; null when it can, or the pending step is not an InMail, or its claim already holds
- * work (whose credit is already counted).
+ * Why the track's pending InMail cannot go now (ADR 0004 13.5), by the one backing function `sessionsFor` and the handover
+ * read: no plan, a report too old, no credit held (a restart waiting for one to be free), or a credit held that the report no
+ * longer backs. With the instant of the session's latest report, which every sentence of it says. Null when it may go, or
+ * the pending step is not an InMail, or its work may already have gone (the handover is not asked again).
  */
-export function inmailUnavailable(state: SubjectState, trackId: string): "no_plan" | "no_credit" | null {
+export function inmailUnavailable(state: SubjectState, trackId: string, now: number): { readonly cause: InmailWait; readonly reportedAt: number | null } | null {
   if (actionOfPending(state, trackId) !== "inmail") return null;
   const p = progressOf(state, trackId);
   if (p?.nextStepId && inheritedWork(state, p.nextStepId)) return null;
+  const backing = inmailBacking(state, trackId, now);
+  if (backing === "backed") return null;
   const session = p?.inmailSession ?? linkedinSessionOf(state);
-  const standing = inmailStanding(session === null ? undefined : state.accounts[session], true);
-  return standing === "eligible" ? null : standing;
+  return { cause: backing, reportedAt: session === null ? null : (state.accounts[session]?.inmail?.reportedWall ?? null) };
 }
+
+/** Why an InMail waits (13.5): the backing function's every answer but "backed". */
+export type InmailWait = "no_plan" | "stale_report" | "no_holding" | "unbacked";
 
 /** The social action of a track's pending step (ADR 0004 6), or null for email and SMS. */
 function actionOfPending(state: SubjectState, trackId: string): SocialAction | null {
@@ -370,12 +375,12 @@ export function noAllowanceOnAnySession(state: SubjectState, trackId: string, no
 }
 
 /** What the engine knows at the read rules out every sender for the step: none connected, or every daily limit zero. */
-function noSenderKnown(state: SubjectState, trackId: string, now: number): { kind: "waits"; why: StepWait; inmail?: "no_plan" | "no_credit" } | null {
+function noSenderKnown(state: SubjectState, trackId: string, now: number): { kind: "waits"; why: StepWait; inmail?: InmailWait; reportedAt?: number | null } | null {
   const channel = channelOf(state, trackId) ?? "email";
   // A LinkedIn step: every session it may use allows none of its kind of action, the user's setting (ADR 0004 4, item 6).
   if (channel === "linkedin") {
-    const inmail = inmailUnavailable(state, trackId);
-    if (inmail !== null) return { kind: "waits", why: "inmail_unavailable", inmail };
+    const inmail = inmailUnavailable(state, trackId, now);
+    if (inmail !== null) return { kind: "waits", why: "inmail_unavailable", inmail: inmail.cause, reportedAt: inmail.reportedAt };
     return noAllowanceOnAnySession(state, trackId, now) ? { kind: "waits", why: "sending_capacity" } : null;
   }
   if (channel !== "email" && channel !== "sms") return null;
@@ -579,13 +584,11 @@ export function claim(
   const added = inherited ? 0 : 1;
   const bucket = action !== null ? allowanceOf(action) : null;
   const kinds = base.kinds && bucket !== null ? { ...base.kinds, [bucket]: { ...base.kinds[bucket], used: base.kinds[bucket].used + added } } : base.kinds;
-  // The InMail's credit moves from the track's commitment to the session's spent credits (ADR 0004 13.5).
-  const inmail = action === "inmail" && base.inmail && !inherited ? { inmail: { ...base.inmail, spent: base.inmail.spent + 1, committed: Math.max(0, base.inmail.committed - 1) } } : {};
   return {
     ...state,
     attempts: [...state.attempts, attempt],
     work: inherited ? state.work : [...state.work, work],
-    accounts: { ...state.accounts, [account.id]: { ...base, used: base.used + added, inFlight: base.inFlight + added, ...(kinds ? { kinds } : {}), ...inmail } },
+    accounts: { ...state.accounts, [account.id]: { ...base, used: base.used + added, inFlight: base.inFlight + added, ...(kinds ? { kinds } : {}) } },
   };
 }
 
@@ -643,6 +646,9 @@ export function handoverFailures(state: SubjectState, attempt: Attempt, account:
   const track = state.campaign.definition.tracks.find((t) => t.id === attempt.trackId);
   const progress = progressOf(state, attempt.trackId);
   if (track && progress && gateRules.connectionGate(track, attempt.stepId, progress)) failed.push(19);
+  // 20. An InMail only while the credit it holds is backed by the session's latest report and plan, read in this transaction
+  // (ADR 0004 13.5; council on 8b0c846, item 8): a report of zero or a plan lost after the claim stops it here.
+  if (attempt.action === "inmail" && gateRules.handoverRechecksBacking && inmailBacking(state, attempt.trackId, now) !== "backed") failed.push(20);
   if (now < account.nextSlotAt) failed.push(16);
   return [...new Set(failed)].sort((a, b) => a - b);
 }

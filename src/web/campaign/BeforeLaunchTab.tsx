@@ -491,7 +491,9 @@ function Preview({ campaignId, editor, leads, horizonDays }: { campaignId: strin
     const parts: string[] = [];
     if (live.some((t) => t.channel === "email")) parts.push(l.email ? `Email to ${l.email}.` : "No email, so the email track is skipped for them.");
     if (live.some((t) => t.channel === "sms")) parts.push(l.mobile ? "Texts to their own mobile." : l.kind === "company" ? "A company lead is never texted, so the SMS track is skipped." : "No mobile of their own, so the SMS track is skipped for them.");
-    if (live.some((t) => t.channel === "linkedin")) parts.push(l.linkedin ? "A connection invite to their LinkedIn profile, then messages once they accept." : l.kind === "company" ? "A company lead has no member profile, so the LinkedIn track is skipped." : "No LinkedIn profile, so the LinkedIn track is skipped for them.");
+    // With the InMail fallback on, the InMail path is said too (council on 8b0c846, item 6).
+    const fallback = live.some((t) => t.channel === "linkedin" && t.steps.some((s) => s.role === "inmail" && !s.removed));
+    if (live.some((t) => t.channel === "linkedin")) parts.push(l.linkedin ? (fallback ? "A connection invite to their LinkedIn profile, then messages once they accept; if they haven’t accepted when the wait ends, an InMail instead, when your session can send one, then the follow-ups." : "A connection invite to their LinkedIn profile, then messages once they accept.") : l.kind === "company" ? "A company lead has no member profile, so the LinkedIn track is skipped." : "No LinkedIn profile, so the LinkedIn track is skipped for them.");
     if (live.some((t) => t.channel === "call")) parts.push(l.phone ? "Calls on your list, to a number of theirs or their company’s main line." : `No phone number, so ${live.filter((t) => t.channel === "call").length > 1 ? "the phone tracks are" : "the phone track is"} skipped for them.`);
     return parts.join(" ");
   };

@@ -135,9 +135,21 @@ export interface TrackProgress {
   readonly inmail?: InmailState | null;
   /** The session the expiry judged eligible for the InMail: the track's own session (ADR 0004 13.3). */
   readonly inmailSession?: string | null;
+  /**
+   * The credit this track's InMail holds on its session (ADR 0004 13.5): the instant it was acquired, by the expiry's choice or
+   * by a restart; null when it holds none (never acquired, or released by a named event).
+   */
+  readonly inmailHoldWall?: number | null;
+  /** The instant of the session's report the expiry's judgment read (13.5): said with every sentence of eligibility. */
+  readonly inmailReportedWall?: number | null;
+  /**
+   * The step the InMail replaces (council on 8b0c846, item 1), named once when the expiry chooses it: the first message by its
+   * place among every step of the track, removed ones included. Only it is ever skipped as `inmail_instead`.
+   */
+  readonly inmailReplaces?: string | null;
 }
 
-export type InmailState = "chosen" | "sent" | "accepted" | "no_plan" | "no_credit" | "refused" | "switched_off" | "skipped_by_user";
+export type InmailState = "chosen" | "sent" | "accepted" | "no_plan" | "no_credit" | "stale_report" | "refused" | "switched_off" | "skipped_by_user";
 /** Why an InMail did not go and the track took the withdrawal path, as stored (ADR 0004 13.3). `accepted` connects instead. */
 export type InmailNotSent = Exclude<InmailState, "chosen" | "sent" | "accepted">;
 
@@ -507,9 +519,7 @@ export interface AccountState {
   /** A LinkedIn account's note allowance this calendar month, in its reset zone (ADR 0004 section 4). */
   readonly notes?: Allowance;
   /**
-   * A LinkedIn session's InMail standing (ADR 0004 13.5): its last report (`plan` null when it reported none) and the
-   * credits it reported, with the InMails the report cannot include yet (`spent`: unsettled InMail work, or sent at or after
-   * the report) and the InMails tracks chose and have not claimed (`committed`). Absent on email and SMS accounts.
+   * A LinkedIn session's InMail standing (ADR 0004 13.5): its last report and the credits held on it. Absent on email and SMS.
    */
   readonly inmail?: InmailStanding;
   /** Today's room on its current reset day (0: none). */
@@ -536,11 +546,21 @@ export interface AccountState {
   readonly inFlight: number;
 }
 
+/**
+ * A LinkedIn session's InMail standing (ADR 0004 13.5): its last report (`plan` null when it reported none), with the instant
+ * it was read, and the holdings that count against it, earliest acquired first (by acquisition, then subject and track).
+ */
 export interface InmailStanding {
   readonly plan: "premium" | "sales_navigator" | "none" | null;
   readonly credits: number;
-  readonly spent: number;
-  readonly committed: number;
+  readonly reportedWall: number | null;
+  readonly holdings: readonly InmailHolding[];
+}
+
+/** One credit held by a track's InMail (13.5): `key` is its subject and track. */
+export interface InmailHolding {
+  readonly key: string;
+  readonly acquiredWall: number;
 }
 
 export interface SubjectState {

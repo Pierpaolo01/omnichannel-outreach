@@ -382,5 +382,6 @@ function inmailView(s: SubjectState, trackId: string): LinkedinTrackView["inmail
     state: p?.inmail ?? null,
     work: sent ? "sent" : work.some((w) => w.settled === null) ? "handed" : null,
     sentAt: result ? new Date(result.atWall).toISOString() : null,
+    reportedAt: p?.inmailReportedWall != null ? new Date(p.inmailReportedWall).toISOString() : null,
   };
 }
