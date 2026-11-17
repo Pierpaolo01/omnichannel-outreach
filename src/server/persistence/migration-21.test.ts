@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import { UNDO_21 } from "../../../test/support/undo-migrations.ts";
+import { MIGRATIONS } from "./migrations.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { BeforeLaunchView, EnrollmentProgress, LeadSearchResult, NeedsAttention } from "../../shared/api.ts";
 import { DEFAULT_RULES, type Rules } from "../engine/rules.ts";
@@ -85,7 +86,7 @@ describe("migration 21 on a database as the integration tip left it (ADR 0003, q
     // The upgrade: the application as built opens the same database at 11:00.
     const h = new EngineHarness({ start: MONDAY_9 + 2 * H, databasePath: file, idPrefix: "after-21", accounts, sms });
     const db = (h.store.engine as unknown as { db: DatabaseSync }).db;
-    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: 25 }); // 21 and every later migration (22, ticket 24; 23, a pair's stored channel; 24, a LinkedIn skip's cause; 25, the InMail fallback) applied
+    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: MIGRATIONS.at(-1)?.version }); // 21 and every later migration applied
     // The migration releases nothing itself; the store applies the one release rule to every binding's owner when it opens,
     // before anything reads a binding. Nia's binding: nothing went, so it is released as unsent, though Nia's lead has
     // ended. Pat's: Spring clinics' text went, so it stays.
