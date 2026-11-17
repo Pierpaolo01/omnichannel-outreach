@@ -472,7 +472,8 @@ function RunRead({ run, tab, presses }: { run: TestRunRead; tab: TestRunTabView;
                 </span>
                 <span className="block text-[13px] text-muted [overflow-wrap:anywhere]">{stepDetail(s, run)}</span>
               </span>
-              {state !== "" && <span className={`whitespace-nowrap text-[13.5px] ${now ? "font-medium text-you" : s.state === "failed" ? "text-crit" : "text-muted"}`}>{state}</span>}
+              {/* A long state (a LinkedIn acceptance wait, ticket 24b) wraps beside the step rather than widen a narrow page. */}
+              {state !== "" && <span className={`${state.length > 32 ? "max-w-[46%] text-right" : "whitespace-nowrap"} text-[13.5px] ${now ? "font-medium text-you" : s.state === "failed" ? "text-crit" : "text-muted"}`}>{state}</span>}
             </li>
           );
         })}
