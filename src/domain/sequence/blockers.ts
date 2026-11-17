@@ -3,7 +3,7 @@
  * "nothing to launch" precondition (Q9). Everything else is a warning.
  */
 import { mergeUses, render, type MergeData } from "./copy.ts";
-import { liveSteps, liveTracks, ownSubject, poolOf, type CampaignDefinition, linkedinStepKind } from "./definition.ts";
+import { liveSteps, liveTracks, ownSubject, poolOf, stepNumber, type CampaignDefinition, linkedinStepKind } from "./definition.ts";
 
 export type LaunchBlocker =
   | { readonly kind: "empty_copy"; readonly trackId: string; readonly stepId: string; readonly stepNumber: number; readonly part: "subject" | "body"; readonly message: string }
@@ -41,14 +41,17 @@ export function launchCheck(def: CampaignDefinition, leads: readonly MergeData[]
 
   for (const track of tracks) {
     if (track.channel === "call") continue;
-    liveSteps(track).forEach((step, i) => {
-      // A LinkedIn invite with no note is a plain invite, a choice, not empty copy (ADR 0004 3.1).
+    liveSteps(track).forEach((step) => {
+      // A LinkedIn InMail is named by its role and numbers no other step (ADR 0004 13.9): the number reads give it.
+      const i = stepNumber(track, step.id) - 1;
+      // A LinkedIn invite with no note is a plain invite, a choice, not empty copy (ADR 0004 3.1). An InMail with no text is
+      // empty copy (13.2): a switched-on fallback without text is a mistake to fix.
       if (linkedinStepKind(track, step.id) === "invite") return;
       if (track.channel === "email" && step.threading === "new_subject" && step.subject.trim() === "") {
         blockers.push({ kind: "empty_copy", trackId: track.id, stepId: step.id, stepNumber: i + 1, part: "subject", message: `Email ${i + 1} has no subject.` });
       }
       if (step.body.trim() === "") {
-        blockers.push({ kind: "empty_copy", trackId: track.id, stepId: step.id, stepNumber: i + 1, part: "body", message: `${track.channel === "email" ? "Email" : track.channel === "linkedin" ? "LinkedIn step" : "Text"} ${i + 1} has no message.` });
+        blockers.push({ kind: "empty_copy", trackId: track.id, stepId: step.id, stepNumber: i + 1, part: "body", message: linkedinStepKind(track, step.id) === "inmail" ? "The InMail fallback has no message." : `${track.channel === "email" ? "Email" : track.channel === "linkedin" ? "LinkedIn step" : "Text"} ${i + 1} has no message.` });
       }
     });
   }
@@ -56,7 +59,8 @@ export function launchCheck(def: CampaignDefinition, leads: readonly MergeData[]
   const fieldsWithoutFallback = new Map<string, { trackId: string; stepId: string; stepNumber: number }[]>();
   for (const track of tracks) {
     if (track.channel === "call") continue;
-    liveSteps(track).forEach((step, i) => {
+    liveSteps(track).forEach((step) => {
+      const i = stepNumber(track, step.id) - 1;
       for (const use of [...mergeUses(track.channel === "sms" || track.channel === "linkedin" ? "" : ownSubject(step)), ...mergeUses(step.body)]) {
         if (use.fallback !== null) continue;
         const uses = fieldsWithoutFallback.get(use.field) ?? [];

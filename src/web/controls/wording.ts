@@ -150,12 +150,21 @@ export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call
       return "waiting for them to accept the LinkedIn invite";
     case "invite_pending_elsewhere":
       return "on hold: an invite to them is already pending on LinkedIn that this application didn’t send";
+    // ADR 0004 13.3: the InMail the wait's end chose, whose session can't send it now by its own report. No time.
+    case "inmail_unavailable":
+      return "waiting: your LinkedIn session can’t send an InMail now";
     default: {
       const unhandled: never = why;
       throw new Error(`A reason a step waits with no words: ${String(unhandled)}`);
     }
   }
 }
+
+/** Why a chosen InMail can't go now, by its session's own report (ADR 0004 13.3, 13.5). */
+const INMAIL_UNAVAILABLE: Record<"no_plan" | "no_credit", string> = {
+  no_plan: "waiting: your LinkedIn session no longer reports Premium or Sales Navigator, so the InMail can’t go",
+  no_credit: "waiting: your LinkedIn session reports no InMail credit free",
+};
 
 /**
  * When a step goes, from the read (`StepWhenView`): ready, when its time has come and nothing of its own holds it, in line
@@ -172,6 +181,7 @@ export function stepWhenPhrase(when: StepWhenView, userZone: string): string {
     case "waits":
       // The day an acceptance wait ends is a fact of the read, said as when the wait ends, never as when a send goes (ADR 0004 9).
       if (when.why === "awaiting_acceptance" && when.until !== undefined) return `${stepWaitWords(when.why, when.channel)}; the wait ends ${dateIn(userZone, when.until)}`;
+      if (when.why === "inmail_unavailable" && when.inmail !== undefined) return INMAIL_UNAVAILABLE[when.inmail];
       return stepWaitWords(when.why, when.channel);
     // A call goes on the list on a day, never at a time of day (council on 178de98, item 3).
     case "call_day":

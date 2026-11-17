@@ -22,6 +22,11 @@ export interface FakeSession {
   readonly resetZone: string;
   /** False: the port no longer lists the session at all. */
   listed?: boolean;
+  /**
+   * The session's InMail standing as it reports it (ADR 0004 13.5): its plan and its credits now. A sent InMail spends one;
+   * a test may change either, as the user spending credits by hand or a plan ending would. Absent: it reports none.
+   */
+  inmail?: { plan: "premium" | "sales_navigator" | "none"; credits: number };
 }
 
 /** How one fictitious profile behaves, scripted by a test (ADR 0004 10.2). */
@@ -44,6 +49,8 @@ export interface ProfileScript {
   pendingElsewhere?: boolean;
   /** The connection is removed after acceptance: a message is refused `not_connected`. */
   readonly connectionRemoved?: boolean;
+  /** LinkedIn refuses an InMail to it (their settings, or a profile InMail cannot reach): `inmail_refused`, no credit spent. */
+  readonly refusesInmail?: boolean;
   /**
    * Answers that differ by session (review bot on e261ffa): a connection and an invite pending from elsewhere are facts of
    * one (session, profile) pair. A session listed here answers by its entry; any other by the profile's own fields.
@@ -64,7 +71,7 @@ export interface LinkedinDelivery {
   readonly stepId: string;
   readonly sender: string;
   readonly destination: string;
-  readonly action: "invite" | "message";
+  readonly action: "invite" | "message" | "inmail";
   readonly rendered: RenderedCopy;
   readonly providerRef: string;
   readonly visibleAt: number;
@@ -82,7 +89,9 @@ interface Invite {
 
 export class FakeLinkedInPort implements SendPort {
   readonly channel = "linkedin";
-  readonly handoverLog: { at: number; key: string; attemptId: string; sender: string; destination: string; subjectId: string; trackId: string; stepId: string; action: "invite" | "message"; rendered: RenderedCopy }[] = [];
+  readonly handoverLog: { at: number; key: string; attemptId: string; sender: string; destination: string; subjectId: string; trackId: string; stepId: string; action: "invite" | "message" | "inmail"; rendered: RenderedCopy }[] = [];
+  /** Every InMail session report the port gave with a listing: what the record reads a session's standing from. */
+  readonly inmailReportLog: { at: number; session: string; plan: string; credits: number }[] = [];
   readonly deliveryLog: LinkedinDelivery[] = [];
   readonly acceptanceLog: { at: number; key: string; sender: string; profile: string }[] = [];
   readonly withdrawalLog: { at: number; key: string; answer: InviteWithdrawal["kind"] }[] = [];
@@ -114,8 +123,30 @@ export class FakeLinkedInPort implements SendPort {
       [...this.sessions.values()]
         .filter((s) => s.listed !== false)
         // The port knows no allowance: the user's settings give the room (ADR 0004 1.2), so it reports none of its own.
-        .map((s) => ({ id: s.id, channel: "linkedin" as const, label: `Simulated LinkedIn (not a session) ${s.id}`, capacity: 0, dailyLimit: 0, gapMs: s.gapMs, k: s.k, healthy: s.healthy, problem: s.healthy ? null : "signed_out", resetZone: s.resetZone, quotaAvailable: true })),
+        .map((s) => {
+          if (s.inmail) this.inmailReportLog.push({ at: this.now(), session: s.id, plan: s.inmail.plan, credits: s.inmail.credits });
+          return {
+            id: s.id,
+            channel: "linkedin" as const,
+            label: `Simulated LinkedIn (not a session) ${s.id}`,
+            capacity: 0,
+            dailyLimit: 0,
+            gapMs: s.gapMs,
+            k: s.k,
+            healthy: s.healthy,
+            problem: s.healthy ? null : "signed_out",
+            resetZone: s.resetZone,
+            quotaAvailable: true,
+            // A signed-out session reads nothing of its account: no report with this listing, so the last one stands.
+            ...(s.inmail && s.healthy ? { inmail: { plan: s.inmail.plan, credits: s.inmail.credits } } : {}),
+          };
+        }),
     );
+  }
+
+  /** Whether an InMail from the session to the profile was delivered: its thread takes messages without a connection. */
+  inmailThread(sender: string, profile: string): boolean {
+    return this.deliveryLog.some((d) => d.action === "inmail" && d.sender === sender && d.destination === profile);
   }
 
   private script(profile: string): ProfileScript {
@@ -144,7 +175,7 @@ export class FakeLinkedInPort implements SendPort {
     const action = request.action ?? "message";
     this.handoverLog.push({ at: now, key: request.idempotencyKey, attemptId: request.attemptId, sender: request.sender, destination: request.destination, subjectId: request.subjectId, trackId: request.trackId, stepId: request.stepId, action, rendered: request.rendered });
     const script = this.script(request.destination);
-    const refuse = (reason: "invalid_destination" | "rate_limited" | "not_connected"): CallAnswer => {
+    const refuse = (reason: "invalid_destination" | "rate_limited" | "not_connected" | "inmail_refused" | "payment_required"): CallAnswer => {
       this.refusals.push({ at: now, key: request.idempotencyKey, destination: request.destination, reason });
       return { kind: "rejected", reason };
     };
@@ -153,7 +184,14 @@ export class FakeLinkedInPort implements SendPort {
       script.rateLimited = (script.rateLimited ?? 1) - 1;
       return Promise.resolve(refuse("rate_limited"));
     }
-    if (action === "message" && !this.connectedNow(request.sender, request.destination)) return Promise.resolve(refuse("not_connected"));
+    if (action === "message" && !this.connectedNow(request.sender, request.destination) && !this.inmailThread(request.sender, request.destination)) return Promise.resolve(refuse("not_connected"));
+    if (action === "inmail") {
+      // The recipient's settings refuse it, or the session cannot send one: LinkedIn spends no credit on either.
+      if (script.refusesInmail) return Promise.resolve(refuse("inmail_refused"));
+      const standing = this.sessions.get(request.sender)?.inmail;
+      if (!standing || standing.plan === "none" || standing.credits < 1) return Promise.resolve(refuse("payment_required"));
+      standing.credits -= 1;
+    }
     const providerRef = `li-${++this.nextRef}`;
     const lost = (script.loseAnswer ?? 0) > 0;
     if (lost) script.loseAnswer = (script.loseAnswer ?? 1) - 1;

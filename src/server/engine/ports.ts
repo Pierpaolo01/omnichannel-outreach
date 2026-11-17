@@ -39,9 +39,10 @@ export interface HandoverRequest {
   readonly stepId: string;
   /**
    * A social step's action (ADR 0004 2.1): an invite, whose note is `rendered.body` (empty: no note, decided in the handover
-   * transaction), or a message. Absent on email and SMS.
+   * transaction), a message, or an InMail (ADR 0004 13.3: a message to a person who is not a connection, which spends one of
+   * the session's InMail credits). Absent on email and SMS.
    */
-  readonly action?: "invite" | "message";
+  readonly action?: "invite" | "message" | "inmail";
 }
 
 export interface AttemptRef {
@@ -94,6 +95,15 @@ export interface PresendRequest {
   readonly knownReplies: readonly string[];
   /** The subject asking, for the provider's own log only (the re-check of dd3969c, item 5): a port never acts on it. */
   readonly subjectId?: string;
+}
+
+/**
+ * A LinkedIn session's InMail standing, by its own reading of the account (ADR 0004 13.5): its plan, and the InMail credits it
+ * has now. Reported with the session's listing; the application invents neither.
+ */
+export interface InmailReport {
+  readonly plan: "premium" | "sales_navigator" | "none";
+  readonly credits: number;
 }
 
 /** A pre-send check's answer. `connected`: for LinkedIn, the sender is already connected to the profile (ADR 0004 3.3). */

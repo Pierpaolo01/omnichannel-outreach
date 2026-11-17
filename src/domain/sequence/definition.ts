@@ -33,6 +33,12 @@ export interface StepDefinition {
   /** Email only: an SMS has no thread, so an SMS step's threading is not read. */
   readonly threading: Threading;
   readonly removed: boolean;
+  /**
+   * A step's role where it is not its position (ADR 0004 13.2): `inmail`, a LinkedIn track's InMail fallback, placed right
+   * after the invite; the track's fallback is on exactly while it has a live InMail step. Absent on every other step. Fixed
+   * with the step's id: a step never changes role.
+   */
+  readonly role?: "inmail";
 }
 
 export type StartRule = { readonly kind: "entry" } | { readonly kind: "after"; readonly trackId: string; readonly delayDays: number };
@@ -128,20 +134,32 @@ export function poolOf(def: CampaignDefinition, channel: TrackChannel): readonly
 }
 
 /**
- * A LinkedIn step's kind, by its position among the track's live steps (ADR 0004 3.1): the first is the connection invite
- * (its body is the note), the second the first message, sent once connected, and the rest follow-up messages. Null for a
- * step of another channel or one not live. Every reader asks this one function.
+ * A LinkedIn step's kind (ADR 0004 3.1, 13.9). An InMail step is known by its role, live or removed, never by its place;
+ * the others by their position among the track's live steps that are not InMail steps: the first is the connection invite
+ * (its body is the note), the second the first message, sent once connected, and the rest follow-up messages. So switching
+ * the fallback on or off renames no other step. Null for a step of another channel, or a removed step that is not an
+ * InMail. Every reader asks this one function.
  */
-export type LinkedinStepKind = "invite" | "first_message" | "follow_up";
+export type LinkedinStepKind = "invite" | "inmail" | "first_message" | "follow_up";
 export function linkedinStepKind(track: Pick<TrackDefinition, "channel" | "steps">, stepId: string): LinkedinStepKind | null {
   if (track.channel !== "linkedin") return null;
-  const index = track.steps.filter((s) => !s.removed).findIndex((s) => s.id === stepId);
+  if (track.steps.some((s) => s.id === stepId && s.role === "inmail")) return "inmail";
+  const index = track.steps.filter((s) => !s.removed && s.role !== "inmail").findIndex((s) => s.id === stepId);
   return index < 0 ? null : index === 0 ? "invite" : index === 1 ? "first_message" : "follow_up";
 }
 
-/** The kind of action a step's handover asks of a social port, and the allowance it counts on (ADR 0004 2.1, 6). */
-export type SocialAction = "invite" | "message";
-export const socialActionOf = (kind: LinkedinStepKind | null): SocialAction | null => (kind === null ? null : kind === "invite" ? "invite" : "message");
+/** Whether the track's InMail fallback is on (ADR 0004 13.2): a LinkedIn track with a live InMail step. */
+export const inmailStepOf = (track: Pick<TrackDefinition, "channel" | "steps">): StepDefinition | null =>
+  track.channel === "linkedin" ? (track.steps.find((s) => s.role === "inmail" && !s.removed) ?? null) : null;
+
+/**
+ * The kind of action a step's handover asks of a social port (ADR 0004 2.1, 6, 13.5). An InMail spends the session's
+ * message allowance (`allowanceOf`) and a credit by the session's report.
+ */
+export type SocialAction = "invite" | "message" | "inmail";
+export const socialActionOf = (kind: LinkedinStepKind | null): SocialAction | null => (kind === null ? null : kind === "invite" ? "invite" : kind === "inmail" ? "inmail" : "message");
+/** The allowance bucket an action counts on (ADR 0004 13.5): an InMail is a message the session sends. */
+export const allowanceOf = (action: SocialAction): "invite" | "message" => (action === "invite" ? "invite" : "message");
 
 export const liveTracks = (def: CampaignDefinition, branch: Branch = "main"): TrackDefinition[] =>
   def.tracks.filter((t) => !t.removed && t.branch === branch);
@@ -248,9 +266,15 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
     if (track.channel === "linkedin") {
       const wait = track.acceptWaitDays;
       if (wait === undefined || !isWholeDays(wait) || wait === 0) add("accept_wait", `${name}'s wait for the invite to be accepted is a whole number of days, at least 1.`, { trackId: track.id });
-      if (liveSteps(track).length < 2) add("linkedin_steps", `${name} needs a connection invite and at least one message after it.`, { trackId: track.id });
+      if (liveSteps(track).filter((st) => st.role !== "inmail").length < 2) add("linkedin_steps", `${name} needs a connection invite and at least one message after it.`, { trackId: track.id });
       if (liveSteps(track).some((st) => st.subject.trim() !== "")) add("linkedin_subject", `${name}'s invite and messages have no subject.`, { trackId: track.id });
+      // The InMail fallback (ADR 0004 13.2): at most one live InMail step, directly after the invite.
+      const inmails = liveSteps(track).filter((st) => st.role === "inmail");
+      if (inmails.length > 1) add("inmail_twice", `${name} has more than one InMail fallback.`, { trackId: track.id });
+      const at = liveSteps(track).findIndex((st) => st.role === "inmail");
+      if (at >= 0 && at !== 1) add("inmail_position", `${name}'s InMail fallback comes right after the connection invite.`, { trackId: track.id, stepId: liveSteps(track)[at]?.id ?? "" });
     } else if (track.acceptWaitDays !== undefined) add("accept_wait_not_linkedin", "Only a LinkedIn track waits for an invite to be accepted.", { trackId: track.id });
+    if (track.channel !== "linkedin" && track.steps.some((st) => st.role === "inmail")) add("inmail_not_linkedin", "Only a LinkedIn track has an InMail fallback.", { trackId: track.id });
     const steps = liveSteps(track);
     // A phone track is one call with no follow-ups (spec "Phone tracks"); the call has no copy.
     if (track.channel === "call" && steps.length !== 1) add("call_steps", `${name} is one call with no follow-ups: give it exactly one step.`, { trackId: track.id });
@@ -286,6 +310,9 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
       for (const step of track.steps) {
         const was = stepTrack.get(step.id);
         if (was !== undefined && was !== track.id) add("step_moved", "A step cannot move to another track: remove it and add a new one.", { trackId: track.id, stepId: step.id });
+        // A step's role is fixed with its id (ADR 0004 13.2): results and work recorded for it keep their meaning.
+        const oldStep = old?.steps.find((s) => s.id === step.id);
+        if (oldStep && (oldStep.role ?? null) !== (step.role ?? null)) add("step_role_changed", "A step cannot become an InMail fallback or stop being one: remove it and add a new one.", { trackId: track.id, stepId: step.id });
       }
       // A LinkedIn step's kind is its position (ADR 0004 3.1): on a running campaign the invite stays the invite.
       if (old && track.channel === "linkedin" && options.launched === true) {
@@ -333,5 +360,10 @@ export function definitionProblems(def: CampaignDefinition, previous: CampaignDe
  */
 export function stepNumber(track: Pick<TrackDefinition, "steps">, stepId: string): number {
   const at = track.steps.findIndex((s) => s.id === stepId);
-  return track.steps.slice(0, Math.max(0, at)).filter((s) => !s.removed).length + 1;
+  // A LinkedIn InMail step is named by its role, never a number, and numbers no other step (ADR 0004 13.9).
+  return track.steps.slice(0, Math.max(0, at)).filter((s) => !s.removed && s.role !== "inmail").length + 1;
 }
+
+/** A step's role as reads carry it beside its number (ADR 0004 13.9): `inmail` for a LinkedIn InMail step, else none. */
+export const stepRoleOf = (track: Pick<TrackDefinition, "steps">, stepId: string): { readonly role?: "inmail" } =>
+  track.steps.some((s) => s.id === stepId && s.role === "inmail") ? { role: "inmail" } : {};

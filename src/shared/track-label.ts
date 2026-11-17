@@ -43,20 +43,21 @@ export function stepNoun(track: Pick<TrackLabel, "branch">, channel: "email" | "
 }
 
 /**
- * A LinkedIn step's role by its number among the track's live steps, counted from 1 (ADR 0004 3.1): the engine's
- * `linkedinStepKind` decides it by position, and a test holds the two equal at every position. Reads give a step's number
- * (`stepNumber`), never its kind, so the screens name the step from it.
+ * A LinkedIn step's role (ADR 0004 3.1, 13.9): an InMail step by its role, which reads carry with the step; any other by its
+ * number among the track's live steps that are not InMail steps, counted from 1 (`stepNumber`), as the engine's
+ * `linkedinStepKind` decides it. A test holds the two equal at every position, with the fallback on and off.
  */
-export const LINKEDIN_STEP_KIND_AT = (number: number): "invite" | "first_message" | "follow_up" => (number <= 1 ? "invite" : number === 2 ? "first_message" : "follow_up");
+export const LINKEDIN_STEP_KIND_AT = (number: number, role?: "inmail"): "invite" | "inmail" | "first_message" | "follow_up" =>
+  role === "inmail" ? "inmail" : number <= 1 ? "invite" : number === 2 ? "first_message" : "follow_up";
 
 /**
  * What one step is called in a title (ticket 24b): "Email 2", "Text 1", "Win-back email 1"; a LinkedIn step by its role,
  * "Connection invite", "First message", "Follow-up 1" (CONTEXT.md's "connection invite"), "Win-back first message".
  */
-export function stepTitle(track: Pick<TrackLabel, "branch">, channel: "email" | "sms" | "linkedin", number: number): string {
+export function stepTitle(track: Pick<TrackLabel, "branch">, channel: "email" | "sms" | "linkedin", number: number, stepRole?: "inmail"): string {
   if (channel !== "linkedin") return `${stepNoun(track, channel)} ${number}`;
-  const kind = LINKEDIN_STEP_KIND_AT(number);
-  const role = kind === "invite" ? "Connection invite" : kind === "first_message" ? "First message" : `Follow-up ${number - 2}`;
+  const kind = LINKEDIN_STEP_KIND_AT(number, stepRole);
+  const role = kind === "invite" ? "Connection invite" : kind === "inmail" ? "InMail" : kind === "first_message" ? "First message" : `Follow-up ${number - 2}`;
   return track.branch === "win_back" ? `Win-back ${role.charAt(0).toLowerCase()}${role.slice(1)}` : role;
 }
 

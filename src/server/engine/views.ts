@@ -3,7 +3,7 @@ import { stepNumber } from "../../domain/sequence/definition.ts";
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { carriedInto, isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
-import { linkedinStepKind, socialActionOf } from "../../domain/sequence/definition.ts";
+import { allowanceOf, linkedinStepKind, socialActionOf } from "../../domain/sequence/definition.ts";
 import { accountAvailable, claimRefusal, eligibleSessions, noAllowanceOnAnySession, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
 import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
@@ -256,7 +256,9 @@ export async function needsAttention(
       const channel = channelOf(s, item.trackId);
       // LinkedIn too (council on dee365d, item 4), each session judged by the step's own kind of action (`forAction`).
       if (channel !== "email" && channel !== "sms" && channel !== "linkedin") continue;
-      const action = socialActionOf(linkedinStepKind(s.campaign.definition.tracks.find((t) => t.id === item.trackId) ?? { channel, steps: [] }, item.stepId));
+      const social = socialActionOf(linkedinStepKind(s.campaign.definition.tracks.find((t) => t.id === item.trackId) ?? { channel, steps: [] }, item.stepId));
+      // The allowance it waits on (ADR 0004 13.5): an InMail waits on the session's messages.
+      const action = social === null ? null : allowanceOf(social);
       const step = s.campaign.definition.tracks.find((t) => t.id === item.trackId)?.steps.find((x) => x.id === item.stepId);
       const base = { enrollmentId: id, trackId: item.trackId, stepId: item.stepId, channel, dueAt: new Date(item.dueWall).toISOString() };
       if (!transportAvailable(channel, step?.threading ?? "new_subject")) {

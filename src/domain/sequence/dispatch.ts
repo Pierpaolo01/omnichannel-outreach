@@ -6,12 +6,14 @@
  */
 import { ENGINE_PARAMS, isLive, isUncertain } from "./attempt.ts";
 import { leadNow, localDayNumber, windowOpen } from "./clock.ts";
-import { holdsConversations, linkedinStepKind, poolOf, socialActionOf, type SocialAction } from "./definition.ts";
+import { allowanceOf, holdsConversations, linkedinStepKind, poolOf, socialActionOf, type SocialAction } from "./definition.ts";
 import {
   rules as gateRules,
   invitePendingUntil,
   inviteClaimable,
   inviteSessions,
+  inmailStanding,
+  linkedinSessionOf,
   applyToAttempt,
   awaitingAcceptance,
   callbackHold,
@@ -128,7 +130,12 @@ export type StepWait =
   | "on_call_list"
   | "call_hours_closed"
   /** A LinkedIn message waiting for its invite to be accepted (ADR 0004 section 9); the read states the day the wait ends. */
-  | "awaiting_acceptance";
+  | "awaiting_acceptance"
+  /**
+   * An InMail the expiry chose whose session cannot send it now by its own report (ADR 0004 13.3, 13.5): it lost its plan or
+   * its credits since. With no time; `inmail` names which (`inmailUnavailable`).
+   */
+  | "inmail_unavailable";
 
 /**
  * When the track's pending step goes, as every read says it: ready (its time has come and nothing of its own holds it; it
@@ -142,7 +149,7 @@ export type StepWhen =
   | { readonly kind: "call_day"; readonly at: number; readonly day: number }
   | { readonly kind: "listed_for"; readonly day: number }
   /** `channel` names the step's channel where the reason depends on it (no transport). */
-  | { readonly kind: "waits"; readonly why: StepWait; readonly channel?: "email" | "sms" | "linkedin"; readonly until?: number };
+  | { readonly kind: "waits"; readonly why: StepWait; readonly channel?: "email" | "sms" | "linkedin"; readonly until?: number; readonly inmail?: "no_plan" | "no_credit" };
 
 /**
  * A held track's reason as the read gives it (5.4), one case per hold `heldReason` can return, so a hold a later change
@@ -248,6 +255,8 @@ export function stepWhen(state: SubjectState, trackId: string, now: number, env:
 function unclaimedWhen(state: SubjectState, trackId: string, stepId: string, now: number): StepWhen {
   const refusal = claimRefusal(state, { trackId, stepId }, now);
   if (refusal !== null) return { kind: "waits", why: refusalWait(refusal) };
+  const inmail = inmailUnavailable(state, trackId);
+  if (inmail !== null) return { kind: "waits", why: "inmail_unavailable", inmail };
   const destination = destinationOf(state, trackId);
   const candidates = candidatesOf(state, trackId, now);
   // Predicate 18 on every sender it may use: whichever the claim takes, the handover waits.
@@ -285,9 +294,26 @@ function candidatesOf(state: SubjectState, trackId: string, now: number): Accoun
  */
 function sessionsFor(state: SubjectState, trackId: string, action: SocialAction | null, now: number, inherited: string | null): string[] {
   const ids = candidatesFor(state, trackId);
+  // An InMail goes only from the track's own session while it is eligible by its own report (ADR 0004 13.5): the one
+  // selection every read of why an InMail is not going derives from. An inherited claim already holds its credit.
+  if (action === "inmail") return ids.filter((id) => id === inherited || inmailStanding(state.accounts[id], true) === "eligible");
   if (action !== "invite") return ids;
   const clear = inviteSessions(state, trackId, ids, now);
   return inherited !== null && ids.includes(inherited) && !clear.includes(inherited) ? [...clear, inherited] : clear;
+}
+
+/**
+ * Why the track's pending InMail cannot go from its session now (ADR 0004 13.5), from the same standing `sessionsFor`
+ * selects by: its plan or its credits; null when it can, or the pending step is not an InMail, or its claim already holds
+ * work (whose credit is already counted).
+ */
+export function inmailUnavailable(state: SubjectState, trackId: string): "no_plan" | "no_credit" | null {
+  if (actionOfPending(state, trackId) !== "inmail") return null;
+  const p = progressOf(state, trackId);
+  if (p?.nextStepId && inheritedWork(state, p.nextStepId)) return null;
+  const session = p?.inmailSession ?? linkedinSessionOf(state);
+  const standing = inmailStanding(session === null ? undefined : state.accounts[session], true);
+  return standing === "eligible" ? null : standing;
 }
 
 /** The social action of a track's pending step (ADR 0004 6), or null for email and SMS. */
@@ -309,7 +335,7 @@ export function actionOfStep(state: SubjectState, trackId: string, stepId: strin
  */
 export function forAction(account: AccountState, action: SocialAction | null): AccountState {
   if (action === null || !account.kinds) return account;
-  const bucket = account.kinds[action];
+  const bucket = account.kinds[allowanceOf(action)];
   // Reservations are the account's, of every kind; a kind's own reserved count is not kept, so its sent part is its use
   // less its share of reservations, which `senderWait` reads only as "full by sends alone": never below zero.
   return { ...account, capacity: bucket.capacity, dailyLimit: bucket.capacity, used: bucket.used, reserved: Math.min(account.reserved, bucket.used) };
@@ -344,10 +370,14 @@ export function noAllowanceOnAnySession(state: SubjectState, trackId: string, no
 }
 
 /** What the engine knows at the read rules out every sender for the step: none connected, or every daily limit zero. */
-function noSenderKnown(state: SubjectState, trackId: string, now: number): { kind: "waits"; why: StepWait } | null {
+function noSenderKnown(state: SubjectState, trackId: string, now: number): { kind: "waits"; why: StepWait; inmail?: "no_plan" | "no_credit" } | null {
   const channel = channelOf(state, trackId) ?? "email";
   // A LinkedIn step: every session it may use allows none of its kind of action, the user's setting (ADR 0004 4, item 6).
-  if (channel === "linkedin") return noAllowanceOnAnySession(state, trackId, now) ? { kind: "waits", why: "sending_capacity" } : null;
+  if (channel === "linkedin") {
+    const inmail = inmailUnavailable(state, trackId);
+    if (inmail !== null) return { kind: "waits", why: "inmail_unavailable", inmail };
+    return noAllowanceOnAnySession(state, trackId, now) ? { kind: "waits", why: "sending_capacity" } : null;
+  }
   if (channel !== "email" && channel !== "sms") return null;
   const fixed = senderOf(state, channel);
   const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];
@@ -540,17 +570,22 @@ export function claim(
     withdrawWanted: false,
     withdrawLastWall: null,
     wentWall: null,
-    ...(action !== null ? { kind: action, note: null } : {}),
+    ...(action !== null ? { kind: allowanceOf(action), note: null } : {}),
+    // An InMail spends a credit too (ADR 0004 13.5): known as one from its claim.
+    ...(action === "inmail" ? { inmail: true } : {}),
   };
   // For a social action, the account as stored (a kind's view is only for choosing): its total use, and its kind's too.
   const base = action !== null ? (state.accounts[account.id] ?? account) : account;
   const added = inherited ? 0 : 1;
-  const kinds = base.kinds && action !== null ? { ...base.kinds, [action]: { ...base.kinds[action], used: base.kinds[action].used + added } } : base.kinds;
+  const bucket = action !== null ? allowanceOf(action) : null;
+  const kinds = base.kinds && bucket !== null ? { ...base.kinds, [bucket]: { ...base.kinds[bucket], used: base.kinds[bucket].used + added } } : base.kinds;
+  // The InMail's credit moves from the track's commitment to the session's spent credits (ADR 0004 13.5).
+  const inmail = action === "inmail" && base.inmail && !inherited ? { inmail: { ...base.inmail, spent: base.inmail.spent + 1, committed: Math.max(0, base.inmail.committed - 1) } } : {};
   return {
     ...state,
     attempts: [...state.attempts, attempt],
     work: inherited ? state.work : [...state.work, work],
-    accounts: { ...state.accounts, [account.id]: { ...base, used: base.used + added, inFlight: base.inFlight + added, ...(kinds ? { kinds } : {}) } },
+    accounts: { ...state.accounts, [account.id]: { ...base, used: base.used + added, inFlight: base.inFlight + added, ...(kinds ? { kinds } : {}), ...inmail } },
   };
 }
 

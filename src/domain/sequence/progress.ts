@@ -7,9 +7,9 @@ import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, maySend, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, waitSpan, wallOfLead, windowOpensAt, type Freeze, type LeadClock } from "./clock.ts";
 import { render } from "./copy.ts";
-import { holdsConversations, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import { holdsConversations, inmailStepOf, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
-import type { Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, LeadDetail, LinkedinSkipCause, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
+import type { AccountState, Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, InmailNotSent, LeadDetail, LinkedinSkipCause, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Running, status and reach.
@@ -254,14 +254,19 @@ export function nextStepOf(state: SubjectState, track: TrackDefinition): string 
   return remainingSteps(state, track)[0] ?? null;
 }
 
-/** The steps still ahead of the lead in a track, in order (5.1): live, after its last resolved step, with no result. */
+/**
+ * The steps still ahead of the lead in a track, in order (5.1): live, after its last resolved step, with no result. A LinkedIn
+ * InMail step is ahead only once the acceptance expiry chose it (ADR 0004 13.3): until then the walk passes over it, so a lead
+ * waiting for acceptance waits at its first message, as with the fallback off.
+ */
 export function remainingSteps(state: SubjectState, track: TrackDefinition): string[] {
   const resolved = new Set(state.results.filter((r) => r.trackId === track.id).map((r) => r.stepId));
   let lastResolved = -1;
   track.steps.forEach((s, i) => {
     if (resolved.has(s.id)) lastResolved = i;
   });
-  return track.steps.filter((s, i) => i > lastResolved && !s.removed && !resolved.has(s.id)).map((s) => s.id);
+  const chosen = progressOf(state, track.id)?.inmail === "chosen";
+  return track.steps.filter((s, i) => i > lastResolved && !s.removed && !resolved.has(s.id) && (s.role !== "inmail" || chosen)).map((s) => s.id);
 }
 
 /**
@@ -289,10 +294,31 @@ export const rules = {
    * that remembers only the destinations of pairs it owns, so another subject's pair on its destination never moves it.
    */
   conversationKeysOwnOnly: false,
+  /**
+   * Whether the step must wait (ADR 0004 3.5, 13.4): the invite never; the InMail until the expiry chose it, and for good once
+   * connected; the first message until connected; a follow-up until connected or an InMail is known sent.
+   */
   connectionGate: (track: TrackDefinition, stepId: string, progress: TrackProgress): boolean => {
     const kind = linkedinStepKind(track, stepId);
-    return kind !== null && kind !== "invite" && (progress.connection ?? null) === null;
+    const connected = (progress.connection ?? null) !== null;
+    switch (kind) {
+      case null:
+      case "invite":
+        return false;
+      case "inmail":
+        return connected || progress.inmail !== "chosen";
+      case "first_message":
+        return !connected;
+      case "follow_up":
+        return !connected && progress.inmail !== "sent";
+      default: {
+        const unhandled: never = kind;
+        throw new Error(`A LinkedIn step kind the gate does not know: ${String(unhandled)}`);
+      }
+    }
   },
+  /** The expiry judges the session's InMail standing (ADR 0004 13.5); false only for the mutation that takes every session as eligible. */
+  inmailJudgesStanding: true,
 };
 
 /**
@@ -313,6 +339,12 @@ export function advanceTrack(state: SubjectState, track: TrackDefinition, at: nu
   // Every LinkedIn message waits for a connection (ADR 0004 3.2; review bot on 194fc44): the gate is the connection's, not one
   // step's, so a skip, an edit or a restart cannot reach a message before it. Until then the step is pending with no due time.
   if (rules.connectionGate(track, stepId, progress)) {
+    // The InMail the expiry chose resolved without going (skipped by the user; refused is recorded by its refusal): nothing
+    // else can make the track's messages due, so it takes the withdrawal path now (ADR 0004 13.3).
+    if (progress.inmail === "chosen") {
+      const im = state.results.find((r) => r.trackId === track.id && linkedinStepKind(track, r.stepId) === "inmail");
+      if (im && im.result !== "sent") return inmailNotSent(state, track.id, im.reason === "by_user" ? "skipped_by_user" : "refused", at, atWall);
+    }
     // No invite went (the user skipped it, or it was never sent) and none is pending: nothing can ever connect the track, so
     // it finishes now with that reason, releasing what waits on it, rather than leave a message pending for ever (council
     // on 194fc44, item 9). A pre-existing connection is found only by the invite's own pre-send check, never after a skip.
@@ -780,7 +812,15 @@ function recordSent(
   const track = s.campaign.definition.tracks.find((t) => t.id === attempt.trackId);
   if (!progress || !track || progress.finishedAt !== null) return s;
   // A sent LinkedIn invite starts its acceptance wait, resolved once from the send point (ADR 0004 3.2).
-  if (linkedinStepKind(track, attempt.stepId) === "invite") s = withTrack(s, track.id, (t) => ({ ...t, ...acceptDeadline(s, track, point.at, point.atWall) }));
+  const kind = linkedinStepKind(track, attempt.stepId);
+  if (kind === "invite") s = withTrack(s, track.id, (t) => ({ ...t, ...acceptDeadline(s, track, point.at, point.atWall) }));
+  // The InMail went (ADR 0004 13.3): the follow-ups may go without a connection, and the first message is not sent, since
+  // the InMail took its place (question Q52); the next follow-up resolves from the InMail's send.
+  if (kind === "inmail") {
+    s = withTrack(s, track.id, (t) => ({ ...t, inmail: "sent" }));
+    const firsts = track.steps.filter((st) => !st.removed && linkedinStepKind(track, st.id) === "first_message" && !s.results.some((r) => r.stepId === st.id));
+    s = { ...s, results: [...s.results, ...firsts.map((st) => ({ stepId: st.id, trackId: track.id, result: "skipped" as const, reason: "inmail_instead", at: point.at, atWall: point.atWall, attemptId: null }))] };
+  }
   return advanceTrack(s, track, point.at, point.atWall);
 }
 
@@ -812,6 +852,15 @@ function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["
       ? state
       : { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: "not connected", at, atWall, attemptId: attempt.id }] };
     return checkEndings(finishTrack(failed, attempt.trackId, "failed_bad_destination", at, atWall), now);
+  }
+  // LinkedIn refused the InMail for this recipient (ADR 0004 13.3, question Q55): a failure with its own cause, the profile
+  // kept good, and the track takes the withdrawal path at the refusal.
+  if (reason === "inmail_refused") {
+    if (!progress || progress.finishedAt !== null) return state;
+    const failed = state.results.some((r) => r.stepId === attempt.stepId)
+      ? state
+      : { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: "inmail refused", at, atWall, attemptId: attempt.id }] };
+    return checkEndings(inmailNotSent(failed, attempt.trackId, "refused", at, atWall), now);
   }
   // 402 and 429 wait at the account; an unexplained provider skip holds the track (5.4).
   return state;
@@ -884,6 +933,12 @@ export function alignPending(state: SubjectState, now: number): SubjectState {
     if (p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.basisAt === null || p.basisWall === null) continue;
     const track = s.campaign.definition.tracks.find((t) => t.id === p.trackId);
     if (!track || inFlight(s, p.trackId)) continue;
+    // The InMail the expiry chose, switched off before it was handed over (ADR 0004 13.8): it is not sent, and the track takes
+    // the withdrawal path at the edit's instant.
+    if (p.inmail === "chosen" && p.nextStepId !== null && linkedinStepKind(track, p.nextStepId) === "inmail" && !track.steps.some((x) => x.id === p.nextStepId && !x.removed)) {
+      s = inmailNotSent(s, track.id, "switched_off", leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now));
+      continue;
+    }
     const want = nextStepOf(s, track);
     if (want === null) {
       const own = s.results.filter((r) => r.trackId === track.id);
@@ -1287,7 +1342,8 @@ export function awaitingAcceptance(state: SubjectState, trackId: string): boolea
   const p = progressOf(state, trackId);
   const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
   if (!p || !track || track.channel !== "linkedin" || p.startedAt === null || p.finishedAt !== null) return false;
-  return (p.connection ?? null) === null && (p.acceptBy ?? null) !== null;
+  // Once the expiry judged the InMail fallback, the wait is over (ADR 0004 13.3), whatever it chose.
+  return (p.connection ?? null) === null && (p.acceptBy ?? null) !== null && (p.inmail ?? null) === null;
 }
 
 /**
@@ -1327,6 +1383,21 @@ export function recordAcceptance(state: SubjectState, trackId: string, providerT
   const p = progressOf(state, trackId);
   if (!p) return state;
   const s = (p.acceptedWall ?? null) === null ? withTrack(state, trackId, (t) => ({ ...t, acceptedWall: Math.min(Math.max(providerTime, handedWall), now) })) : state;
+  // The expiry chose the InMail and it has not been handed over (ADR 0004 13.3, question Q56): a person who accepted is a
+  // connection, so the InMail is not sent, and the first message follows the connection.
+  if (p.inmail === "chosen" && p.finishedAt === null && (p.connection ?? null) === null) {
+    const track = s.campaign.definition.tracks.find((t) => t.id === trackId);
+    const im = p.nextStepId;
+    const handed = im !== null && s.work.some((w) => w.stepId === im && w.firstHandedWall !== null);
+    if (!track || im === null || linkedinStepKind(track, im) !== "inmail" || handed) return s;
+    const at = point(s.subject.clock, s.freezes, providerTime, handedWall, now);
+    const lead = leadNow(s.subject.clock, now);
+    const when = Math.min(at.at, lead);
+    const whenWall = Math.min(at.atWall, wallOfLead(s.subject.clock, now));
+    let x = withTrack(withdrawClaims(s, trackId), trackId, (t) => ({ ...t, inmail: "accepted" }));
+    x = { ...x, results: [...x.results, { stepId: im, trackId, result: "skipped", reason: "accepted", at: when, atWall: whenWall, attemptId: null }] };
+    return connect(x, trackId, "accepted", when, whenWall);
+  }
   if (!awaitingAcceptance(s, trackId)) return s;
   const at = point(s.subject.clock, s.freezes, providerTime, handedWall, now);
   if (at.at >= (p.acceptBy ?? Infinity)) return s;
@@ -1340,11 +1411,47 @@ export function recordAcceptance(state: SubjectState, trackId: string, providerT
  */
 export function inviteExpired(state: SubjectState, trackId: string, now: number): SubjectState {
   const p = progressOf(state, trackId);
-  if (!p || (p.acceptBy ?? null) === null) return state;
+  const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
+  if (!p || !track || (p.acceptBy ?? null) === null) return state;
   const at = p.acceptBy ?? 0;
   const atWall = wallAtLead(state.subject.clock, state.freezes, at, now);
+  // The InMail fallback (ADR 0004 13.3): on (a live InMail step with no result), the track's own session judged once, now,
+  // by its own report. Eligible: the InMail is the pending step, due at the deadline, and the invite is left open (Q50).
+  const im = inmailStepOf(track);
+  if (im && !state.results.some((r) => r.stepId === im.id)) {
+    const session = linkedinSessionOf(state);
+    const standing = rules.inmailJudgesStanding ? inmailStanding(session === null ? undefined : state.accounts[session], false) : "eligible";
+    if (standing !== "eligible") return inmailNotSent(state, trackId, standing, at, atWall);
+    return withTrack(state, trackId, (t) => ({ ...t, inmail: "chosen", inmailSession: session, nextStepId: im.id, basisAt: at, basisWall: atWall, dueAt: at, dueWall: atWall, dueZone: p.acceptByZone ?? state.lead.zone }));
+  }
   const wanted = withTrack(state, trackId, (t) => ({ ...t, inviteWithdrawal: "wanted", inviteWithdrawalLastWall: null }));
   return finishTrack(wanted, trackId, "invite_not_accepted", at, atWall);
+}
+
+/**
+ * The withdrawal path when the InMail fallback did not go (ADR 0004 13.3): its cause stored, the track's claims withdrawn,
+ * the invite to be withdrawn, and the track finished `invite_not_accepted` at `at` (the deadline at the expiry; the instant of
+ * a refusal, an edit or a skip otherwise), so what waits on it starts from then.
+ */
+export function inmailNotSent(state: SubjectState, trackId: string, cause: InmailNotSent, at: number, atWall: number): SubjectState {
+  const p = progressOf(state, trackId);
+  if (!p || p.finishedAt !== null) return state;
+  const wanted = withTrack(withdrawClaims(state, trackId), trackId, (t) => ({ ...t, inmail: cause, inviteWithdrawal: "wanted", inviteWithdrawalLastWall: null }));
+  return finishTrack(wanted, trackId, "invite_not_accepted", at, atWall);
+}
+
+/**
+ * A session's InMail standing by its own report (ADR 0004 13.5): `no_plan` unless it reports Premium or Sales Navigator;
+ * `no_credit` unless a credit is free: its reported credits less the InMails the report cannot include yet (`spent`) and
+ * those tracks chose and have not claimed (`committed`). `committedOwn` when the asking track's own choice is among the
+ * committed (a claim of the InMail it chose), so its own credit is counted as free for it. The one test, read by the
+ * expiry and by dispatch's selection of sessions (`eligibleSessions`) and through it every read.
+ */
+export function inmailStanding(account: AccountState | undefined, committedOwn: boolean): "eligible" | "no_plan" | "no_credit" {
+  const standing = account?.channel === "linkedin" ? account.inmail : undefined;
+  if (!standing || (standing.plan !== "premium" && standing.plan !== "sales_navigator")) return "no_plan";
+  const free = standing.credits - standing.spent - standing.committed + (committedOwn ? 1 : 0);
+  return free >= 1 ? "eligible" : "no_credit";
 }
 
 /**

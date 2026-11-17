@@ -95,10 +95,12 @@ export interface MessageMeasures {
 export interface LinkedinMeasures {
   readonly invitesSent: number;
   readonly invitesAccepted: number;
+  /** InMails the session reported sent, by the fallback (ADR 0004 13.6). Not among `messagesSent`. */
+  readonly inmailsSent: number;
   readonly messagesSent: number;
   readonly failed: number;
   readonly replies: number;
-  readonly fromTests: { readonly invitesSent: number; readonly invitesAccepted: number; readonly messagesSent: number; readonly failed: number; readonly replies: number };
+  readonly fromTests: { readonly invitesSent: number; readonly invitesAccepted: number; readonly inmailsSent: number; readonly messagesSent: number; readonly failed: number; readonly replies: number };
 }
 
 /** The calls the user logged (ticket 22), test calls included; `fromTests` is how many of each came from test runs. */
@@ -167,7 +169,12 @@ export type StepWaitApi =
    * A LinkedIn step no session it may use has any allowance for, of the step's kind (council on dee365d, item 15): the
    * engine's `sending_capacity` with every such session's allowance zero or unset, so nothing resets it. No time.
    */
-  | "no_allowance";
+  | "no_allowance"
+  /**
+   * An InMail the acceptance expiry chose whose session cannot send it now by its own report (ADR 0004 13.3): `inmail` on
+   * the read says whether it no longer reports Premium or Sales Navigator, or has no credit free. No time.
+   */
+  | "inmail_unavailable";
 
 /**
  * When a pending step goes, as the engine decides it at the read's instant (`stepWhen`): ready (its time has come and nothing
@@ -180,7 +187,7 @@ export type StepWhenView =
   | { readonly kind: "at"; readonly at: string }
   /** `channel` names the step's channel where the reason depends on it (no transport). */
   /** `channel`: the track's, so a reason is worded in its channel's words (council on b21af02, item 1). */
-  | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel: "email" | "sms" | "call" | "linkedin"; readonly until?: string }
+  | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel: "email" | "sms" | "call" | "linkedin"; readonly until?: string; readonly inmail?: "no_plan" | "no_credit" }
   /**
    * A call not yet placed: the user's day (YYYY-MM-DD) it goes on the list, with no time of day; `today` when that is the
    * read's day; `now` when it is ready for the list (due, calling hours open today, room on today's list), with no instant promised.

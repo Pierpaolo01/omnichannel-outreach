@@ -1172,6 +1172,31 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE track_progress ADD COLUMN skip_cause TEXT CHECK (skip_cause IS NULL OR skip_cause IN ('no_profile', 'not_a_member_profile', 'company_lead', 'replaced', 'removed_by_import', 'marked_bad'));
     `,
   },
+  {
+    version: 25,
+    name: "the LinkedIn InMail fallback (ticket 27, ADR 0004 section 13): a track's InMail state, which message work is an InMail, and a session's InMail report",
+    sql: `
+      -- A track's InMail fallback, judged at the acceptance expiry and moving only forward (ADR 0004 13.3, 13.10).
+      ALTER TABLE track_progress ADD COLUMN inmail TEXT CHECK (inmail IS NULL OR inmail IN ('chosen', 'sent', 'accepted', 'no_plan', 'no_credit', 'refused', 'switched_off', 'skipped_by_user'));
+      ALTER TABLE track_progress ADD COLUMN inmail_session TEXT;
+      CREATE TRIGGER track_progress_inmail_forward BEFORE UPDATE OF inmail ON track_progress
+      WHEN OLD.inmail IS NOT NULL AND NEW.inmail IS NOT OLD.inmail AND NOT (OLD.inmail = 'chosen' AND NEW.inmail IS NOT NULL)
+      BEGIN SELECT RAISE(ABORT, 'a track''s InMail state only moves forward'); END;
+      -- The store writes progress with INSERT OR REPLACE: judged against the row it would replace, before it is removed.
+      CREATE TRIGGER track_progress_inmail_forward_replace BEFORE INSERT ON track_progress
+      WHEN EXISTS (SELECT 1 FROM track_progress o WHERE o.subject_id = NEW.subject_id AND o.track_id = NEW.track_id
+        AND o.inmail IS NOT NULL AND NEW.inmail IS NOT o.inmail AND NOT (o.inmail = 'chosen' AND NEW.inmail IS NOT NULL))
+      BEGIN SELECT RAISE(ABORT, 'a track''s InMail state only moves forward'); END;
+      -- Which message work is an InMail: it spends a credit as well as one of the session's messages (ADR 0004 13.5).
+      ALTER TABLE provider_work ADD COLUMN inmail INTEGER NOT NULL DEFAULT 0 CHECK (inmail IN (0, 1) AND (inmail = 0 OR kind = 'message'));
+      ALTER TABLE attempts ADD COLUMN inmail INTEGER NOT NULL DEFAULT 0 CHECK (inmail IN (0, 1) AND (inmail = 0 OR action = 'message'));
+      -- A LinkedIn session's InMail standing, as it last reported it (ADR 0004 13.5): never invented, never cleared by a
+      -- listing that omits it.
+      ALTER TABLE sender_accounts ADD COLUMN inmail_plan TEXT CHECK (inmail_plan IS NULL OR inmail_plan IN ('premium', 'sales_navigator', 'none'));
+      ALTER TABLE sender_accounts ADD COLUMN inmail_credits INTEGER CHECK (inmail_credits IS NULL OR inmail_credits >= 0);
+      ALTER TABLE sender_accounts ADD COLUMN inmail_reported_wall INTEGER;
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {
