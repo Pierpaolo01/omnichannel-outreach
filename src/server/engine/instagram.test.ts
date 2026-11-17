@@ -419,6 +419,33 @@ describe("the senders a track chooses (ADR 0004 13.5; the review of f2824d4, ite
     expect((await get()).launch.blockers).toEqual([]);
   });
 
+  test("a session removed from a running track's choice keeps sending the leads it already started, as LinkedIn's fixed session does; new leads start from the sessions still chosen", async () => {
+    const S2 = "ig-session-2";
+    const { h, delivered } = await world({ sessions: [session(S1), session(S2)], messagesPerDay: 1 });
+    const { campaign: c } = await h.createCampaign("Fixed", { businesses: BUSINESSES, people: PEOPLE });
+    const both = [socialAccountId("instagram", S1), socialAccountId("instagram", S2)];
+    await h.defineSequence(c.id, definition([{ ...instagram("ig", three()), senders: both }]));
+    h.clock = MONDAY_9;
+    expect((await h.launch(c.id)).status).toBe(200);
+    // One message a day per session: Pat and Nia start, one from each session.
+    await h.advanceTo(MONDAY_9 + H);
+    const first = new Map(h.instagram.handoverLog.map((x) => [x.destination, x.sender]));
+    expect(new Set(first.values())).toEqual(new Set([S1, S2]));
+    const dropped = first.get(PAT_OWN)!;
+    // The user unticks the session that started Pat.
+    const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
+    const kept = both.filter((id) => id !== socialAccountId("instagram", dropped));
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, tracks: stored.tracks.map((t) => (t.id === "ig" ? { ...t, senders: kept } : t)) })).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 3 * DAY);
+    // Pat's follow-up still goes from the session of Pat's own conversation: a fixed sender is never reassigned (ADR 0003 1.3).
+    expect(h.instagram.handoverLog.filter((x) => x.destination === PAT_OWN).map((x) => [x.stepId, x.sender])).toEqual([["m1", dropped], ["m2", dropped]]);
+    // Nobody starts from the unticked session after the edit.
+    const editAt = MONDAY_9 + H;
+    const startedLater = h.instagram.handoverLog.filter((x) => x.at > editAt && x.stepId === "m1");
+    expect(startedLater.every((x) => x.sender !== dropped)).toBe(true);
+    expect(delivered(PAT_OWN)).toHaveLength(2);
+  });
+
   test("a track with no session chosen is blocker 3, said as no sender chosen, though sessions are connected", async () => {
     const { h } = await world();
     const { campaign: c } = await h.createCampaign("None chosen", { businesses: BUSINESSES, people: PEOPLE });

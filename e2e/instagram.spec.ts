@@ -25,7 +25,8 @@ async function shot(page: Page, name: string): Promise<void> {
   if (!dir) return;
   for (const theme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: theme });
-    await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished)));
+    // An animation cancelled while waited on rejects its `finished`: settle each, so a cancellation never fails a screenshot.
+    await page.evaluate(() => Promise.allSettled(document.getAnimations().map((a) => a.finished)));
     await page.screenshot({ path: `${dir}/instagram-${name}-${theme}.png`, fullPage: true });
   }
   await page.emulateMedia({ colorScheme: null });

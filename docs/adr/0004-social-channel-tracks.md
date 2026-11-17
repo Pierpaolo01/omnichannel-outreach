@@ -373,7 +373,7 @@ Asserted after every event by the message-request generated runs (`src/server/se
 5. **M5 No pair moves.** Every message to a (session, account) belongs to the first subject that reached it, until that subject's work there settled with nothing sent.
 6. **M6 A reply is the reached subject's.** A mark is accepted only on a subject the record knows reached the person on that channel (delivered, or handed over and untold).
 7. **M7 Nothing pending for ever.** After the drain, every pending step of a running lead has a due time or a hold the record derives itself, and none has been due for days with nothing holding it.
-8. **M8 Its own channel, its own sender.** Every handover is on its own track's channel, from a session of that channel in the campaign's pool at that instant, and after the first from the session of its own pair.
+8. **M8 Its own channel, its own sender.** Every handover is on its own track's channel. A lead's first message goes from a session its track has chosen at that instant; every later one goes from that same session, whether or not the track still chooses it. A fixed sender is never reassigned (ADR 0003 1.3), exactly as LinkedIn's fixed session is: unticking a session stops it starting new leads, not finishing the ones it started. The oracle checks the same two things, and `instagram.test.ts` shows it through HTTP.
 9. **M9 The other tracks carry on.** A message-request track that finishes for any reason changes no other track's progress but by releasing what starts after it; an SMS or LinkedIn track beside it runs as the record predicts on its own.
 10. **M10 Priority at a contested slot.** When a session's slot is contested, a follow-up to a touched lead goes before a first message to a new one, then the oldest due.
 

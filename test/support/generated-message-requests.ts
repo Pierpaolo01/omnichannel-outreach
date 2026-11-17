@@ -485,7 +485,8 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
       const l = leadOf(x.subjectId);
       if (!l) continue;
       const track = igTrackOf(l);
-      // M8: its own channel, its own track; from a session in its campaign's pool at that instant, and after its first from that session.
+      // M8: its own channel, its own track; the first from a session the track chose at that instant; every later one from that
+      // same session, chosen still or not (a fixed sender is never reassigned, ADR 0003 1.3, as on LinkedIn).
       if (x.trackId !== track.id || x.action !== "message") problem(`M8: an Instagram handover for ${x.subjectId} at ${iso(x.at)} is not a message of its Instagram track (${x.trackId}, ${x.action})`);
       const mine = ig.handoverLog.filter((y) => y.subjectId === x.subjectId);
       const first = mine[0]!;

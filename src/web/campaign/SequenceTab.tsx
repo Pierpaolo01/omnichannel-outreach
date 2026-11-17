@@ -1751,7 +1751,7 @@ function SenderChoice({ track, accounts, locked, onChange }: { track: TrackDefin
           No session chosen. Choose at least one: launch is blocked until you do.
         </p>
       ) : (
-        <p className="text-[12.5px] text-muted">Only the sessions you tick send this track’s messages. A session connected later isn’t added by itself.</p>
+        <p className="text-[12.5px] text-muted">Only the sessions you tick start this track’s conversations. A lead already started keeps the session of its first message. A session connected later isn’t added by itself.</p>
       )}
     </fieldset>
   );
