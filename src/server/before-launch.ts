@@ -4,12 +4,13 @@
  * projected daily load per sender inbox. Built from the engine's stored facts, the same lead data
  * the handover renders with; nothing here writes.
  */
+import { isSocialChannel, messageRequestRecord, SOCIAL_CHANNEL_LIST } from "../domain/social-channels.ts";
 import { missingFields, renderSegments, type Segment } from "../domain/copy-preview.ts";
 import { isLive, isUncertain } from "../domain/sequence/attempt.ts";
 import { localDayNumber } from "../domain/sequence/clock.ts";
 import { mergeUses } from "../domain/sequence/copy.ts";
 import { liveSteps, liveTracks, ownSubject, poolOf, winBackEntry, type CampaignDefinition, type TrackDefinition } from "../domain/sequence/definition.ts";
-import { callbackHold, goodEmail, goodProfile, hasGoodNumber, progressOf, runs } from "../domain/sequence/progress.ts";
+import { callbackHold, goodAccount, goodEmail, goodProfile, hasGoodNumber, progressOf, runs } from "../domain/sequence/progress.ts";
 import type { AccountState, CallDay, SubjectState } from "../domain/sequence/state.ts";
 import type { BeforeLaunchView, ContactDetailView, CopyPreview, LeadRow, LoadProjectionView, PreviewLead, WithheldBy, WithheldTrack } from "../shared/api.ts";
 import { trackLabel, trackPhrase } from "../shared/track-label.ts";
@@ -19,7 +20,7 @@ import { projectLoad, type Projection, type ProjectionStop } from "./load-projec
 import type { OutreachStore } from "./persistence/store.ts";
 
 /** A message's channel in Copy for a lead: its track's (ticket 24b: part a served a LinkedIn step as an email). */
-const copyChannel = (track: TrackDefinition): CopyPreview["steps"][number]["channel"] => (track.channel === "sms" || track.channel === "linkedin" ? track.channel : "email");
+const copyChannel = (track: TrackDefinition): CopyPreview["steps"][number]["channel"] => (track.channel === "call" ? "email" : track.channel);
 
 /** Why Copy for a lead shows a message with no day. */
 type NoDay = NonNullable<CopyPreview["steps"][number]["noDay"]>;
@@ -54,6 +55,11 @@ async function campaignLeads(store: OutreachStore, campaignId: string, definitio
       phone: hasGoodNumber(state),
       // A usable member profile, as a LinkedIn track starts with it (ADR 0004 section 5): never a company lead's (Q35).
       linkedin: row.kind === "person" && goodProfile(state.lead.details) !== null,
+      // Whose account a message-request track would message (ADR 0004 13.4): the engine's own destination rule.
+      social: messageRequestRecord((ch) => {
+        const account = goodAccount(state.lead.details, ch);
+        return account === null ? null : account.belongsTo === "person" ? ("own" as const) : ("company" as const);
+      }),
       lacks: [...fields.keys()].filter((f) => !state.lead.mergeData[f]?.trim()),
     };
     out.push({ lead: previewLead(row, enrollment.id, channels), state, details });
@@ -61,7 +67,7 @@ async function campaignLeads(store: OutreachStore, campaignId: string, definitio
   return out;
 }
 
-function previewLead(row: LeadRow, enrollmentId: string, channels: Pick<PreviewLead, "email" | "mobile" | "phone" | "linkedin" | "lacks">): PreviewLead {
+function previewLead(row: LeadRow, enrollmentId: string, channels: Pick<PreviewLead, "email" | "mobile" | "phone" | "linkedin" | "social" | "lacks">): PreviewLead {
   return row.kind === "person"
     ? { id: enrollmentId, kind: "person", recordId: row.id, name: row.name, title: row.title, company: row.company.name, ...channels }
     : { id: enrollmentId, kind: "company", recordId: row.id, name: row.name, title: "", company: row.name, ...channels };
@@ -111,6 +117,7 @@ export async function beforeLaunchView(store: OutreachStore, campaignId: string,
       mobile: leads.filter((l) => l.lead.mobile).length,
       phone: leads.filter((l) => l.lead.phone).length,
       linkedin: leads.filter((l) => l.lead.linkedin).length,
+      social: messageRequestRecord((ch) => ({ own: leads.filter((l) => l.lead.social[ch] === "own").length, company: leads.filter((l) => l.lead.social[ch] === "company").length })),
     },
     mergeFields,
     load: launched ? null : await loadProjection(store, campaignId, definition, leads, now),
@@ -148,8 +155,8 @@ function withheldTracks(definition: CampaignDefinition, all: readonly AccountSta
     // Ticket 24b: the projection does not run LinkedIn's connection check, so it would never hand an invite over and would
     // say leads never start. Until it models LinkedIn, a live LinkedIn track withholds the figure as not modelled, with a
     // session or without one (council on dee365d, item 1): a session would bring no figure, and the missing session is
-    // the launch blocker's to say.
-    if (t.channel === "linkedin") return [{ trackId: t.id, channel: t.channel, label: trackPhrase(definition, t), why: "not_modelled" }];
+    // the launch blocker's to say. A message-request track too (ticket 25): the projection reads no session's allowance.
+    if (isSocialChannel(t.channel)) return [{ trackId: t.id, channel: t.channel, label: trackPhrase(definition, t), why: "not_modelled" }];
     const connected = all.some((a) => a.channel === t.channel && poolOf(definition, t.channel).includes(a.id));
     return connected ? [] : [{ trackId: t.id, channel: t.channel, label: trackPhrase(definition, t), why: "no_sender" }];
   });
@@ -269,9 +276,9 @@ async function projectionOf(store: OutreachStore, campaignId: string, definition
  * fixed senders and live attempts against this campaign's pools, else the call list, else through another campaign.
  */
 async function linkedinTracksOf(store: OutreachStore, campaignId: string, definition: CampaignDefinition, subjects: readonly SubjectState[], ownCalls: boolean): Promise<WithheldTrack[]> {
-  const mine = { inbox: new Set(definition.emailPool), number: new Set(poolOf(definition, "sms")), session: new Set(poolOf(definition, "linkedin")) };
+  const mine = { inbox: new Set(definition.emailPool), number: new Set(poolOf(definition, "sms")), session: new Set(SOCIAL_CHANNEL_LIST.flatMap((ch) => poolOf(definition, ch))) };
   const why = (group: readonly SubjectState[]): NonNullable<WithheldTrack["competing"]>["why"] => {
-    const uses = new Set(group.flatMap((x) => [...accountsOf(x), ...poolOf(x.campaign.definition, "linkedin")]));
+    const uses = new Set(group.flatMap((x) => [...accountsOf(x), ...SOCIAL_CHANNEL_LIST.flatMap((ch) => poolOf(x.campaign.definition, ch))]));
     if ([...uses].some((a) => mine.inbox.has(a))) return "inbox";
     if ([...uses].some((a) => mine.number.has(a))) return "number";
     if ([...uses].some((a) => mine.session.has(a))) return "session";
@@ -287,12 +294,12 @@ async function linkedinTracksOf(store: OutreachStore, campaignId: string, defini
     const first = group[0] as SubjectState;
     const def = first.campaign.definition;
     const unfinished = (t: { readonly id: string }) => group.some((x) => x.subject.ended === null && (progressOf(x, t.id)?.finishedAt ?? null) === null);
-    const tracks = [...liveTracks(def, "main"), ...liveTracks(def, "win_back")].filter((t) => t.channel === "linkedin" && unfinished(t));
+    const tracks = [...liveTracks(def, "main"), ...liveTracks(def, "win_back")].filter((t) => isSocialChannel(t.channel) && unfinished(t));
     if (tracks.length === 0) continue;
     const name = (await store.campaign(first.campaign.id))?.name ?? "";
     const test = first.subject.kind === "test_run";
     const competing = { name, test, own: test && first.campaign.id === campaignId, why: why(group) };
-    for (const t of tracks) out.push({ trackId: t.id, channel: "linkedin", label: trackPhrase(def, t), why: "not_modelled", competing });
+    for (const t of tracks) out.push({ trackId: t.id, channel: t.channel, label: trackPhrase(def, t), why: "not_modelled", competing });
   }
   return out;
 }
@@ -456,7 +463,8 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
   const tracks = all.filter((t) => t.channel !== "call");
   // The lead skips a track whose channel it lacks; a skipped track finishes as it starts, so the
   // tracks after it start then (spec "a skipped or failed track counts as finished").
-  const skipped = (t: TrackDefinition) => (t.channel === "email" ? lead.email === null : t.channel === "sms" ? !lead.mobile : t.channel === "linkedin" ? !lead.linkedin : !lead.phone);
+  const skipped = (t: TrackDefinition) =>
+    t.channel === "email" ? lead.email === null : t.channel === "sms" ? !lead.mobile : t.channel === "linkedin" ? !lead.linkedin : t.channel === "call" ? !lead.phone : lead.social[t.channel] === null;
   /** The phone track a track waits on through its chain of `after` starts, if any (and the lead does not skip it). */
   const phoneBefore = (t: TrackDefinition): TrackDefinition | null => {
     const seen = new Set<string>();

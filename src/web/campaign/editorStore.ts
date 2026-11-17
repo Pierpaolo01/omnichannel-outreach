@@ -13,6 +13,7 @@
  * - A conflict stays visible until the user resolves it, by loading the saved version, however
  *   much they type meanwhile.
  */
+import type { SendChannelApi } from "../../shared/api.ts";
 import type { CampaignDefinition, SequenceView } from "../../shared/api.ts";
 import { definitionProblems } from "../../domain/sequence/definition.ts";
 import { SaveQueue, draftProblems, type SaveIdentity, type SaveOutcome, type SaveStatus } from "./saveQueue.ts";
@@ -305,7 +306,7 @@ export class EditorStore {
   private syncPool(): void {
     const view = this.state.view;
     if (view.launchedAt !== null) return;
-    const live = (channel: "email" | "sms" | "linkedin") => view.definition.tracks.some((t) => !t.removed && t.channel === channel);
+    const live = (channel: SendChannelApi) => view.definition.tracks.some((t) => !t.removed && t.channel === channel);
     const same = (a: readonly string[], b: readonly string[]) => [...a].sort().join("\n") === [...b].sort().join("\n");
     const emailDiffers = live("email") && !same(view.definition.emailPool, emailInboxIds(view));
     const smsDiffers = live("sms") && !same(view.definition.smsPool ?? [], smsNumberIds(view));

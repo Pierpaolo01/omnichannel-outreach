@@ -1,17 +1,19 @@
 /** Read models for the HTTP interface, built from the engine's stored facts. */
+import type { SendChannelApi } from "../../shared/api.ts";
 import { stepNumber } from "../../domain/sequence/definition.ts";
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { carriedInto, isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
-import { linkedinStepKind, socialActionOf } from "../../domain/sequence/definition.ts";
+import { messageRequestStepKind, socialActionOf, socialStepKind } from "../../domain/sequence/definition.ts";
+import { accountOfDetailId, isMessageRequestChannel, type MessageRequestChannel } from "../../domain/social-channels.ts";
 import { accountAvailable, claimRefusal, eligibleSessions, noAllowanceOnAnySession, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
 import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
 import { localDayNumber, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { relevantChannels, waitingOn } from "../../domain/sequence/providers.ts";
 import { providerEvidence, sendingInterrupted } from "./worker-state.ts";
-import { inviteOpenOn, invitingWork, invitePendingUntil, inviteWithdrawalStuck, channelOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
+import { inviteOpenOn, invitingWork, invitePendingUntil, inviteWithdrawalStuck, channelOf, senderOf, conversationOwnersOf, deriveStatus, liveTracksFor, unreachableWhy, unsettledOwnersOf, wallAtLead } from "../../domain/sequence/progress.ts";
 import type { AccountState, SubjectState } from "../../domain/sequence/state.ts";
-import type { LinkedinTrackView, AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi, SessionKinds } from "../../shared/api.ts";
+import type { LinkedinTrackView, MessageRequestTrackView, AttentionLead, ConversationOwnerView, EnrollmentProgress, NeedsAttention, SenderAccountViewApi, SessionKinds } from "../../shared/api.ts";
 import type { EngineStore } from "./engine-store.ts";
 import { DEFAULT_RULES, type Rules } from "./rules.ts";
 
@@ -113,6 +115,7 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
           finishedAt: iso(p?.finishedWall ?? null),
           conversationOwners: conversationOwnersView(s, track.id),
           linkedin: track.channel === "linkedin" ? linkedinTrackView(s, track.id) : null,
+          messageRequest: isMessageRequestChannel(track.channel) ? messageRequestTrackView(s, track.id, track.channel) : null,
           hold: heldReason(s, track.id, now),
           holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test })),
           // When it goes, by the engine's own decision functions at this instant (ADR 0003 "Reads that say when").
@@ -202,7 +205,7 @@ export async function needsAttention(
   store: EngineStore,
   now: number,
   rules: Pick<Rules, "asOfAction" | "evaluate"> = DEFAULT_RULES,
-  transportAvailable: (channel: "email" | "sms" | "linkedin", threading: "new_subject" | "continue_thread") => boolean = () => true,
+  transportAvailable: (channel: SendChannelApi, threading: "new_subject" | "continue_thread") => boolean = () => true,
 ): Promise<EngineNeedsAttention> {
   const accounts = await store.accounts(now);
   const open = await store.openAttempts();
@@ -239,7 +242,7 @@ export async function needsAttention(
   // Ticket 20a (council B): while sending is interrupted, which providers the gate holds due sends on, by its own function.
   const interrupted = await sendingInterrupted(store, now);
   const evidence = interrupted ? await providerEvidence(store) : null;
-  const providerWaits = new Map<"email" | "sms" | "linkedin", number>();
+  const providerWaits = new Map<SendChannelApi, number>();
   // Leads only (ADR 0003 "Ticket 21", rule 4): a running test's waits show on its Test run tab, never as a lead's.
   for (const id of await store.runningLeadIds()) {
     const stored = await store.subject(id, now);
@@ -255,8 +258,8 @@ export async function needsAttention(
       if (claimRefusal(s, item, now) !== null) continue;
       const channel = channelOf(s, item.trackId);
       // LinkedIn too (council on dee365d, item 4), each session judged by the step's own kind of action (`forAction`).
-      if (channel !== "email" && channel !== "sms" && channel !== "linkedin") continue;
-      const action = socialActionOf(linkedinStepKind(s.campaign.definition.tracks.find((t) => t.id === item.trackId) ?? { channel, steps: [] }, item.stepId));
+      if (channel === undefined || channel === "call") continue;
+      const action = socialActionOf(socialStepKind(s.campaign.definition.tracks.find((t) => t.id === item.trackId) ?? { channel, steps: [] }, item.stepId));
       const step = s.campaign.definition.tracks.find((t) => t.id === item.trackId)?.steps.find((x) => x.id === item.stepId);
       const base = { enrollmentId: id, trackId: item.trackId, stepId: item.stepId, channel, dueAt: new Date(item.dueWall).toISOString() };
       if (!transportAvailable(channel, step?.threading ?? "new_subject")) {
@@ -341,6 +344,30 @@ async function senderProblems(store: EngineStore, accounts: readonly AccountStat
 const earliest = (ts: readonly number[]): number | null => (ts.length === 0 ? null : Math.min(...ts));
 
 /** A LinkedIn track's stored facts as the read gives them (ADR 0004 section 9): nothing computed beside the engine's own. */
+/**
+ * A message-request track's stored facts for the record's sentences (ADR 0004 13.3, 13.4): whose account it started with, the
+ * first message's work as recorded (sent, or handed and not known), the fixed session, and a skip's recorded cause. Nothing
+ * about acceptance or reading, which the platform never tells the sender.
+ */
+export function messageRequestTrackView(s: SubjectState, trackId: string, channel: MessageRequestChannel): MessageRequestTrackView {
+  const p = s.tracks.find((x) => x.trackId === trackId);
+  const track = s.campaign.definition.tracks.find((t) => t.id === trackId);
+  const started = p?.destinationDetailId ? s.lead.details.find((d) => d.id === p.destinationDetailId) : undefined;
+  const account = p?.destinationDetailId ? accountOfDetailId(p.destinationDetailId) : null;
+  const isSent = (w: SubjectState["work"][number]) => w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null;
+  const first = track ? s.work.filter((w) => w.trackId === trackId && messageRequestStepKind(track, w.stepId) === "message_request" && w.firstHandedWall !== null) : [];
+  const firstSent = first.some(isSent);
+  const firstHanded = first.some((w) => w.settled === null);
+  const senderId = senderOf(s, channel);
+  return {
+    destination: account === null ? (p?.destinationDetailId?.startsWith("test:") ? "own" : null) : account.belongsTo === "person" ? "own" : "company",
+    address: started?.value ?? null,
+    firstMessage: firstSent ? "sent" : firstHanded ? "handed" : null,
+    sender: senderId === null ? null : { id: senderId, kind: s.accounts[senderId]?.socialKind ?? null },
+    skipCause: p?.finishReason === "skipped_missing_channel" ? (p.skipCause ?? "unrecorded") : null,
+  };
+}
+
 export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTrackView {
   const p = s.tracks.find((x) => x.trackId === trackId);
   // The invite work that counts (item 8): the one known sent, else the latest still unsettled.

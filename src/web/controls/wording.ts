@@ -5,6 +5,7 @@
  * step is next, when it is due or what a control did. History is said in the past tense; a present state only as the
  * read says it at its instant.
  */
+import type { TrackChannelApi, SendChannelApi } from "../../shared/api.ts";
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
 import { clockTime } from "../time.ts";
 import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead, StepWaitApi, StepWhenView } from "../../shared/api.ts";
@@ -93,7 +94,7 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
  */
 // `channel` is required, never defaulted: a caller that forgot it would word a text's reason as an email's (the re-check of
 // ff01571: the Test run tab named the email provider for an SMS transport hold).
-export function stepWaitWords(why: StepWaitApi, channel: "email" | "sms" | "call" | "linkedin"): string {
+export function stepWaitWords(why: StepWaitApi, channel: TrackChannelApi): string {
   switch (why) {
     case "campaign_not_launched":
       return "waiting for this campaign to launch";
@@ -392,7 +393,7 @@ export const CAMPAIGN_DONE = { pause: "Paused. Its calls left your list and its 
  * reads it here, so a channel added later fails typecheck until it has its words. A LinkedIn reply is the user's own mark.
  */
 // `activity`: what Activity says after "Automation stopped in this campaign." (council on b21af02, item 1).
-export const REPLY_WORDS: Readonly<Record<"email" | "sms" | "linkedin", { readonly how: string; readonly title: string; readonly answer: string; readonly activity: string }>> = {
+export const REPLY_WORDS: Readonly<Record<SendChannelApi, { readonly how: string; readonly title: string; readonly answer: string; readonly activity: string }>> = {
   email: { how: "Replied by email", title: "Replied by email", answer: "Answer in Instantly.", activity: "Read and answer the reply in Instantly." },
   sms: { how: "Replied by text", title: "Replied by text", answer: "Answer on your phone.", activity: "Answer the reply on your phone." },
   linkedin: { how: "Marked replied on LinkedIn by you", title: "You marked them replied on LinkedIn", answer: "Carry on the conversation on LinkedIn.", activity: "Carry on the conversation on LinkedIn." },

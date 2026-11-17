@@ -1,3 +1,4 @@
+import type { TrackChannelApi } from "../../shared/api.ts";
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
 import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LinkedinProviderStatus, LoadProjectionView, PreviewLead, SmsProviderStatus } from "../../shared/api.ts";
@@ -211,9 +212,9 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
   const noMobile = facts.coverage.leads - facts.coverage.mobile;
   const noPhone = facts.coverage.leads - facts.coverage.phone;
   const noProfile = facts.coverage.leads - facts.coverage.linkedin;
-  const after = (channel: "email" | "sms" | "call" | "linkedin") => live.some((t) => t.start.kind === "after" && live.find((x) => x.id === (t.start as { trackId: string }).trackId)?.channel === channel);
+  const after = (channel: TrackChannelApi) => live.some((t) => t.start.kind === "after" && live.find((x) => x.id === (t.start as { trackId: string }).trackId)?.channel === channel);
   // Each warning names the tracks it is about, by their own channel and order.
-  const tracksOn = (channel: "email" | "sms" | "call" | "linkedin") => and(live.filter((t) => t.channel === channel).map((t) => trackName(editor.view.definition, t)));
+  const tracksOn = (channel: TrackChannelApi) => and(live.filter((t) => t.channel === channel).map((t) => trackName(editor.view.definition, t)));
   if (live.some((t) => t.channel === "email") && noEmail > 0) {
     items.push({ title: `${noEmail} ${noEmail === 1 ? "lead has" : "leads have"} no email`, detail: `They skip ${tracksOn("email")}${after("email") ? ", and the tracks after it start sooner" : ""}.` });
   }

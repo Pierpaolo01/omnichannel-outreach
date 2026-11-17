@@ -1,3 +1,4 @@
+import type { SendChannelApi } from "../../shared/api.ts";
 import type { AttentionLead, InterruptionNoticeView, NeedsAttention, SendingInterruptedView } from "../../shared/api.ts";
 import { dateIn, holdReasonClause, isoDateIn, timeIn, type AttentionItem } from "./wording.ts";
 import { conversationTaken } from "../campaign/sms-wording.ts";
@@ -34,7 +35,7 @@ const listOf = (parts: readonly string[]): string => (parts.length <= 2 ? parts.
 /** "a", "a or b", "a, b, or c". */
 const eitherOf = (parts: readonly string[]): string => (parts.length <= 2 ? parts.join(" or ") : `${parts.slice(0, -1).join(", ")}, or ${parts.at(-1)}`);
 
-type Channel = "email" | "sms" | "linkedin";
+type Channel = SendChannelApi;
 type Why = NeedsAttention["noUsableChannel"][number]["channels"][number]["why"];
 type ReachChannel = NeedsAttention["noUsableChannel"][number]["channels"][number]["channel"];
 

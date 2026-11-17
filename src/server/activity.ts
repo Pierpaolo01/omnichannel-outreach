@@ -17,6 +17,7 @@
  * has no delivered
  * state, because Instantly reports none (ADR 0002, "Delivered").
  */
+import type { TrackChannelApi, SendChannelApi } from "../shared/api.ts";
 import type { ActivityEntry, ControlView, EnrollmentView } from "../shared/api.ts";
 import { LEAD_CONTROLS } from "../domain/sequence/controls.ts";
 import { displayPhone } from "../domain/phone.ts";
@@ -45,10 +46,10 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
     const def = state.campaign.definition;
     const companyLead = kind === "company";
     const bounces = await store.engine.bouncesOf(enrollment.id);
-    const channelOfTrack = (trackId: string): "email" | "sms" | "call" | "linkedin" => def.tracks.find((t) => t.id === trackId)?.channel ?? "email";
+    const channelOfTrack = (trackId: string): TrackChannelApi => def.tracks.find((t) => t.id === trackId)?.channel ?? "email";
     const labelOf = (trackId: string) => trackLabel(def, def.tracks.find((t) => t.id === trackId) ?? { id: trackId, channel: channelOfTrack(trackId) });
     // A text goes to a mobile's E.164 form; it is shown grouped for reading.
-    const shown = (channel: "email" | "sms" | "linkedin", destination: string) => (channel === "sms" ? displayPhone(destination) : destination);
+    const shown = (channel: SendChannelApi, destination: string) => (channel === "sms" ? displayPhone(destination) : destination);
     for (const b of bounces) {
       const track = progress.tracks.find((t) => t.trackId === b.trackId);
       const step = track?.steps.find((st) => st.stepId === b.stepId);

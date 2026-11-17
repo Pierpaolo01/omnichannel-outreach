@@ -104,8 +104,8 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     invariant: "L3",
     seed: 4,
     rules: {
-      markReplied: (state, requestId, now) => {
-        const refused = DEFAULT_RULES.markReplied(state, requestId, now);
+      markReplied: (state, requestId, now, channel) => {
+        const refused = DEFAULT_RULES.markReplied(state, requestId, now, channel);
         if (!refused.ok) return refused;
         return { ok: true, state: { ...state, replies: [...state.replies, { channel: "linkedin", atWall: now, providerRef: markedReplyId("linkedin", requestId) }] } };
       },

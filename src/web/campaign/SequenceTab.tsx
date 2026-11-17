@@ -1,3 +1,4 @@
+import type { TrackChannelApi, SendChannelApi } from "../../shared/api.ts";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useLocation, useSearch } from "wouter";
 import { skipLimitOf } from "../../domain/sequence/calls.ts";
@@ -115,7 +116,7 @@ export function SequenceTab({ campaignId, editor, paused = false }: { campaignId
    * Adds a track through the arrangement rule, to the main sequence or the win-back branch, opens it,
    * and moves focus to its first message, or a phone track's call script.
    */
-  const add = (channel: "email" | "sms" | "call" | "linkedin", branch: TrackDefinition["branch"] = "main") => {
+  const add = (channel: TrackChannelApi, branch: TrackDefinition["branch"] = "main") => {
     let added: TrackDefinition | undefined;
     editor.update((d) => {
       const out = arrange(d, { kind: "add", channel, branch });
@@ -332,7 +333,7 @@ function Canvas({
   selectedId: string | null;
   editor: SequenceEditor;
   onSelect: (trackId: string) => void;
-  onAdd: (channel: "email" | "sms" | "call" | "linkedin", branch?: TrackDefinition["branch"]) => void;
+  onAdd: (channel: TrackChannelApi, branch?: TrackDefinition["branch"]) => void;
 }) {
   const main = treeOf(tracks);
   const branch = treeOf(branchTracks);
@@ -505,7 +506,7 @@ function addAfterRemoving(removed: TrackDefinition, result: CampaignDefinition):
  * tracks): a dashed box in `hand`, its name, its own Add (email or SMS: the branch holds no phone
  * track, so none is offered), and its tracks; while it has none, what it is and what makes it appear.
  */
-function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, children }: { empty: boolean; launched: boolean; locked: boolean; stacked: boolean; gutter: number; width: number; onAdd: (channel: "email" | "sms" | "linkedin") => void; children: ReactNode }) {
+function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, children }: { empty: boolean; launched: boolean; locked: boolean; stacked: boolean; gutter: number; width: number; onAdd: (channel: SendChannelApi) => void; children: ReactNode }) {
   const headingId = useId();
   return (
     <section
@@ -680,11 +681,11 @@ function AddTrackMenu({
   channels = ["email", "sms", "call", "linkedin"],
 }: {
   disabled: boolean;
-  onAdd: (channel: "email" | "sms" | "call" | "linkedin") => void;
+  onAdd: (channel: TrackChannelApi) => void;
   id?: string;
   label?: string;
   /** What it offers: the win-back branch's menu offers no phone track (ticket 16b). */
-  channels?: readonly ("email" | "sms" | "call" | "linkedin")[];
+  channels?: readonly (TrackChannelApi)[];
 }) {
   const [focusIndex, setFocusIndex] = useState<number | null>(null);
   const open = focusIndex !== null;
@@ -1168,7 +1169,7 @@ function SaveStatus({ editor }: { editor: SequenceEditor }) {
 }
 
 interface StepProps {
-  channel: "email" | "sms" | "linkedin";
+  channel: SendChannelApi;
   step: StepDefinition;
   index: number;
   steps: readonly StepDefinition[];

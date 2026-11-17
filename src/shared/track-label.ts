@@ -4,6 +4,7 @@
  * otherwise "Email track 2". The editor, Before launch and Activity all name tracks this way. A track
  * of the win-back branch is counted within that branch and named for it: "Win-back email track" (ticket 16).
  */
+import type { SendChannelApi } from "./api.ts";
 import type { CampaignDefinition, TrackDefinition } from "../domain/sequence/definition.ts";
 
 const WORD = { email: "Email", sms: "SMS", call: "Phone", linkedin: "LinkedIn" } as const;
@@ -28,7 +29,7 @@ export function trackLabel(def: CampaignDefinition, track: Pick<TrackDefinition,
  * What one step of a track is called in a title (council on 4fd9ca4, item 5): "Email" or "Text" in the main sequence,
  * "Win-back email" or "Win-back text" in the win-back branch, so a step of the branch never reads as the main sequence's.
  */
-export function stepNoun(track: Pick<TrackLabel, "branch">, channel: "email" | "sms" | "linkedin"): string {
+export function stepNoun(track: Pick<TrackLabel, "branch">, channel: SendChannelApi): string {
   const noun = channel === "sms" ? "Text" : channel === "linkedin" ? "LinkedIn step" : "Email";
   switch (track.branch) {
     case "main":
@@ -53,7 +54,7 @@ export const LINKEDIN_STEP_KIND_AT = (number: number): "invite" | "first_message
  * What one step is called in a title (ticket 24b): "Email 2", "Text 1", "Win-back email 1"; a LinkedIn step by its role,
  * "Connection invite", "First message", "Follow-up 1" (CONTEXT.md's "connection invite"), "Win-back first message".
  */
-export function stepTitle(track: Pick<TrackLabel, "branch">, channel: "email" | "sms" | "linkedin", number: number): string {
+export function stepTitle(track: Pick<TrackLabel, "branch">, channel: SendChannelApi, number: number): string {
   if (channel !== "linkedin") return `${stepNoun(track, channel)} ${number}`;
   const kind = LINKEDIN_STEP_KIND_AT(number);
   const role = kind === "invite" ? "Connection invite" : kind === "first_message" ? "First message" : `Follow-up ${number - 2}`;

@@ -1,4 +1,5 @@
 /** The campaign editor's draft helpers (ticket 12c). Pure: no React, no requests. */
+import type { TrackChannelApi } from "../../shared/api.ts";
 import { mergeUses, rewriteMergeUses, type MergeUse } from "../../domain/sequence/copy.ts";
 import { ownSubject } from "../../domain/sequence/definition.ts";
 import { trackLabel, trackPhrase } from "../../shared/track-label.ts";
@@ -35,7 +36,7 @@ export const DEFAULT_SKIP_LIMIT_DAYS = 2;
  * which has no copy, and the default skip limit (ADR 0003, ticket 14c). In the win-back branch
  * (ticket 16b) it starts when the lead enters the branch, which is what `entry` means there.
  */
-export function newTrack(channel: "email" | "sms" | "call" | "linkedin", branch: TrackDefinition["branch"] = "main"): TrackDefinition {
+export function newTrack(channel: TrackChannelApi, branch: TrackDefinition["branch"] = "main"): TrackDefinition {
   return {
     id: newId("track"),
     channel,

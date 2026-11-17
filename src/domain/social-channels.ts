@@ -47,3 +47,24 @@ export const MESSAGE_REQUEST_COLUMNS: { readonly [C in MessageRequestChannel]: {
 
 /** The kind a session reports of itself (ADR 0004 13.5): a personal profile, or a business account (a Page, on Facebook). */
 export type SocialSenderKind = "personal" | "business";
+
+/** A record with one entry per message-request channel (ADR 0004 13.2): a new channel is never left out of one. */
+export function messageRequestRecord<T>(of: (channel: MessageRequestChannel) => T): { readonly [C in MessageRequestChannel]: T } {
+  return Object.fromEntries(MESSAGE_REQUEST_CHANNELS.map((c) => [c, of(c)])) as { readonly [C in MessageRequestChannel]: T };
+}
+
+/**
+ * A message-request account as a detail id (ADR 0004 13.4): the channel, whose it is (`p` a person's own, `c` a company's),
+ * that person's or company's id, and the key, fixed at a track's start. The destination triggers of migration 26 accept it.
+ */
+export function accountDetailId(channel: MessageRequestChannel, belongsTo: "person" | "company", ownerId: string, key: string): string {
+  return `${channel}:${belongsTo === "person" ? "p" : "c"}:${ownerId}:${key}`;
+}
+
+/** The channel, owner and key a message-request account detail id names, or null for any other id. */
+export function accountOfDetailId(id: string): { channel: MessageRequestChannel; belongsTo: "person" | "company"; ownerId: string; key: string } | null {
+  const match = /^([a-z]+):([pc]):([^:]+):(.+)$/.exec(id);
+  const channel = match?.[1];
+  if (!match || !isMessageRequestChannel(channel)) return null;
+  return { channel, belongsTo: match[2] === "p" ? "person" : "company", ownerId: match[3] ?? "", key: match[4] ?? "" };
+}

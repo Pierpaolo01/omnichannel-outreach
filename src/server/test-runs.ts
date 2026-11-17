@@ -13,7 +13,8 @@ import type { EndReason, FinishReason, SubjectState } from "../domain/sequence/s
 import type { TestRunEnding, TestRunRead, TestRunTab, TestStepRow } from "../shared/api.ts";
 import { stepTitle, trackLabel } from "../shared/track-label.ts";
 import type { TestRunRecord } from "./engine/engine-store.ts";
-import { linkedinReplyView } from "./engine/controls-view.ts";
+import { replyMarksView } from "./engine/controls-view.ts";
+import { messageRequestRecord } from "../domain/social-channels.ts";
 import type { Rules } from "./engine/rules.ts";
 
 /** The rules the tab reads with: the call views' and the reply mark's (ticket 24b). */
@@ -70,6 +71,7 @@ export async function testRunTab(store: OutreachStore, campaignId: string, now: 
       mobileIsALead: stored.leadHas.mobile,
       linkedin: stored.contacts.linkedin?.value ?? null,
       linkedinIsALead: stored.leadHas.linkedin === true,
+      social: messageRequestRecord((ch) => ({ address: stored.contacts[ch]?.value ?? null, isALead: stored.leadHas[ch] === true })),
     },
     noTestSinceEdit: await store.engine.noTestSinceEdit(campaignId),
     leads,
@@ -94,12 +96,13 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
     email: run.contacts.email?.value ?? null,
     mobile: run.contacts.mobile?.value ?? null,
     linkedin: run.contacts.linkedin?.value ?? null,
+    social: messageRequestRecord((ch) => run.contacts[ch]?.value ?? null),
     status: deriveStatus(s),
     linkedinTracks: s.tracks.filter((t) => s.campaign.definition.tracks.find((d) => d.id === t.trackId)?.channel === "linkedin").map((t) => ({ trackId: t.trackId, view: linkedinTrackView(s, t.trackId) })),
     mayStillSend: s.work.filter(maySend).length,
     steps: stepsOf(s, rules, now, env),
     // The mark's own rule on the stored run (it reads the run as of the action itself), as a lead's read says it (ticket 24b).
-    linkedinReply: linkedinReplyView(stored, now, rules),
+    replyMarks: replyMarksView(stored, now, rules),
   };
 }
 
