@@ -21,19 +21,24 @@ export const LINKEDIN_SEED = 24000;
 // seed of the mutation "no allowance reads as full for the day".
 // 10 (the review bot on 0922582): the removal of a started LinkedIn track, drawn since, changed what 8 and 93 go on to do; 10
 // reaches the two behaviours they no longer did (a pair released then invited by another, a second invite after a withdrawal).
-// Ticket 27 (ADR 0004 14.11 and 14.16): after the council's draws, a greedy cover by cost of every behaviour below over
-// offsets 0 to 50, keeping 15, 46, 69, 73 and 93 (17 November 2026): 4, 8, 16, 18, 30, 32, 42 and 50 (about 110 seconds of
-// runs on a developer machine, where 24 and 29 alone took 140 since the draws).
-export const LINKEDIN_FIXED_SEEDS: readonly number[] = [4, 8, 10, 15, 16, 18, 30, 32, 42, 46, 50, 69, 71, 73, 84, 93];
+// Ticket 27 (ADR 0004 14.11, 14.16 and 14.17): after ticket 25's merge and the draws for the review bot on 56030c4, a greedy
+// cover by cost of every behaviour below over offsets 0 to 50, keeping 10, 15, 46, 69, 73 and 93 and the search's two seeds
+// on 56030c4 (71 and 84, the record's errors): 4, 8, 16, 18, 30, 32 and 42 (about 150 seconds of runs on a developer machine).
+export const LINKEDIN_FIXED_SEEDS: readonly number[] = [4, 8, 10, 15, 16, 18, 30, 32, 42, 46, 69, 71, 73, 84, 93];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const LINKEDIN_FEATURES: readonly string[] = [
   "a-campaign-paused",
   "a-campaign-resumed",
   "a-crash-between-the-handover-and-its-answer",
+  "a-credit-contested-by-a-stop",
   "a-deadline-checked-at-an-edit",
+  "a-follow-up-after-an-inmail",
   "a-lead-paused",
+  "a-lead-stopped-with-its-inmail-unsettled",
   "a-lead-resumed",
   "a-lead-stopped",
+  "a-lead-with-a-chosen-inmail-restarted",
+  "a-lead-with-a-chosen-inmail-stopped",
   "a-lost-answer-found-by-lookup",
   "a-message-after-acceptance",
   "a-message-to-an-existing-connection",
@@ -46,6 +51,10 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "a-removed-connection",
   "a-reply-mark-refused",
   "a-reply-marked",
+  "a-report-between-an-inmail-claim-and-its-handover:no_credit",
+  "a-report-between-an-inmail-claim-and-its-handover:no_plan",
+  "a-restart-after-another-took-a-credit",
+  "a-running-edit-while-an-inmail-is-chosen:remove",
   "a-running-edit:insert",
   "a-running-edit:remove",
   "a-running-edit:reorder",
@@ -65,56 +74,62 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "a-stuck-withdrawal-marked-by-the-user",
   "a-third-session",
   "a-withdrawal-answered-unknown",
-  "a-follow-up-after-an-inmail",
   "already-connected",
+  "an-acceptance-before-the-inmail-went",
   "an-answer-of-one-session",
   "an-edit-of-the-wait-while-waiting",
   "an-expiry-while-the-laptop-was-off",
+  "an-inmail-refused",
+  "an-inmail-sent",
+  "an-inmail-settled-unsent-on-a-stopped-lead",
+  "an-inmail-switched-off-before-it-went",
+  "an-inmail-text-edited",
+  "an-inmail-waiting-behind-earlier-holdings",
+  "an-inmail-waiting-for-a-credit",
+  "an-inmail-without-a-credit",
+  "an-inmail-without-a-plan",
   "an-invite-decided-over-several-sessions",
   "an-invite-expired",
   "an-invite-pending-elsewhere",
   "an-invite-without-its-note",
-  "an-acceptance-before-the-inmail-went",
-  "an-inmail-refused",
-  "an-inmail-sent",
-  "an-inmail-text-edited",
-  "an-inmail-without-a-credit",
-  "an-inmail-without-a-plan",
-  "inmail-credits-spent-by-hand",
-  "the-fallback-switched-off",
-  "the-fallback-switched-off-early",
-  "the-fallback-switched-on",
-  "the-withdrawal-path-after-an-inmail-refused",
-  "the-withdrawal-path-after-an-inmail-switched_off",
-  "an-inmail-switched-off-before-it-went",
-  "a-credit-contested-by-a-stop",
-  "a-lead-with-a-chosen-inmail-restarted",
-  "a-lead-with-a-chosen-inmail-stopped",
-  "a-report-between-an-inmail-claim-and-its-handover:no_plan",
-  "a-restart-after-another-took-a-credit",
-  "a-running-edit-while-an-inmail-is-chosen:remove",
   "chosen-inmails-beyond-the-credits",
-  "inmail-credits-returned",
   "connected-by-acceptance",
   "email-after-linkedin",
   "email-beside-linkedin",
+  "inmail-credits-returned",
+  "inmail-credits-spent-by-hand",
   "released-after-an-expiry",
   "sms-after-linkedin",
   "sms-beside-linkedin",
+  "the-fallback-switched-off",
+  "the-fallback-switched-off-early",
+  "the-fallback-switched-on",
   "the-laptop-was-off",
+  "the-withdrawal-path-after-an-inmail-refused",
+  "the-withdrawal-path-after-an-inmail-skipped_by_user",
+  "the-withdrawal-path-after-an-inmail-switched_off",
   "unresolved-marked-not-sent",
 ];
-/** Behaviours the runs can name that the fixed seeds do not reach, each pinned by an example test instead (`linkedin-review.test.ts`). */
-// Since ticket 27's draws: a skipped InMail and one waiting for a credit (`linkedin-inmail.test.ts`, "a chosen InMail that
-// cannot go yet, and one the user skips"), and a withdrawal that finds the invite accepted (`linkedin.test.ts`), which the
-// fixed seeds reached before the fallback was drawn. Since the council's draws, a switch-off while an InMail waits, which no
-// offset from 0 to 50 reaches (`linkedin-inmail.test.ts`, "switched off while the InMail is chosen and not yet handed over").
+/**
+ * Behaviours the runs can name that no offset from 0 to 50 reaches, each pinned by a deterministic example test instead:
+ * - unresolved LinkedIn work marked sent (`linkedin-inmail.test.ts`, "marked sent instead"; `lifecycle.test.ts` for email);
+ * - a withdrawal that finds the invite accepted (`linkedin.test.ts`);
+ * - a switch-off while an InMail waits (`linkedin-inmail.test.ts`, "switched off while the InMail is chosen and not yet
+ *   handed over");
+ * - an InMail judged on a stale report, and the withdrawal path after it (`linkedin-inmail.test.ts`, "a session not read for
+ *   over a day at the expiry");
+ * - a message inserted, and a follow-up moved before the replaced step, while an InMail is chosen (`linkedin-inmail.test.ts`,
+ *   "kept steps around the replaced one").
+ * `sequence-runs-linkedin-registry.test.ts` requires these two lists to hold every name a run can report, each once.
+ */
 export const LINKEDIN_OTHER_FEATURES: readonly string[] = [
-  "unresolved-marked-sent",
-  "the-fallback-switched-off-while-an-inmail-waits",
+  "a-running-edit-while-an-inmail-is-chosen:insert",
+  "a-running-edit-while-an-inmail-is-chosen:reorder",
   "a-withdrawal-found-it-accepted",
-  "the-withdrawal-path-after-an-inmail-skipped_by_user",
-  "an-inmail-waiting-for-a-credit",
+  "an-inmail-on-a-stale-report",
+  "the-fallback-switched-off-while-an-inmail-waits",
+  "the-withdrawal-path-after-an-inmail-stale_report",
+  "unresolved-marked-sent",
 ];
 /**
  * Invariant 29's fresh-engine comparison in `pnpm check` (a fresh engine per check doubles a run's engine work, and the

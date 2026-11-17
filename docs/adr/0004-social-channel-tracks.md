@@ -727,6 +727,30 @@ The removal changes offsets 0 and 1, the contested runs that draw it. Three earl
 - **Seeds 24044 and 24049 (L8 at an edit of the wait):** the record checked the deadline of a lead whose reply had been marked. That lead's clock stopped with it, so the record skips ended leads there, as its check after the drain already did.
 - **Seed 24024 (L23's other side):** a skip drawn for a lead waiting for acceptance was not noted among the record's skips, so two messages the user skipped read as kept. Every skip is now noted.
 
+### 14.17 The search and the review bot on `56030c4`, and ticket 25's merge
+
+**The search** failed on two seeds, both the record's errors, each fixed in the record and added to the fixed seeds:
+- **Seed 24071 (L13, L15):** a chosen InMail's room is its own session's messages per day; the record took the whole pool, and read the lead as still awaiting acceptance. With no credit and no room both true, the read names the credit first. An InMail's open invite (Q50) is a held conversation, not one being withdrawn, so the pair it holds grounds another lead's skip.
+- **Seed 24084 (L12):** a handover committed before a crash, which the session never received, is handed with its outcome untold to the application: the reply mark it allows is right.
+
+It also emitted a behaviour name registered nowhere. **Every name a run can report is now a typed list** (`LINKEDIN_EMITTED`): a name not in it fails the typecheck, and a unit test with no run requires the list to equal the two registries.
+
+**B. A step moved before the replaced one is sent.** The step walk's cursor is the last step resolved by something that happened to it. The skip the InMail's send writes on the replaced step (`inmail_instead`) stops that step only, and never stands for the steps an edit placed before it (`remainingSteps`). The step replaced is still named once, at the choice (item 1 of 14.16). Tests through HTTP: a follow-up moved before the replaced step, a message inserted before it, a step removed in front of it, the replaced step moved to the end, each after the choice; the same reorder at the choice's own instant, before the choice (then the first message at the choice is the one replaced) and after the InMail went. A test run ends at any edit (ADR 0003), so no step can move around a test's replaced step; unedited, its follow-ups go. The runs' reorder while an InMail is chosen moves the first follow-up in front of the first message. Mutation: "a step moved before the replaced step is not sent" (L23).
+
+**C. A holding settled unsent is released, whoever settles it.** Every transition that settles work (a lookup's answer, a provider's refusal or late answer, a confirmed withdrawal, the user's mark, a claim that expires, at store open too) ends at `attend`, which now releases the holding of a finished track or an ended lead (stopped, replied, won back onto another branch) once nothing its InMail holds may have gone (`releaseSettledHolds`). A running or paused lead's chosen InMail still owes its send, so it keeps its holding; sent work keeps it until a report absorbs it. Tests through HTTP: the bot's reproduction, ending with the next lead's InMail taking the credit; restarted before the mark (the lead's InMail goes, the next finds none); marked sent instead (held until the next report). The runs draw, in contested runs, an InMail answered unknown with nothing sent, its lead stopped at the handover and the work marked not sent once unresolved; L26 is also checked during the run (at least `min(free, n)` of the `n` chosen InMails backed, the record's free credits net of InMail work still uncertain), and L22's count of committed credits leaves out a stopped lead's settled work. Mutation: "a holding settled unsent on a stopped lead is kept" (L26).
+
+**The same faults elsewhere in LinkedIn.** None:
+- *A synthetic result as a cursor:* the only other synthetic step results are the invite's "already connected" skip (position 0) and the InMail's "accepted" skip, which the validator keeps right after the invite. Neither can stand before a kept step. The invitation withdrawal writes no step result.
+- *Something held by work and not released once a stopped lead's work settles:* a session's reservations are counted from unsettled work, so they free themselves as it settles; a pair whose work all ended not sent is released in every write the engine makes (`releaseUnsent`), whatever the lead's state.
+
+**Ticket 25's merge** (`b4e2e8c`). This migration is now 26, its undo computed like ticket 25's from the migrations before it, and its upgrade fixture written by `b4e2e8c`'s own code. What the merge changed for the InMail:
+- an InMail is LinkedIn's only: the action exists only on a LinkedIn step (`linkedinStepKind`), and the simulated message-request port refuses to be asked for one;
+- a claim is not a handover: the InMail's read counts as handed only work with a handover time, so a claimed InMail never handed says it has not gone, and holds its credit only through the choice's holding;
+- LinkedIn's fixed session and the pacing from tracks with leads running on it carry over unchanged to the InMail, which goes from the track's own session;
+- the runs' draw "remove a started track before a lead's first claim" holds with the InMail fallback on, on the fixed seeds and offsets 0 to 50.
+
+Both no-change digests are equal on `b4e2e8c` and here (the simulated provider's own `seq` field, a test double's, is left out of the first).
+
 ## The review of `194fc44` (council, review bot and verifier, 16 November 2026)
 
 Fifteen items, each reproduced first as a failing test through HTTP (`src/server/engine/linkedin-review.test.ts`) unless it says otherwise.
