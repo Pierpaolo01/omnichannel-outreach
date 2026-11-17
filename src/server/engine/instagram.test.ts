@@ -284,3 +284,58 @@ describe("the running application (ADR 0004 13.1)", () => {
     expect(providers.instagram).toEqual({ provider: "none", message: "No Instagram session is connected, so Instagram tracks cannot launch." });
   });
 });
+
+describe("test runs to the user's own account (ADR 0004 13.8)", () => {
+  const OWN_TEST = "https://www.instagram.com/example_my_test_account";
+
+  test("an account a person's or company's record holds is refused; the run messages the test account with minute waits, and its mark ends only the run", async () => {
+    const { h, campaign } = await world({ messagesPerDay: 20 });
+    const c = await campaign([instagram("ig", three())]);
+    // The boundary: a lead's own account, and a company's, are refused; an address that is not an account is refused.
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/test-contacts`, { email: "", mobile: "", instagram: PAT_OWN })).status).toBe(409);
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/test-contacts`, { email: "", mobile: "", instagram: HARBOUR })).status).toBe(409);
+    const bad = await h.request("PUT", `/api/campaigns/${c.id}/test-contacts`, { email: "", mobile: "", instagram: "@example_my_test_account" });
+    expect(bad.status).toBe(400);
+    expect(JSON.stringify(bad.body)).toContain("Give your Instagram account's address, such as https://www.instagram.com/your.name.");
+    const saved = await h.request<{ contacts: { social: { instagram: { address: string | null } } }; definitionVersion: number }>("PUT", `/api/campaigns/${c.id}/test-contacts`, { email: "", mobile: "", instagram: OWN_TEST });
+    expect(saved.status).toBe(200);
+    expect(saved.body.contacts.social.instagram.address).toBe(OWN_TEST);
+    const run = await h.request<{ run: { id: string } }>("POST", `/api/campaigns/${c.id}/test-runs`, { requestId: "run-1", renderAs: c.lead("Pat Oneil"), expect: { definitionVersion: saved.body.definitionVersion } });
+    expect(run.status).toBe(200);
+    await h.advanceTo(h.clock + 10 * MIN);
+    // Rendered for Pat, sent to the user's own account, each wait a minute.
+    const toTest = h.instagram.deliveryLog.filter((d) => d.destination === OWN_TEST);
+    expect(toTest.map((d) => [d.stepId, d.rendered.body])).toEqual([
+      ["m1", "Hello Pat, I work with clinics like Harbour Lane Physio."],
+      ["m2", "Following up."],
+      ["m3", "Last note."],
+    ]);
+    const runId = run.body.run.id;
+    const marked = await h.request<{ run: { running: boolean; ending: string | null } }>("POST", `/api/test-runs/${runId}/replies`, { requestId: "tr-1", channel: "instagram" });
+    expect(marked.status).toBe(200);
+    expect(marked.body.run).toMatchObject({ running: false, ending: "your_reply" });
+    const m = (await h.request<CampaignMeasures>("GET", `/api/campaigns/${c.id}/measures`)).body;
+    expect(m.messageRequests.instagram.fromTests).toEqual({ messagesSent: 3, failed: 0, replies: 1 });
+  });
+});
+
+describe("the import (ADR 0004 13.4)", () => {
+  test("a person whose only channel is their company's account is enrolled, and a re-import that replaces an account skips the track not finished", async () => {
+    const { h, campaign, delivered, progress } = await world({ messagesPerDay: 20 });
+    const people = [person({ person_id: "p9", business_id: "b2", full_name: "Lou Park" })];
+    const c = await campaign([instagram("ig", [step("m1", 0, "One."), step("m2", 3, "Two.")])], "Only Instagram");
+    void c;
+    const { campaign: only } = await h.createCampaign("Company account only", { businesses: BUSINESSES, people });
+    const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${only.id}`)).body.rows;
+    // Lou has no email, no mobile, no number of their own: the company's main line and its Instagram account still reach them.
+    expect(rows.map((r) => r.name)).toEqual(["Lou Park"]);
+    await h.advanceTo(MONDAY_9 + H);
+    expect(delivered(PAT_OWN).map((d) => d.stepId)).toEqual(["m1"]);
+    // Pat's own cell now names another account: the track started with the old one, which is no longer theirs.
+    await h.reimport(c.id, { businesses: BUSINESSES, people: [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", instagram: "https://www.instagram.com/example_pat.new" })] });
+    await h.advanceTo(MONDAY_9 + 4 * DAY);
+    const track = (await progress(c.lead("Pat Oneil"))).tracks.find((t) => t.trackId === "ig");
+    expect(track).toMatchObject({ finishReason: "skipped_missing_channel", messageRequest: { skipCause: "replaced" } });
+    expect(delivered("https://www.instagram.com/example_pat.new")).toEqual([]);
+  });
+});
