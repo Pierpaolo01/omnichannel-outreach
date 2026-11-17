@@ -408,3 +408,27 @@ describe("the review bot on 82cf16d: a test run's invitation handed over and not
     expect(run?.linkedinReply).toEqual({ allowed: true });
   });
 });
+
+describe("the re-check of 82cf16d: a skip's cause is recorded when the track finishes, and a later change never rewrites it", () => {
+  test("skipped for a company page; a re-import with a valid member profile, then that profile marked bad, leave the cause as recorded", async () => {
+    const { h } = await world();
+    const KIM = "https://www.linkedin.com/in/fictional-kim-hart";
+    const kim = (url: string) => person({ person_id: "p2", business_id: "b1", full_name: "Kim Hart", email: "kim@harbour.example", linkedin_url: url });
+    const { campaign: c } = await h.createCampaign("Recorded cause", { businesses: BUSINESSES, people: [kim("https://www.linkedin.com/company/fictional-harbour")] });
+    await h.defineSequence(c.id, definition([linkedin(), email({ kind: "after", trackId: "li", delayDays: 9 })]));
+    h.clock = MONDAY_9;
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H);
+    const id = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
+    const cause = async () => (await h.request<EnrollmentRead>("GET", `/api/enrollments/${id}`)).body.tracks.find((t) => t.trackId === "li")?.linkedin?.skipCause;
+    expect(await cause()).toBe("not_a_member_profile");
+    // A re-import with a valid member profile: the skip happened for the company page, and still reads so.
+    expect((await h.request("POST", `/api/campaigns/${c.id}/imports`, csvOf({ businesses: BUSINESSES, people: [kim(KIM)] }))).status).toBeLessThan(300);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    expect(await cause()).toBe("not_a_member_profile");
+    // That profile marked bad afterwards changes nothing either.
+    const db = (h.store.engine as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+    db.prepare("INSERT OR IGNORE INTO linkedin_profile_marks (key, marked_wall) VALUES (?, ?)").run(KIM, h.clock);
+    expect(await cause()).toBe("not_a_member_profile");
+  });
+});

@@ -115,7 +115,8 @@ export const SKIP_CAUSE: Readonly<Record<NonNullable<LinkedinTrackView["skipCaus
   company_lead: "a company lead has no member profile to invite",
   replaced: "a later import gave them a different LinkedIn profile, so the one this track started with is no longer theirs",
   removed_by_import: "a later import no longer has the LinkedIn profile this track started with",
-  added_after_start: "they had no usable LinkedIn profile when this track started; one was imported later",
+  // A skip recorded before its cause was kept: only what is known.
+  unrecorded: "there was no usable LinkedIn member profile for them at the time",
   marked_bad: "their LinkedIn profile is marked unreachable",
 };
 

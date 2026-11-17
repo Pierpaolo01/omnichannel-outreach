@@ -89,7 +89,8 @@ describe("a LinkedIn track's facts on the record", () => {
     expect(skipped("replaced")).toBe("The LinkedIn track was skipped: a later import gave them a different LinkedIn profile, so the one this track started with is no longer theirs.");
     expect(skipped("marked_bad")).toContain("marked unreachable");
     expect(skipped("removed_by_import")).toBe("The LinkedIn track was skipped: a later import no longer has the LinkedIn profile this track started with.");
-    expect(skipped("added_after_start")).toBe("The LinkedIn track was skipped: they had no usable LinkedIn profile when this track started; one was imported later.");
+    // A skip recorded before causes were kept says only what is known (re-check of 82cf16d).
+    expect(skipped("unrecorded")).toBe("The LinkedIn track was skipped: there was no usable LinkedIn member profile for them at the time.");
     expect(skipped("replaced")).not.toContain("in the import.");
   });
 

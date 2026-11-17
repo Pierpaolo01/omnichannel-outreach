@@ -340,29 +340,6 @@ async function senderProblems(store: EngineStore, accounts: readonly AccountStat
 
 const earliest = (ts: readonly number[]): number | null => (ts.length === 0 ? null : Math.min(...ts));
 
-/** Why a LinkedIn track was skipped as a missing channel, from the stored facts alone (council on a6c1700, item 10). */
-function skipCauseOf(s: SubjectState, startedWith: string | null): NonNullable<LinkedinTrackView["skipCause"]> {
-  // Started with a profile no longer theirs (review bot on 82cf16d's audit): replaced by another member profile, or a later
-  // import that holds none (no address, or one that is not a member profile).
-  if (startedWith !== null) return s.lead.importedProfile === "member" ? "replaced" : "removed_by_import";
-  if (s.lead.details.some((d) => d.channel === "linkedin" && d.bad)) return "marked_bad";
-  switch (s.lead.importedProfile) {
-    case undefined:
-      return "company_lead";
-    case "not_member":
-      return "not_a_member_profile";
-    case "none":
-      return "no_profile";
-    // A usable member profile now, none when the track started: a later import added it.
-    case "member":
-      return "added_after_start";
-    default: {
-      const unhandled: never = s.lead.importedProfile;
-      throw new Error(`An imported profile with no cause: ${String(unhandled)}`);
-    }
-  }
-}
-
 /** A LinkedIn track's stored facts as the read gives them (ADR 0004 section 9): nothing computed beside the engine's own. */
 export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTrackView {
   const p = s.tracks.find((x) => x.trackId === trackId);
@@ -373,7 +350,8 @@ export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTra
     invite: counting === null ? null : counting.sent ? "sent" : "handed",
     note: counting?.work.note ?? null,
     withdrawalAsked: withdrawal === "wanted" && (p?.inviteWithdrawalUnknowns ?? 0) > 0,
-    skipCause: p?.finishReason === "skipped_missing_channel" ? skipCauseOf(s, p.destinationDetailId ?? null) : null,
+    // As recorded when the track finished (re-check of 82cf16d); a skip recorded before causes were kept says only that.
+    skipCause: p?.finishReason === "skipped_missing_channel" ? (p.skipCause ?? "unrecorded") : null,
     connection: p?.connection ?? null,
     connectedAt: iso(p?.connectedWall ?? null),
     acceptedAt: iso(p?.acceptedWall ?? null),

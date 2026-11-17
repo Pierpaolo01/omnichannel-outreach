@@ -11,7 +11,7 @@ import { emptyDefinition, poolOf, type CampaignDefinition, type DeclinedPath } f
 import { callableOnDay, skipDeadlineOf, skipLimitOf } from "../../domain/sequence/calls.ts";
 import { bindingUnsent, deriveStatus, releaseUnsentBindings } from "../../domain/sequence/progress.ts";
 import { maySend, occupyingKeys } from "../../domain/sequence/attempt.ts";
-import type { ConversationCause } from "../../domain/sequence/state.ts";
+import type { ConversationCause, LinkedinSkipCause } from "../../domain/sequence/state.ts";
 import type {
   AccountState,
   Attempt,
@@ -1569,12 +1569,12 @@ export class SqliteEngineStore implements EngineStore {
         `INSERT OR REPLACE INTO track_progress (subject_id, track_id, start_at, start_basis_at, start_basis_wall, start_zone, started_at,
            destination_detail_id, next_step_id, basis_at, basis_wall, due_at, due_wall, due_zone, finished_at, finished_wall, finish_reason, conversation_owners,
            connection, connected_at, connected_wall, accepted_wall, accept_by, accept_by_wall, accept_by_zone, invite_withdrawal, invite_withdrawal_last_wall,
-           invite_withdrawal_unknowns, connection_checks, accept_by_days)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           invite_withdrawal_unknowns, connection_checks, accept_by_days, skip_cause)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id, t.trackId, t.startAt, t.startBasisAt, t.startBasisWall, t.startZone, t.startedAt, t.destinationDetailId, t.nextStepId, t.basisAt, t.basisWall, t.dueAt, t.dueWall, t.dueZone, t.finishedAt, t.finishedWall, t.finishReason, t.conversationOwners ? JSON.stringify(t.conversationOwners) : null,
           t.connection ?? null, t.connectedAt ?? null, t.connectedWall ?? null, t.acceptedWall ?? null, t.acceptBy ?? null, t.acceptByWall ?? null, t.acceptByZone ?? null, t.inviteWithdrawal ?? null, t.inviteWithdrawalLastWall ?? null,
-          t.inviteWithdrawalUnknowns ?? 0, t.connectionChecks ? JSON.stringify(t.connectionChecks) : null, t.acceptByDays ?? null,
+          t.inviteWithdrawalUnknowns ?? 0, t.connectionChecks ? JSON.stringify(t.connectionChecks) : null, t.acceptByDays ?? null, t.skipCause ?? null,
         ],
       );
       // Stored once and only forward (ADR 0004 10.4): a connection never changes once set, a withdrawal never moves back.
@@ -1858,6 +1858,7 @@ function toTrack(r: Row): TrackProgress {
     finishedWall: numOrNull(r, "finished_wall"),
     finishReason: strOrNull(r, "finish_reason") as FinishReason | null,
     ...(r["conversation_owners"] == null ? {} : { conversationOwners: JSON.parse(str(r, "conversation_owners")) as ConversationCause[] }),
+    ...(r["skip_cause"] == null ? {} : { skipCause: str(r, "skip_cause") as LinkedinSkipCause }),
     // A LinkedIn track's fields (ADR 0004 3.2), present only once set, so no other track's state reads any differently.
     ...(r["connection"] == null ? {} : { connection: str(r, "connection") === "accepted" ? ("accepted" as const) : ("already_connected" as const), connectedAt: numOrNull(r, "connected_at"), connectedWall: numOrNull(r, "connected_wall") }),
     ...(r["accepted_wall"] == null ? {} : { acceptedWall: num(r, "accepted_wall") }),

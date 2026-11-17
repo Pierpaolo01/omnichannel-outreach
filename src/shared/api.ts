@@ -598,7 +598,7 @@ export interface LinkedinTrackView {
    * the import; an address that is not a member profile; a company lead; the profile it started with replaced by a
    * re-import; the profile marked unreachable. Null for any other finish.
    */
-  readonly skipCause: "no_profile" | "not_a_member_profile" | "company_lead" | "replaced" | "removed_by_import" | "added_after_start" | "marked_bad" | null;
+  readonly skipCause: import("../domain/sequence/state.ts").LinkedinSkipCause | "unrecorded" | null;
   /** The session answered the withdrawal unknown too many times: listed in Needs attention for the user. */
   readonly withdrawalStuck: boolean;
   /** An invite this application sent is still open on LinkedIn (sent, not accepted, not withdrawn), whatever the lead's state. */

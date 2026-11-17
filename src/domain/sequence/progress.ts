@@ -9,7 +9,7 @@ import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalD
 import { render } from "./copy.ts";
 import { holdsConversations, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
-import type { Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, LeadDetail, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
+import type { Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, LeadDetail, LinkedinSkipCause, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Running, status and reach.
@@ -215,7 +215,10 @@ export function withdrawalDue(w: ProviderWork, now: number, carried = true): boo
 export function finishTrack(state: SubjectState, trackId: string, reason: FinishReason, at: number, atWall: number): SubjectState {
   const progress = progressOf(state, trackId);
   if (!progress || progress.finishedAt !== null) return state;
-  const finished = withTrack(state, trackId, (t) => ({ ...t, finishedAt: at, finishedWall: atWall, finishReason: reason }));
+  // A LinkedIn track skipped as a missing channel records why, as the facts stand at its finish (ticket 24b): a read never
+  // works it out again from today's import, marks or decision makers.
+  const cause = reason === "skipped_missing_channel" && channelOf(state, trackId) === "linkedin" ? { skipCause: linkedinSkipCauseOf(state, progress.destinationDetailId) } : {};
+  const finished = withTrack(state, trackId, (t) => ({ ...t, finishedAt: at, finishedWall: atWall, finishReason: reason, ...cause }));
   const closed = { ...finished, callTasks: finished.callTasks.map((t) => (t.trackId === trackId && t.open ? { ...t, open: false, closedWall: atWall } : t)) };
   return quiesce(closed, trackId);
 }
@@ -1611,3 +1614,26 @@ export function inviteOpenOn(state: SubjectState, trackId: string): boolean {
 
 /** Whether any LinkedIn track of the subject has an invite still open on LinkedIn (`inviteOpenOn`). */
 export const anyInviteOpen = (state: SubjectState): boolean => state.tracks.some((t) => inviteOpenOn(state, t.trackId));
+
+/**
+ * Why a LinkedIn track is skipped as a missing channel, from the facts at its finish (ticket 24b): a profile it started with
+ * that is no longer theirs (another member profile imported since, or none); a bad mark; the import's own address (none,
+ * or one that is not a member profile); or a company lead, which has no member profile (Q35).
+ */
+export function linkedinSkipCauseOf(state: SubjectState, startedWith: string | null): LinkedinSkipCause {
+  if (startedWith !== null) return state.lead.importedProfile === "member" ? "replaced" : "removed_by_import";
+  if (state.lead.details.some((d) => d.channel === "linkedin" && d.bad)) return "marked_bad";
+  switch (state.lead.importedProfile) {
+    case undefined:
+      return "company_lead";
+    case "not_member":
+      return "not_a_member_profile";
+    case "none":
+    case "member":
+      return "no_profile";
+    default: {
+      const unhandled: never = state.lead.importedProfile;
+      throw new Error(`An imported profile with no cause: ${String(unhandled)}`);
+    }
+  }
+}
