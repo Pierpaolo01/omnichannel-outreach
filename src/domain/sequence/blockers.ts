@@ -97,14 +97,16 @@ export function launchCheck(def: CampaignDefinition, leads: readonly MergeData[]
     const pool = trackPool(def, track);
     const connected = accounts.some((a) => a.channel === track.channel && a.healthy && pool.includes(a.id));
     // Launch blocker 3 (ADR 0003 7.2): a track none of whose senders is connected; on a message-request track, also one whose
-    // user chose no session at all (ADR 0004 13.5), said as that.
-    const noneChosen = isMessageRequestChannel(track.channel) && pool.length === 0;
+    // user chose no session at all (ADR 0004 13.5), said as that while a session of the channel is connected to choose.
+    // With none connected the cause is that, not the choice: there was nothing to tick.
+    const anyConnected = accounts.some((a) => a.channel === track.channel && a.healthy);
+    const noneChosen = isMessageRequestChannel(track.channel) && pool.length === 0 && anyConnected;
     if (!connected) {
       blockers.push({
         kind: "no_sender",
         trackId: track.id,
         channel: track.channel,
-        noneChosen,
+        ...(isMessageRequestChannel(track.channel) ? { noneChosen } : {}),
         message: noneChosen && isMessageRequestChannel(track.channel) ? `The ${SOCIAL_CHANNELS[track.channel].name} track has no sender session chosen.` : noSenderMessage(track.channel),
       });
     }
