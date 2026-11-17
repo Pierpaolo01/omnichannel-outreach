@@ -19,7 +19,9 @@ export const LINKEDIN_SEED = 24000;
  */
 // 15 (ticket 24b, the search on a6c1700): a step no session it may use has any allowance for, read as no allowance; the
 // seed of the mutation "no allowance reads as full for the day".
-export const LINKEDIN_FIXED_SEEDS: readonly number[] = [5, 8, 15, 18, 29, 46, 69, 73, 93];
+// 10 (the review bot on 0922582): the removal of a started LinkedIn track, drawn since, changed what 8 and 93 go on to do; 10
+// reaches the two behaviours they no longer did (a pair released then invited by another, a second invite after a withdrawal).
+export const LINKEDIN_FIXED_SEEDS: readonly number[] = [5, 8, 10, 15, 18, 29, 46, 69, 73, 93];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const LINKEDIN_FEATURES: readonly string[] = [
   "a-campaign-paused",
