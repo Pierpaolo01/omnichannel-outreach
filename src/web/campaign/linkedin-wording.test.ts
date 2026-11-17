@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import type { LinkedinTrackView, NeedsAttention, TrackProgressView } from "../../shared/api.ts";
 import { attentionItems, SAID_ON_TODAY } from "../calls/wording.ts";
 import { describeEntry } from "../activity.tsx";
-import { expiryLine, linkedinTrackLines, MARK_REPLIED, noteLine, withdrawalStuckItems } from "./linkedin-wording.ts";
+import { expiryLine, INVITE_STILL_OPEN, linkedinTrackLines, MARK_REPLIED, noteLine, withdrawalStuckItems } from "./linkedin-wording.ts";
 
 /** The record's and Today's LinkedIn sentences, one per state of the read (ticket 24b; ADR 0004 section 9). */
 const ZONE = "Europe/London";
@@ -55,10 +55,11 @@ describe("a LinkedIn track's facts on the record", () => {
 
   test("an invite still open on LinkedIn is said once the lead no longer runs (Q38), never while it runs", () => {
     const open = track({ note: "with", inviteOpen: true });
-    const said = "The connection invite sent from this campaign is still open on LinkedIn. Stopping doesn’t withdraw it; withdraw it on LinkedIn if you want it gone.";
-    expect(linkedinTrackLines(open, "stopped_manually", ZONE)).toContain(said);
-    expect(linkedinTrackLines(open, "replied", ZONE)).toContain(said);
-    expect(linkedinTrackLines(open, "active", ZONE)).not.toContain(said);
+    expect(linkedinTrackLines(open, "stopped_manually", ZONE)).toContain(INVITE_STILL_OPEN);
+    expect(linkedinTrackLines(open, "replied", ZONE)).toContain(INVITE_STILL_OPEN);
+    expect(linkedinTrackLines(open, "active", ZONE)).not.toContain(INVITE_STILL_OPEN);
+    // An expiry's withdrawal, stuck or not, is said by its own line, never as left open by a stop.
+    expect(linkedinTrackLines(track({ inviteOpen: true, withdrawal: "wanted", withdrawalStuck: true }, { finishReason: "invite_not_accepted" }), "sequence_finished_no_response", ZONE)).not.toContain(INVITE_STILL_OPEN);
   });
 
   test("a pending invite from elsewhere, a stuck withdrawal, a skip naming the owner, a missing profile", () => {

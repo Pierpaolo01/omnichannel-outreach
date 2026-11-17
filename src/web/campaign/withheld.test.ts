@@ -16,3 +16,10 @@ describe("why the load is not projected", () => {
     );
   });
 });
+
+describe("a LinkedIn track the estimate does not model (ticket 24b)", () => {
+  test("said as not modelled, never as a sender to connect", () => {
+    const text = withheldExplanation({ tracks: [{ trackId: "li", channel: "linkedin", label: "the LinkedIn track", why: "not_modelled" }] });
+    expect(text).toBe("No load is projected for this campaign: the estimate doesn’t model LinkedIn tracks yet, since when a person accepts an invite can’t be foreseen. The LinkedIn track has no figure, and nor does the rest of the campaign.");
+  });
+});

@@ -76,3 +76,12 @@ export const MEASURE_NOTES: readonly string[] = [
   "A call made is any outcome you logged except Skip for now. Connected means you spoke with them: interested, not interested or a callback asked for. A skipped call step is not a call.",
   "A callback is pending until an outcome other than Skip for now is logged on it, also while the lead is paused (it is then off your call list); not once the lead has replied or been stopped.",
 ];
+
+/** How LinkedIn figures are counted (ADR 0004 section 8; ticket 24b). Nothing claims a message was delivered or read. */
+export const LINKEDIN_MEASURE_NOTE =
+  "On LinkedIn, an invite or message counts once your session reports it sent; nothing shows whether it was seen. Accepted counts every acceptance recorded, also one after a track had ended. Replied counts the leads you marked replied on LinkedIn: the app detects no LinkedIn reply.";
+
+/** The notes for a campaign's channels: the LinkedIn note only when it has a LinkedIn track. */
+export function measureNotes(channels: CampaignMeasures["channels"]): readonly string[] {
+  return channels.includes("linkedin") ? [...MEASURE_NOTES, LINKEDIN_MEASURE_NOTE] : MEASURE_NOTES;
+}

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import type { CampaignMeasures } from "../../shared/api.ts";
 import { groupCountText } from "../status.tsx";
-import { callsLine, connectRateText, linkedinLine, measureRows, messagesLine, replyRateText, MEASURE_NOTES } from "./measuresWording.ts";
+import { callsLine, connectRateText, linkedinLine, measureNotes, measureRows, messagesLine, replyRateText, LINKEDIN_MEASURE_NOTE, MEASURE_NOTES } from "./measuresWording.ts";
 
 const msg = (sent: number, failedOrBounced: number, replies: number, fromTests = { sent: 0, failedOrBounced: 0, replies: 0 }) => ({ sent, failedOrBounced, replies, fromTests });
 const NO_CALL_TESTS = { made: 0, connected: 0, interested: 0, declined: 0, callbacksPending: 0 };
@@ -78,5 +78,15 @@ describe("LinkedIn measures in words (ADR 0004 section 8)", () => {
     expect(linkedinLine({ invitesSent: 5, invitesAccepted: 2, messagesSent: 3, failed: 1, replies: 1, fromTests: { ...zero, invitesSent: 1 } })).toBe(
       "5 invites sent (1 from test runs) · 2 accepted · 3 messages sent · 1 failed · 1 lead marked replied",
     );
+  });
+});
+
+describe("how LinkedIn figures are counted (ticket 24b)", () => {
+  test("said only for a campaign with a LinkedIn track, claiming no delivery or reading", () => {
+    expect(measureNotes(["email"])).toEqual(MEASURE_NOTES);
+    const notes = measureNotes(["email", "linkedin"]);
+    expect(notes.length).toBe(MEASURE_NOTES.length + 1);
+    expect(notes.at(-1)).toBe(LINKEDIN_MEASURE_NOTE);
+    expect(LINKEDIN_MEASURE_NOTE).not.toMatch(/delivered|read by|opened/);
   });
 });

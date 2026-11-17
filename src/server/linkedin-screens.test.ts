@@ -4,7 +4,7 @@ import { EngineHarness } from "../../test/support/engine-harness.ts";
 import { business, person } from "../../test/support/export-builder.ts";
 import { NOTHING_SENT_ON_LINKEDIN } from "../domain/sequence/controls.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../domain/sequence/definition.ts";
-import type { ActivityView, BeforeLaunchView, EnrollmentRead, LeadSearchResult, TestRunTab } from "../shared/api.ts";
+import type { ActivityView, BeforeLaunchView, CopyPreview, EnrollmentRead, LeadSearchResult, TestRunTab } from "../shared/api.ts";
 
 /**
  * The reads ticket 24's screens need that part a did not serve (ticket 24, part b): LinkedIn coverage on Before launch, whether
@@ -139,5 +139,30 @@ describe("Activity's LinkedIn entries (ticket 24b; part a left LinkedIn tracks o
     ]);
     const ola = await activity("Ola Berg");
     expect(ola.find((e) => e.kind === "skipped")).toMatchObject({ channel: "linkedin", reason: "no_profile" });
+  });
+});
+
+describe("Copy for a lead on a LinkedIn track (ticket 24b; part a served its steps as emails)", () => {
+  test("each LinkedIn step is served on LinkedIn, with no subject; a lead with no member profile skips the track", async () => {
+    const { h, id, lead } = await world();
+    await h.defineSequence(id, definition([LI]));
+    const preview = async (name: string) => (await h.request<CopyPreview>("GET", `/api/campaigns/${id}/preview/${await lead(name)}`)).body;
+    const pat = await preview("Pat Oneil");
+    expect(pat.steps.map((s) => [s.channel, s.number, s.skipped, s.subject.length])).toEqual([
+      ["linkedin", 1, false, 0],
+      ["linkedin", 2, false, 0],
+    ]);
+    expect((await preview("Kim Hart")).steps.every((s) => s.skipped)).toBe(true);
+  });
+});
+
+describe("the daily-load estimate with a LinkedIn track (ticket 24b)", () => {
+  test("it withholds its figure, saying the LinkedIn track is not modelled, rather than warn that leads would never start", async () => {
+    const { h, id } = await world();
+    await h.defineSequence(id, definition([LI, emailTrack]));
+    const load = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${id}/before-launch`)).body.load;
+    expect(load?.withheldBy?.tracks).toEqual([{ trackId: "li", channel: "linkedin", label: "the LinkedIn track", why: "not_modelled" }]);
+    expect(load?.someNotStartedWithinHorizon).toBe(false);
+    expect(load?.leadsToStart).toBeNull();
   });
 });

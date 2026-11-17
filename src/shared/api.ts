@@ -1307,8 +1307,12 @@ export interface WithheldTrack {
   readonly channel: "email" | "sms" | "call" | "linkedin";
   /** As the canvas names it: "the SMS track", "email track 2". */
   readonly label: string;
-  /** Its channel has no connected sender, so its leads and every track after it would wait. */
-  readonly why: "no_sender";
+  /**
+   * `no_sender`: its channel has no connected sender, so its leads and every track after it would wait. `not_modelled`: a
+   * LinkedIn track, which the estimate does not model yet (ticket 24b: it cannot foresee acceptances, and does not run the
+   * connection check), so no figure is shown rather than a wrong one.
+   */
+  readonly why: "no_sender" | "not_modelled";
 }
 
 export interface WithheldBy {

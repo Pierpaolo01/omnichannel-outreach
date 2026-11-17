@@ -85,12 +85,16 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
   if (view.acceptedAfterFinish) {
     lines.push(`${view.acceptedAt ? `They accepted the invite on ${dateIn(userZone, view.acceptedAt)}` : "They accepted the invite"}, after this track had ended. You are connected now, and may want to write to them on LinkedIn yourself.`);
   }
-  // Q38's interim: a stop leaves an invite already sent pending on LinkedIn. Said once the lead no longer runs.
-  if (view.inviteOpen && (statusGroup(status) === "handed_to_you" || statusGroup(status) === "ended")) lines.push("The connection invite sent from this campaign is still open on LinkedIn. Stopping doesn’t withdraw it; withdraw it on LinkedIn if you want it gone.");
+  // Q38's interim: a stop or a reply leaves an invite already sent pending on LinkedIn. Said once the lead no longer runs,
+  // and only while no withdrawal was asked for: an expiry's withdrawal is said by its own line.
+  if (view.inviteOpen && view.withdrawal === null && (statusGroup(status) === "handed_to_you" || statusGroup(status) === "ended")) lines.push(INVITE_STILL_OPEN);
   if (view.pendingElsewhereSince) lines.push(`An invite to them was already pending on LinkedIn, not sent by this application (first seen ${dateIn(userZone, view.pendingElsewhereSince)}). This track waits until it is accepted or gone.`);
   if (view.withdrawalStuck) lines.push("LinkedIn hasn’t confirmed the invite was withdrawn. Check their profile on LinkedIn and say what you found.");
   return lines;
 }
+
+/** Q38's interim, on the record (ADR 0004 3.4). */
+export const INVITE_STILL_OPEN = "The connection invite sent from this campaign is still open on LinkedIn: ending their outreach here doesn’t withdraw it. Withdraw it on LinkedIn if you want it gone.";
 
 /** The two answers to a withdrawal LinkedIn never confirmed (ADR 0004 3.3), as the record offers them. */
 export const WITHDRAWAL_ANSWERS = [

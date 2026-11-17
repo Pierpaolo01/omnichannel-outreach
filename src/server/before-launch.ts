@@ -17,6 +17,9 @@ import type { Rules } from "./engine/rules.ts";
 import { projectLoad, type Projection, type ProjectionStop } from "./load-projection.ts";
 import type { OutreachStore } from "./persistence/store.ts";
 
+/** A message's channel in Copy for a lead: its track's (ticket 24b: part a served a LinkedIn step as an email). */
+const copyChannel = (track: TrackDefinition): CopyPreview["steps"][number]["channel"] => (track.channel === "sms" || track.channel === "linkedin" ? track.channel : "email");
+
 /** Why Copy for a lead shows a message with no day. */
 type NoDay = NonNullable<CopyPreview["steps"][number]["noDay"]>;
 
@@ -142,7 +145,10 @@ function withheldTracks(definition: CampaignDefinition, all: readonly AccountSta
   return liveTracks(definition, "main").flatMap((t): WithheldTrack[] => {
     if (t.channel === "call") return [];
     const connected = all.some((a) => a.channel === t.channel && poolOf(definition, t.channel).includes(a.id));
-    return connected ? [] : [{ trackId: t.id, channel: t.channel, label: trackPhrase(definition, t), why: "no_sender" }];
+    if (!connected) return [{ trackId: t.id, channel: t.channel, label: trackPhrase(definition, t), why: "no_sender" }];
+    // Ticket 24b: the projection does not run LinkedIn's connection check, so it would never hand an invite over and
+    // would say leads never start. Until it models LinkedIn, a live LinkedIn track withholds the figure, said as such.
+    return t.channel === "linkedin" ? [{ trackId: t.id, channel: t.channel, label: trackPhrase(definition, t), why: "not_modelled" }] : [];
   });
 }
 
@@ -406,7 +412,7 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
   const tracks = all.filter((t) => t.channel !== "call");
   // The lead skips a track whose channel it lacks; a skipped track finishes as it starts, so the
   // tracks after it start then (spec "a skipped or failed track counts as finished").
-  const skipped = (t: TrackDefinition) => (t.channel === "email" ? lead.email === null : t.channel === "sms" ? !lead.mobile : !lead.phone);
+  const skipped = (t: TrackDefinition) => (t.channel === "email" ? lead.email === null : t.channel === "sms" ? !lead.mobile : t.channel === "linkedin" ? !lead.linkedin : !lead.phone);
   /** The phone track a track waits on through its chain of `after` starts, if any (and the lead does not skip it). */
   const phoneBefore = (t: TrackDefinition): TrackDefinition | null => {
     const seen = new Set<string>();
@@ -450,7 +456,7 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
       else if (projectedOn !== undefined) day = projectedOn;
       else noDay = stopped = missing.length > 0 ? "not_sent" : "beyond_horizon";
       steps.push({
-        step: { trackId: track.id, stepId: step.id, channel: track.channel === "sms" ? "sms" : "email", number: i + 1, day, noDay, waitsOnCall: waitsOn, skipped: skip, threading: step.threading, subject, body, missing },
+        step: { trackId: track.id, stepId: step.id, channel: copyChannel(track), number: i + 1, day, noDay, waitsOnCall: waitsOn, skipped: skip, threading: step.threading, subject, body, missing },
         order: trackIndex * 10_000 + i,
       });
     });
@@ -465,7 +471,7 @@ export async function copyPreview(store: OutreachStore, campaignId: string, enro
       return rendered(track).map(({ step, i, subject, body, missing }): CopyPreview["steps"][number] => ({
         trackId: track.id,
         stepId: step.id,
-        channel: track.channel === "sms" ? "sms" : "email",
+        channel: copyChannel(track),
         number: i + 1,
         day: null,
         noDay: skip ? "skipped" : "win_back",

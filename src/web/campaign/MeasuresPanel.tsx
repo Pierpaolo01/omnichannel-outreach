@@ -2,7 +2,7 @@ import { useId, useState } from "react";
 import type { CampaignMeasures } from "../../shared/api.ts";
 import { Icon } from "../icons.tsx";
 import { GroupCounts } from "../status.tsx";
-import { connectRateText, MEASURE_NOTES, measureRows, replyRateText } from "./measuresWording.ts";
+import { connectRateText, measureNotes, measureRows, replyRateText } from "./measuresWording.ts";
 
 /**
  * The campaign measures (ticket 22). **Provisional** (ADR 0003 Q33): variant A draws only the five group counts in a strip
@@ -70,7 +70,7 @@ export function MeasuresPanel({ measures: m }: { measures: CampaignMeasures }) {
         </button>
         {/* Always rendered, hidden while closed, so the button's `aria-controls` always names an element (council on 384630e). */}
         <ul id={notesId} hidden={!notesOpen} className="mt-1.5 flex max-w-[72ch] list-disc flex-col gap-1 pl-5 text-ink-2">
-          {MEASURE_NOTES.map((note) => (
+          {measureNotes(m.channels).map((note) => (
             <li key={note}>{note}</li>
           ))}
         </ul>
