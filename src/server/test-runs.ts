@@ -11,7 +11,7 @@ import { progressOf, unsettledOwnersOf } from "../domain/sequence/progress.ts";
 import { heldReason } from "../domain/sequence/dispatch.ts";
 import type { EndReason, FinishReason, SubjectState } from "../domain/sequence/state.ts";
 import type { TestRunEnding, TestRunRead, TestRunTab, TestStepRow } from "../shared/api.ts";
-import { stepNoun, trackLabel } from "../shared/track-label.ts";
+import { stepTitle, trackLabel } from "../shared/track-label.ts";
 import type { TestRunRecord } from "./engine/engine-store.ts";
 import { linkedinReplyView } from "./engine/controls-view.ts";
 import type { Rules } from "./engine/rules.ts";
@@ -134,7 +134,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
         stepId: step.id,
         channel: track.channel,
         branch: track.branch,
-        name: track.channel === "call" ? (track.branch === "win_back" ? "Win-back call" : "Call") : `${stepNoun(label, track.channel)} ${liveSteps(track).indexOf(step) + 1 || i + 1}`,
+        name: track.channel === "call" ? (track.branch === "win_back" ? "Win-back call" : "Call") : stepTitle(label, track.channel, liveSteps(track).indexOf(step) + 1 || i + 1),
         track: label.label,
         taskId: task?.id ?? null,
         outcome: logged?.outcome ?? null,

@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
 import type { BeforeLaunchView, CampaignDefinition, CopyPreview, CopySegment, LoadProjectionView, PreviewLead, SmsProviderStatus } from "../../shared/api.ts";
-import { stepNoun, trackLabel } from "../../shared/track-label.ts";
+import { stepTitle, trackLabel } from "../../shared/track-label.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
 import { Icon } from "../icons.tsx";
@@ -581,7 +581,7 @@ function PreviewMessage({ s, def, named, horizonDays, entry }: { s: CopyPreview[
   const track = def.tracks.find((t) => t.id === s.trackId);
   const sms = s.channel === "sms";
   // A step of the win-back branch is named for it, as the shared label says (ticket 16c): "Win-back email 1".
-  const noun = `${stepNoun(trackLabel(def, { id: s.trackId, channel: s.channel }), sms ? "sms" : "email")} ${s.number}`;
+  const noun = stepTitle(trackLabel(def, { id: s.trackId, channel: s.channel }), s.channel, s.number);
   return (
     <li className="overflow-hidden rounded-field border border-line">
       <div className="flex items-center justify-between gap-3 border-b border-line bg-raised px-3.5 py-2 text-[13px]">

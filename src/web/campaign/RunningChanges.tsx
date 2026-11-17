@@ -4,6 +4,7 @@
  * canvas the server's read says what each change would do to the leads already running, as of that read. Nothing here
  * decides what a change does: every count is the server's, from the engine's own reconciliation of each lead.
  */
+import { stepTitle } from "../../shared/track-label.ts";
 import { useEffect, useRef, useState } from "react";
 import { clockTime } from "../time.ts";
 import type { EditChangeKind } from "../../domain/sequence/reconcile.ts";
@@ -70,8 +71,8 @@ function changeName(change: EditImpactChange, draft: CampaignDefinition, stored:
   const trackName = track ? trackTitle(def, track) : "A track";
   if (change.stepId === null || !track) return trackName;
   const index = liveSteps(track).findIndex((s) => s.id === change.stepId);
-  const noun = STEP_NOUN[track.channel];
-  return `${trackName} · ${noun} ${index + 1}`;
+  // "Email track · Email 2"; a LinkedIn step by its role, "LinkedIn track · First message" (ticket 24b).
+  return `${trackName} · ${track.channel === "call" ? `${STEP_NOUN.call} ${index + 1}` : stepTitle({ branch: "main" }, track.channel, index + 1)}`;
 }
 
 /** What changed, in a few words. */

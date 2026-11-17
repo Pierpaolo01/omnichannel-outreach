@@ -42,10 +42,31 @@ export function stepNoun(track: Pick<TrackLabel, "branch">, channel: "email" | "
   }
 }
 
+/**
+ * A LinkedIn step's role by its number among the track's live steps, counted from 1 (ADR 0004 3.1): the engine's
+ * `linkedinStepKind` decides it by position, and a test holds the two equal at every position. Reads give a step's number
+ * (`stepNumber`), never its kind, so the screens name the step from it.
+ */
+export const LINKEDIN_STEP_KIND_AT = (number: number): "invite" | "first_message" | "follow_up" => (number <= 1 ? "invite" : number === 2 ? "first_message" : "follow_up");
+
+/**
+ * What one step is called in a title (ticket 24b): "Email 2", "Text 1", "Win-back email 1"; a LinkedIn step by its role,
+ * "Connection invite", "First message", "Follow-up 1" (CONTEXT.md's "connection invite"), "Win-back first message".
+ */
+export function stepTitle(track: Pick<TrackLabel, "branch">, channel: "email" | "sms" | "linkedin", number: number): string {
+  if (channel !== "linkedin") return `${stepNoun(track, channel)} ${number}`;
+  const kind = LINKEDIN_STEP_KIND_AT(number);
+  const role = kind === "invite" ? "Connection invite" : kind === "first_message" ? "First message" : `Follow-up ${number - 2}`;
+  return track.branch === "win_back" ? `Win-back ${role.charAt(0).toLowerCase()}${role.slice(1)}` : role;
+}
+
+/** A label's first word lower case mid-sentence, but "SMS" and "LinkedIn" keep their capitals. */
+export const lowerLabel = (label: string): string => (label.startsWith("SMS") || label.startsWith("LinkedIn") ? label : label.charAt(0).toLowerCase() + label.slice(1));
+
 /** A track's name inside a sentence: "the email track", "the SMS track", "email track 2", "SMS track 2", "the phone track", "the win-back SMS track". */
 export function trackPhrase(def: CampaignDefinition, track: Pick<TrackDefinition, "id" | "channel">): string {
   const { label, several } = trackLabel(def, track);
-  // "SMS" keeps its capitals; any other first word, "Win-back" included, is lower case mid-sentence (ticket 16b).
-  const lower = label.startsWith("SMS") ? label : label.charAt(0).toLowerCase() + label.slice(1);
+  // "SMS" and "LinkedIn" keep their capitals; any other first word, "Win-back" included, is lower case mid-sentence (ticket 16b).
+  const lower = lowerLabel(label);
   return several ? lower : `the ${lower}`;
 }

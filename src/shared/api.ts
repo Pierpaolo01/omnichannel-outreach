@@ -1113,6 +1113,15 @@ export interface SmsProviderStatus {
   readonly numbers: readonly { readonly id: string; readonly label: string; readonly healthy: boolean; readonly capacity: number; readonly usedToday: number }[];
 }
 
+/**
+ * GET /api/linkedin-provider (ADR 0004 1.1): `none` in the running application, where no LinkedIn session is connected;
+ * `test-simulator` only in tests, which drive a simulated session that is not a LinkedIn session.
+ */
+export interface LinkedinProviderStatus {
+  readonly provider: "none" | "test-simulator";
+  readonly message: string;
+}
+
 /** Why a sender inbox of the email provider cannot send now. */
 export type InboxHoldReasonApi = "sending_off" | "not_active" | "no_daily_limit" | "stale" | "invalid_report";
 

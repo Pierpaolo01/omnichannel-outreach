@@ -8,7 +8,7 @@
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
 import { clockTime } from "../time.ts";
 import type { CampaignPauseRead, ControlStepView, ControlView, LeadControlApi, OutreachStatus, RecordLead, StepWaitApi, StepWhenView } from "../../shared/api.ts";
-import { stepNoun } from "../../shared/track-label.ts";
+import { lowerLabel, stepTitle } from "../../shared/track-label.ts";
 import { callHoldSentence, dateIn, holdReasonClause, HOURS_CLOSED_PHRASE, listedForPhrase } from "../calls/wording.ts";
 import { dayLabel } from "../calls/callbackTime.ts";
 import { STATUS_GROUP_LABEL } from "../status.tsx";
@@ -54,7 +54,7 @@ const timeIn = (zone: string, iso: string): string => clockTime(zone, iso);
 /** "Tue 3 Nov at 09:00", in the user's zone. */
 export const whenIn = (userZone: string, iso: string): string => `${dateIn(userZone, iso)} at ${timeIn(userZone, iso)}`;
 
-const lower = (label: string): string => (label.startsWith("SMS") ? label : label.charAt(0).toLowerCase() + label.slice(1));
+const lower = lowerLabel;
 const capital = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
 
 /** A step a control names, inside a sentence: "email 2 of 3", "text 1 of 2 on SMS track 2", "win-back email 1 of 2", "the call". */
@@ -65,8 +65,12 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
       return `the call${on}`;
     case "email":
     case "sms":
-    case "linkedin":
-      return `${lower(stepNoun(step.track, step.channel))} ${step.number} of ${step.of}${on}`;
+      return `${lower(stepTitle(step.track, step.channel, step.number))} of ${step.of}${on}`;
+    // A LinkedIn step by its role (ticket 24b): "the first message", "follow-up 2 on LinkedIn track 2".
+    case "linkedin": {
+      const title = lower(stepTitle(step.track, step.channel, step.number));
+      return `${title.startsWith("follow-up") ? title : `the ${title}`}${on}`;
+    }
     default: {
       const unhandled: never = step.channel;
       throw new Error(`A step on a channel with no name: ${String(unhandled)}`);
