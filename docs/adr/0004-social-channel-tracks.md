@@ -707,17 +707,19 @@ Mutations, with seeds recorded in `linkedin-mutations.ts`:
 
 | Mutation | Invariant | Seed |
 |---|---|---|
-| an InMail sent is sent again | L18 | 0 |
+| an InMail sent is sent again | L18 | 5 (0 before 14.17) |
 | a switched-off InMail is still sent | L19 | 16 |
 | the InMail goes before the expiry | L20 | 0 |
 | an acceptance does not stop the InMail | L21 | 18 |
-| every session taken as eligible for InMail | L22 | 7 |
-| the first message goes after the InMail | L23 | 0 |
+| every session taken as eligible for InMail | L22 | 3 (7 before 14.17) |
+| the first message goes after the InMail | L23 | 5 (0 before 14.17) |
 | a refused InMail leaves the track running | L24 | 42 |
 | a switch-off does not reach a chosen InMail | L25 | 16 |
 | the replaced step is found among the live steps at the handover | L23 | 0 |
-| a restart restores a commitment without acquiring | L27 | 0 |
+| a restart restores a commitment without acquiring | L27 | 93 (0 before 14.17) |
 | the handover does not re-read the report | L22 | 18 |
+| a step moved before the replaced step is not sent (14.17) | L23 | 40 |
+| a holding settled unsent on a stopped lead is kept (14.17) | L26 | 7 |
 
 `LINKEDIN_FIXED_SEEDS` is now a greedy cover by cost of every behaviour the runs name over offsets 0 to 50, keeping 15, 46, 69, 73 and 93: 4, 8, 15, 16, 18, 30, 32, 42, 46, 50, 69, 73 and 93. With the new draws, 24 and 29 alone took over two minutes; the new set takes about two minutes in all. A switch-off while an InMail waits is reached by no offset from 0 to 50, so it is pinned by its example test ("switched off while the InMail is chosen and not yet handed over") and listed in `LINKEDIN_OTHER_FEATURES`.
 
@@ -748,6 +750,8 @@ It also emitted a behaviour name registered nowhere. **Every name a run can repo
 - a claim is not a handover: the InMail's read counts as handed only work with a handover time, so a claimed InMail never handed says it has not gone, and holds its credit only through the choice's holding;
 - LinkedIn's fixed session and the pacing from tracks with leads running on it carry over unchanged to the InMail, which goes from the track's own session;
 - the runs' draw "remove a started track before a lead's first claim" holds with the InMail fallback on, on the fixed seeds and offsets 0 to 50.
+
+The draws for B and C change offsets 0, 5, 7, 13, 14, 23, 32, 40, 44, 49, 84 and others of the contested runs; four InMail mutations killed only at 0 or 7 were searched again (the table in 14.16). B's reorder is drawn in contested runs without the removal, from a stream of its own, so the fifth stream's draws stay put.
 
 Both no-change digests are equal on `b4e2e8c` and here (the simulated provider's own `seq` field, a test double's, is left out of the first).
 

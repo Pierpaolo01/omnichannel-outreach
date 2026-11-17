@@ -479,6 +479,9 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const noStop = new Set<number>([...editWhenChosen.keys(), ...offWhenChosen]);
   // Set after `noStop`: the contest's stop and restart stay on campaign 0.
   if (removeWhenChosen) editWhenChosen.set(0, "remove");
+  // In half of the others, from a stream of its own, a follow-up moved in front of the first message once an InMail there is
+  // chosen (review bot on 56030c4, item B): those InMails go at the window's opening, past the edit.
+  else if (contested && random(seed * 19 + 41)() < 0.5) editWhenChosen.set(0, "reorder");
   const restarts: { id: string; at: number }[] = [];
   /** The record's own marks of unresolved work, by work key: when the run settled it, by the user's hand. */
   const markedWork = new Map<string, number>();
