@@ -59,10 +59,10 @@ export interface SubjectRecord {
   /** The subject's LinkedIn sender session, fixed at its first LinkedIn handover (ADR 0004 6), never reassigned. Absent: none. */
   readonly linkedinSender?: string | null;
   /**
-   * The subject's sender session on each message-request channel, fixed at its first handover there (ADR 0004 13.5), never
-   * reassigned. Absent: none on any.
+   * The sender session of each of the subject's message-request tracks, by track id, fixed at that track's first handover
+   * (ADR 0004 13.5; the review bot on 0922582), never reassigned and never read by another track. Absent: none yet.
    */
-  readonly socialSenders?: Readonly<Partial<Record<MessageRequestChannel, string>>>;
+  readonly socialSenders?: Readonly<Record<string, string>>;
   /**
    * The reply that stopped the lead: its channel and its time as the provider reported it. Stored in
    * the transaction that ends the lead as replied, and never recomputed from later replies, whatever

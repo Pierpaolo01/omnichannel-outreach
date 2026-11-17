@@ -351,7 +351,7 @@ function noSenderKnown(state: SubjectState, trackId: string, now: number): { kin
   // A social step: every session it may use allows none of its kind of action, the user's setting (ADR 0004 4, item 6; 13.7).
   if (isSocialChannel(channel)) return noAllowanceOnAnySession(state, trackId, now) ? { kind: "waits", why: "sending_capacity" } : null;
   if (channel !== "email" && channel !== "sms") return null;
-  const fixed = senderOf(state, channel);
+  const fixed = senderOf(state, channel, trackId);
   const ids = fixed !== null ? [fixed] : [...trackPoolOf(state, trackId)];
   const connected = ids.map((id) => state.accounts[id]).filter((a): a is AccountState => a !== undefined && a.channel === channel && a.problem !== "not_listed");
   if (connected.length === 0) return { kind: "waits", why: "sender_unavailable" };
@@ -597,7 +597,7 @@ export function handoverFailures(state: SubjectState, attempt: Attempt, account:
   // 15. The attempt's reservation exists: its provider work is unsettled.
   if (state.work.find((w) => w.key === attempt.idempotencyKey)?.settled !== null) failed.push(15);
   const channel = channelOf(state, attempt.trackId) ?? "email";
-  const fixed = senderOf(state, channel);
+  const fixed = senderOf(state, channel, attempt.trackId);
   if (account.channel !== channel || (fixed !== null ? fixed !== account.id : !trackPoolOf(state, attempt.trackId).includes(account.id))) failed.push(10);
   // 11. For SMS, the pair is unbound, or bound to this subject.
   // 11. For a channel of conversations (SMS, LinkedIn), the pair is unbound, or bound to this subject.
@@ -641,7 +641,7 @@ export function handOver(state: SubjectState, attempt: Attempt, account: Account
   const sms = channel === "sms";
   const binds = holdsConversations(channel) && !state.smsBindings.some((b) => b.sender === account.id && b.recipient === attempt.destination);
   const subject = isSocialChannel(channel)
-    ? withSocialSender(state, channel, account.id).subject
+    ? withSocialSender(state, channel, attempt.trackId, account.id).subject
     : sms
       ? { ...state.subject, smsSender: state.subject.smsSender ?? account.id }
       : { ...state.subject, emailSender: state.subject.emailSender ?? account.id };

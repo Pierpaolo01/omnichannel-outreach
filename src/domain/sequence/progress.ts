@@ -970,8 +970,12 @@ export function lacksThread(state: SubjectState, trackId: string, stepId: string
   return channelOf(state, trackId) === "email" && stepDef(state, trackId, stepId)?.threading === "continue_thread" && threadOf(state, trackId) === null;
 }
 
-/** The subject's fixed sender on a channel (1.3). */
-export function senderOf(state: SubjectState, channel: TrackChannel): string | null {
+/**
+ * The fixed sender of this track (1.3): per subject and channel for email, SMS and LinkedIn, whose senders come from one
+ * campaign-wide pool; per track on a message-request channel, whose tracks each choose their own (ADR 0004 13.5; the review
+ * bot on 0922582).
+ */
+export function senderOf(state: SubjectState, channel: TrackChannel, trackId: string): string | null {
   switch (channel) {
     case "linkedin":
       return linkedinSessionOf(state);
@@ -982,7 +986,7 @@ export function senderOf(state: SubjectState, channel: TrackChannel): string | n
     case "call":
       return null;
     default:
-      return messageSessionOf(state, channel);
+      return messageSessionOf(state, trackId);
   }
 }
 
@@ -1012,7 +1016,7 @@ function recipientOf(state: SubjectState, trackId: string): string | null {
  */
 export function candidatesFor(state: SubjectState, trackId: string): string[] {
   const channel = channelOf(state, trackId) ?? "email";
-  const fixed = senderOf(state, channel);
+  const fixed = senderOf(state, channel, trackId);
   const ids = fixed !== null ? [fixed] : [...trackPoolOf(state, trackId)];
   if (!holdsConversations(channel)) return ids;
   const recipient = recipientOf(state, trackId);
@@ -1059,7 +1063,7 @@ export function claimRefusal(state: SubjectState, item: { readonly trackId: stri
 
 /** The numbers an SMS track may text from: the subject's fixed sender, else its pool as the definition holds it now. */
 function usableNumbers(state: SubjectState, trackId: string, channel: ConversationChannel): readonly string[] {
-  const fixed = senderOf(state, channel);
+  const fixed = senderOf(state, channel, trackId);
   return fixed !== null ? [fixed] : trackPoolOf(state, trackId);
 }
 
@@ -1575,26 +1579,19 @@ export function linkedinSessionOf(state: SubjectState): string | null {
 }
 
 /**
- * The session a subject's message-request track goes from (ADR 0004 13.5): the session of its own conversation with one of
- * its accounts on the channel, else the one stored at its first handover there. Fixed once, never reassigned. Null before.
+ * The session a message-request track goes from (ADR 0004 13.5): the one stored at that track's own first handover, fixed
+ * then and never reassigned. Null before it: the track's first claim chooses from its own chosen sessions, never from another
+ * track's (the review bot on 0922582). Two tracks of one lead to one account from two sessions are two conversations (13.6).
  */
-export function messageSessionOf(state: SubjectState, channel: MessageRequestChannel): string | null {
-  const accounts = new Set(state.lead.details.filter((d) => d.channel === channel).map((d) => d.key));
-  for (const p of state.tracks) {
-    if (channelOf(state, p.trackId) !== channel) continue;
-    const key = recipientOf(state, p.trackId);
-    if (key !== null) accounts.add(key);
-  }
-  const stored = state.subject.socialSenders?.[channel] ?? null;
-  if (!rules.pairsByChannel) return state.smsBindings.find((b) => b.owner === state.subject.id)?.sender ?? stored;
-  return pairsOn(state, channel).find((b) => b.owner === state.subject.id && accounts.has(b.recipient))?.sender ?? stored;
+export function messageSessionOf(state: SubjectState, trackId: string): string | null {
+  return state.subject.socialSenders?.[trackId] ?? null;
 }
 
-/** The subject with its sender on a social channel fixed, if it had none (ADR 0004 6, 13.5): the one write of it. */
-export function withSocialSender(state: SubjectState, channel: SocialChannel, session: string): SubjectState {
+/** The subject with its sender on a social track fixed, if it had none (ADR 0004 6, 13.5): the one write of it. */
+export function withSocialSender(state: SubjectState, channel: SocialChannel, trackId: string, session: string): SubjectState {
   if (channel === "linkedin") return { ...state, subject: { ...state.subject, linkedinSender: state.subject.linkedinSender ?? session } };
-  if (state.subject.socialSenders?.[channel] !== undefined) return state;
-  return { ...state, subject: { ...state.subject, socialSenders: { ...state.subject.socialSenders, [channel]: session } } };
+  if (state.subject.socialSenders?.[trackId] !== undefined) return state;
+  return { ...state, subject: { ...state.subject, socialSenders: { ...state.subject.socialSenders, [trackId]: session } } };
 }
 
 /**

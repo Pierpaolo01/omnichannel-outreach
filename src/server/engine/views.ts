@@ -364,7 +364,7 @@ export function messageRequestTrackView(s: SubjectState, trackId: string, channe
   const first = track ? s.work.filter((w) => w.trackId === trackId && messageRequestStepKind(track, w.stepId) === "message_request" && w.firstHandedWall !== null) : [];
   const firstSent = first.some(isSent);
   const firstHanded = first.some((w) => w.settled === null);
-  const senderId = senderOf(s, channel);
+  const senderId = senderOf(s, channel, trackId);
   return {
     destination: account === null ? (p?.destinationDetailId?.startsWith("test:") ? "own" : null) : account.belongsTo === "person" ? "own" : "company",
     address: started?.value ?? null,

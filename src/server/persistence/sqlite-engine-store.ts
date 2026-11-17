@@ -1253,13 +1253,17 @@ export class SqliteEngineStore implements EngineStore {
       .flatMap((r) => (r["work_key"] == null ? [] : [{ subjectId: str(r, "subject_id"), trackId: str(r, "track_id"), workKey: str(r, "work_key"), progress: toTrack(r) }]));
   }
 
-  /** The windows of every live track on the account's channel whose pool includes it (ADR 0003 4.1's default gap). */
+  /**
+   * The windows of every live track on the account's channel whose pool includes it (ADR 0003 4.1's default gap). On a
+   * message-request channel, the tracks that chose this session, a removed one too, since a lead that started it still runs
+   * it (the review bot on 0922582); the pacing only, as a session no track serves still sends at the minute's gap.
+   */
   private windowsServedBy(accountId: string, channel: SendChannel): WindowRule[][] {
-    return this.sql("SELECT * FROM campaigns WHERE definition IS NOT NULL")
+    const definitions = this.sql("SELECT * FROM campaigns WHERE definition IS NOT NULL")
       .all()
-      .map((c) => this.definitionOf(c))
-      .filter((d) => poolOf(d, channel).includes(accountId))
-      .flatMap((d) => d.tracks.filter((t) => !t.removed && t.channel === channel).map((t) => [...t.window]));
+      .map((c) => this.definitionOf(c));
+    if (isMessageRequestChannel(channel)) return definitions.flatMap((d) => d.tracks.filter((t) => t.channel === channel && (t.senders ?? []).includes(accountId)).map((t) => [...t.window]));
+    return definitions.filter((d) => poolOf(d, channel).includes(accountId)).flatMap((d) => d.tracks.filter((t) => !t.removed && t.channel === channel).map((t) => [...t.window]));
   }
 
   /** Parsed definitions, by campaign and definition version: a version is never rewritten. */
@@ -1552,7 +1556,9 @@ export class SqliteEngineStore implements EngineStore {
       ...(e["sms_sender"] == null ? [] : [str(e, "sms_sender")]),
       ...poolOf(definition, "linkedin"),
       ...(e["linkedin_sender"] == null ? [] : [str(e, "linkedin_sender")]),
-      ...MESSAGE_REQUEST_CHANNELS.flatMap((ch) => poolOf(definition, ch)),
+      // Every track's chosen sessions, a removed track's too: a lead that started it before the edit still runs it (ADR 0003's
+      // running edits), and before its first claim nothing else names its sessions (the review bot on 0922582).
+      ...definition.tracks.flatMap((t) => t.senders ?? []),
       ...Object.values(socialSendersOf(strOrNull(e, "social_senders"))),
     ]);
     const accounts: Record<string, AccountState> = {};
@@ -2122,11 +2128,11 @@ function conversationChannelOf(raw: string | null): ConversationChannel {
   return isSocialChannel(raw) ? raw : "sms";
 }
 
-/** A subject's fixed senders on the message-request channels, as stored (`social_senders`). */
-function socialSendersOf(raw: string | null): Partial<Record<MessageRequestChannel, string>> {
+/** A subject's fixed senders on its message-request tracks, by track id, as stored (`social_senders`). */
+function socialSendersOf(raw: string | null): Record<string, string> {
   if (raw === null) return {};
   const parsed = JSON.parse(raw) as Record<string, unknown>;
-  return Object.fromEntries(MESSAGE_REQUEST_CHANNELS.flatMap((ch) => (typeof parsed[ch] === "string" ? [[ch, parsed[ch]]] : [])));
+  return Object.fromEntries(Object.entries(parsed).flatMap(([track, session]) => (typeof session === "string" ? [[track, session]] : [])));
 }
 
 /** A campaign's test accounts on the message-request channels, as stored (`campaigns.test_social`). */

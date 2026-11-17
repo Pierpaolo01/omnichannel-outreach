@@ -457,6 +457,52 @@ describe("the senders a track chooses (ADR 0004 13.5; the review of f2824d4, ite
     expect(delivered(PAT_OWN)).toHaveLength(2);
   });
 
+  describe("each track sends from its own choice, fixed at its own first handover, never from another track's (the review bot on 0922582)", () => {
+    const S2 = "ig-session-2";
+    const id = (s: string) => socialAccountId("instagram", s);
+    /** Pat alone (their own account), two Instagram tracks with the given choices; B after A or beside it. */
+    const twoTracks = async (a: string[], b: string[], bStart: "after" | "beside", perDay: Record<string, number> = {}) => {
+      const { h } = await world({ sessions: [session(S1), session(S2)], people: [PEOPLE[0]!], businesses: [BUSINESSES[0]!] });
+      for (const [s, n] of Object.entries(perDay)) expect((await h.request("PUT", `/api/sender-accounts/${id(s)}/allowances`, { invitesPerDay: 0, messagesPerDay: n, notesPerMonth: 0 })).status).toBe(200);
+      const { campaign: c } = await h.createCampaign("Two tracks", { businesses: [BUSINESSES[0]!], people: [PEOPLE[0]!] });
+      const A = { ...instagram("a", [step("a1", 0, "From A.")]), senders: a.map(id) };
+      const B = { ...instagram("b", [step("b1", 0, "From B.")], bStart === "after" ? { kind: "after", trackId: "a", delayDays: 0 } : { kind: "entry" }), senders: b.map(id) };
+      await h.defineSequence(c.id, definition([A, B]));
+      h.clock = MONDAY_9;
+      expect((await h.launch(c.id)).status).toBe(200);
+      await h.advanceTo(MONDAY_9 + 2 * DAY);
+      const by = (track: string) => h.instagram.handoverLog.filter((x) => x.trackId === track).map((x) => x.sender);
+      return { h, by };
+    };
+
+    test("disjoint choices: A from its session, B, after A, from its own; B never from A's", async () => {
+      const { by } = await twoTracks([S1], [S2], "after");
+      expect([by("a"), by("b")]).toEqual([[S1], [S2]]);
+    });
+
+    test("overlapping choices: each from a session it chose; B never from the one only A chose", async () => {
+      const { by } = await twoTracks([S1, S2], [S2], "beside");
+      expect(by("b")).toEqual([S2]);
+      expect([S1, S2]).toContain(by("a")[0]);
+    });
+
+    test("the same choice: both from it, one conversation with the account from that session", async () => {
+      const { by, h } = await twoTracks([S1], [S1], "beside");
+      expect([by("a"), by("b")]).toEqual([[S1], [S1]]);
+      const db = (h.store.engine as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+      expect(db.prepare("SELECT sender_number, recipient_key FROM sms_bindings WHERE channel = 'instagram'").all().map((r) => `${String(r["sender_number"])} ${String(r["recipient_key"])}`)).toEqual([`${id(S1)} ${PAT_OWN}`]);
+    });
+
+    test("one track's session has no allowance while the other's has room: neither borrows the other's", async () => {
+      const { by, h } = await twoTracks([S1], [S2], "beside", { [S1]: 0 });
+      expect([by("a"), by("b")]).toEqual([[], [S2]]);
+      // A waits for its own session, said as no allowance, never sent from B's.
+      const lead = (await h.request<LeadSearchResult>("GET", "/api/leads")).body.rows[0]!.enrollments[0]!.id;
+      const a = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${lead}`)).body.tracks.find((t) => t.trackId === "a");
+      expect(a?.nextStep?.when).toMatchObject({ kind: "waits", why: "no_allowance" });
+    });
+  });
+
   test("a track with no session chosen is blocker 3, said as no sender chosen, though sessions are connected", async () => {
     const { h } = await world();
     const { campaign: c } = await h.createCampaign("None chosen", { businesses: BUSINESSES, people: PEOPLE });
