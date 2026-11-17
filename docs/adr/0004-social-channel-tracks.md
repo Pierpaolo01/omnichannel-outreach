@@ -1,7 +1,7 @@
 # 0004. Social channel tracks: LinkedIn, then Instagram and Facebook
 
 - **Date:** 2026-11-16.
-- **Status:** Proposed. Written by the ticket 24 implementer before the code (delivery workflow, "Design first"). The council reviews it with part a's pull request.
+- **Status:** Proposed. Written by the ticket 24 implementer before the code (delivery workflow, "Design first"). The council reviews it with part a's pull request. Section 13 (Instagram, and Facebook as its second instance) added by the ticket 25 implementer on 17 November 2026, before its code.
 - **Consumers:** tickets [24](https://github.com/Pierpaolo01/omnichannel-outreach/issues/24) (LinkedIn, this design worked in full), [25](https://github.com/Pierpaolo01/omnichannel-outreach/issues/25) (Instagram), [26](https://github.com/Pierpaolo01/omnichannel-outreach/issues/26) (Facebook) and [27](https://github.com/Pierpaolo01/omnichannel-outreach/issues/27) (the InMail fallback, which attaches at one point named in 4.4).
 - **Builds on:** [ADR 0003](0003-sequence-engine.md), every rule of which a social track keeps unless this ADR says otherwise: one definition, lead time and stored deadlines, the claim and the handover transaction with its predicates, the attempt table (5.3), capacity counted per provider work, pacing at every send call, priority (4.3), quiesce, holds, the reads that say when, test runs as subjects, and the generated-run discipline. [ADR 0002](0002-email-through-instantly.md) is the model for how a provider limitation is recorded.
 - **Product source:** [the social decision](https://github.com/Pierpaolo01/omnichannel-outreach/issues/9#issuecomment-6823218555), quoted in each ticket. The [research](https://github.com/Pierpaolo01/omnichannel-outreach/blob/789af21/docs/research/social-first-contact.md) states the platforms' documented behaviour. Everything else is a factory decision and says so.
@@ -298,6 +298,107 @@ Verified with the simulated provider only (no LinkedIn session is connected, no 
 
 Nothing presents LinkedIn as a working integration: the running app's port lists no session, so a LinkedIn track cannot launch (blocker 3), and the simulated sessions exist only in tests.
 
+## 13. Message-request channels: Instagram (ticket 25), then Facebook (ticket 26)
+
+Written by the ticket 25 implementer before the code, on 17 November 2026. Instagram is worked through here; Facebook is the same section with one line of difference in each table that has a "Facebook" column, and nothing else. Every rule of sections 1 to 10 that this section does not name holds unchanged; every rule of ADR 0003 holds as in section 1.
+
+### 13.1 The rule in one paragraph
+
+A **message-request channel** is a social channel whose track is messages only: a text-only first message, which reaches someone who does not follow the sender as a **message request**, then follow-ups after their waits. There is no invitation, no acceptance gate and no pre-send relation check. The track goes to the decision maker's own account from the CSV when there is a usable one, else to the company's. Its sender is a logged-in browser session of the user's, a personal profile or a business account, with one daily **message allowance** the user sets. A conversation between a session and an account is owned by the first subject known to have reached it, with its channel stored, by the machinery of section 6 and ADR 0003 Q7. Replies are marked by the user. Nothing here makes a real session act: the port is built and verified against a simulated provider, the running application registers a port that lists no session, and an Instagram track therefore always meets launch blocker 3.
+
+### 13.2 One thing, two instances
+
+The factory builds one shared piece, parameterised by channel through exhaustive mappings (a `never` default on each), so a new channel is a compile error until it has its entry:
+
+| What | Shared piece | Instagram | Facebook (ticket 26) |
+| - | - | - | - |
+| The channel | `MessageRequestChannel` in `src/domain/social-channels.ts` | `"instagram"` | `"facebook"` |
+| Its name in sentences | `SOCIAL_CHANNELS[channel].name` | Instagram | Facebook |
+| The account normaliser | `SOCIAL_CHANNELS[channel].accountKey` | `instagramAccountKey` (13.4) | its own, by the same contract |
+| The CSV columns | `SOCIAL_CHANNELS[channel].columns` | people `instagram` (Q43), businesses `instagram` | people `facebook`, businesses `facebook` |
+| The account id prefix at the port boundary | `namespacedSocialPort(channel, port)` | `instagram:` | `facebook:` |
+| The pool in the definition | `poolOf(def, channel)` via `POOL_FIELD` | `instagramPool` | `facebookPool` |
+| The store's channel lists | migration 26's `addChannel(db, channel)` | migration 26 | its own migration, one call |
+
+Everything else in this section is written once for every message-request channel: the step kinds, the validator, the destination rule, the allowances, the reads, the reply mark, the test contact, the measures, the simulated provider (`test/support/fake-social-port.ts`, scripted per account) and the generated runs (`test/support/generated-message-requests.ts`, drawn per channel). LinkedIn keeps its own files where it differs (the invite, the acceptance, the note, the connection check) and shares the rest: the conversation machinery, the allowance mechanism, the reply mark, the namespacing and the unconnected port.
+
+### 13.3 The track
+
+- **Definition.** `channel: "instagram"`, ADR 0003 1.1's fields and nothing else: no `acceptWaitDays`, no subject on any step. Its steps by position among its live steps (`messageRequestStepKind`, one function every reader calls): the first is the **message request**, the rest **follow-ups**, each with its wait from the message before. All of them are the action `message` (`socialActionOf`). The validator refuses a track with no live step, a subject on a step and `acceptWaitDays`; launch blocker 1 (empty copy) applies to every step, the first included. Text only: a step has a body and nothing else, so no media can be defined.
+- **What the engine knows after the first message:** that the session sent it (observed, or found by a lookup), that it was refused, or nothing yet (handed over, its answer not known). It knows nothing about whether the request was accepted, seen, read or declined, and nothing is promised about it: the research says a recipient may have requests turned off, and the platform says nothing to the sender. Every read says "sent" and only that; no sentence says delivered, received, accepted or read.
+- **Transitions:** those of any track (ADR 0003 2.4, 2.6). A follow-up's due time resolves from the send before it, as on any track; there is no gate. A message refused `invalid_destination` marks the account bad (13.4) and finishes the track `failed_bad_destination`. A message refused `not_allowed` (the platform does not let this session message this account: requests turned off, or a sender that cannot start a conversation there) finishes the track `failed_bad_destination` with the reason "not allowed", the account **not** marked bad (it is still theirs; Q44), and the lead's other tracks continue. `rate_limited` is an account-level wait (ADR 0003 2.4). A lost answer is settled by `lookup` (section 2.2): the session reads the thread.
+
+### 13.4 The destination
+
+- **Which columns.** The decision maker's own account from the people file's `instagram` column, **when the file has one**: the verified people schema (#11) has no Instagram column, so today no person has an own account and every track goes to the company's (Q43). The company's account from the businesses file's `instagram` column, which the verified schema has (eight of twelve rows in the sample). The import stores both as given (`people.instagram_url`, `companies.instagram_url`, migration 26); companies imported before it are filled from the stored source row.
+- **The one normaliser**, `instagramAccountKey` (`src/domain/social-account.ts`): trimmed; `http` or `https`; host `instagram.com`, `www.instagram.com` or `m.instagram.com`; a path of exactly one segment, the username, with an optional trailing slash; query and fragment dropped; the username lower-cased, 1 to 30 characters of letters, digits, `.` and `_`, not starting or ending with `.`, and not a reserved first segment of the site (`p`, `reel`, `reels`, `stories`, `explore`, `accounts`, `direct`, `tv`, `about`, `developer`, `legal`, `web`). The key is `https://www.instagram.com/<username>`. Anything else (empty, a post, a reel, another host, a handle with no URL) is **not an account** and reads as missing. The decision says profile URLs only, so a bare `@handle` is not read.
+- **Usable** means the normaliser gives a key and the key is not marked bad. **The destination rule:** for a decision-maker lead, their own usable account, else their company's usable account; for a company lead, the company's usable account. It is one function, `messageRequestDestination` (`destinationFor` for these channels), over the lead's details: the own account is the newer detail, the company's the older, and the newest one not bad wins.
+- **Missing** means neither is usable: the track starts and finishes `skipped_missing_channel`, its cause recorded when it finishes (`skipCause`, ticket 24b): `no_profile` (no account in either file), `not_a_member_profile` (an address that is not an account), `marked_bad`, `replaced` or `removed_by_import`. The stored values are migration 24's, read per channel ("no Instagram account in the import"); the names are LinkedIn's and mean the same here (renaming them is a follow-up with the `sms_*` names).
+- **An account marked bad.** A refusal `invalid_destination` marks the key bad (`social_destination_marks`, by channel and key; ADR 0001: never cleared) and finishes the track. A key marked bad is no destination for any later track: a lead whose own account is marked bad and whose company has a usable one goes to the company's.
+- **A re-import that changes it.** The detail a track starts with is fixed at its start (ADR 0003 2.4). A re-import that gives the person or the company another address gives a new key and a new detail id; the old one is no longer theirs, and a track that has not finished is skipped as missing (`replaced`, or `removed_by_import` when the cell is now empty), as section 5 says for LinkedIn. A track not started yet starts with the new one.
+- **In the engine** the account is a `LeadDetail` with channel `instagram`, id `instagram:p:<person id>:<key>` for an own account and `instagram:c:<company id>:<key>` for the company's (a person lead holds both, the company's at the lower order); a test run's is `test:<run>:instagram`. The destination triggers name these ids (migration 26).
+
+### 13.5 The sender
+
+- **The choice.** The campaign's `instagramPool` lists the sessions Instagram tracks may use, chosen by the user in the editor as for every channel; a track goes from one session of it. Each session is reported by the port with its **kind**, `personal` or `business` (a business or creator account, or a Facebook Page for ticket 26), stored on the account (`sender_accounts.social_kind`) and shown wherever a session is named. The pool is the campaign's, as for email, SMS and LinkedIn: two Instagram tracks of one campaign share it.
+- **What the engine does with the kind: nothing.** The research documents that a personal account can start a conversation with someone who does not follow it (a request), that a recipient can turn requests off, and that the official API needs the person to message the business first; it does not document whether a business account messaging a person, or a personal account messaging a business account, is treated differently in the native interface. So the engine assumes nothing: a session of either kind may be chosen for any account, the platform's refusal is reported (`not_allowed`, 13.3), and the track then fails for that lead with the cause stored. Q45 asks the principal whether a kind should restrict the choice.
+- **Fixed once.** The track's sender is the session of the subject's own pair on the channel, else the session stored at its first handover (`socialSenders`, one JSON column for every message-request channel); never reassigned (ADR 0003 5.2).
+
+### 13.6 Ownership
+
+The conversation between a session and an account is owned by the first subject known to have reached it, by the existing rule and machinery (section 6, ADR 0003 Q7): `holdsConversations` names the channel; the pair is taken in the handover's write with its channel stored (`sms_bindings.channel`); a second subject's track is skipped as `skipped_conversation_taken` naming the owner, held as `sms_conversation_unsettled` while the owner's first message is not known sent, and released when nothing went. Nothing reads conversations across channels (`pairsOn`), and every cache uses the per-destination versions: an Instagram key is a destination like a mobile or a profile.
+
+- **Two campaigns, one account, one session.** The first campaign to reach the account owns it; the second campaign's track for that lead is skipped, naming the first, or held while the first's message is unknown.
+- **A person's own account and their company's account** are two destinations: two pairs.
+- **Two decision makers of one company with no own account** both go to the company's account: the first owns the pair, the second is skipped as taken on that session, or goes from another session of the pool if one is free (as Q42 for LinkedIn; Q46 asks whether a company's account should hear from only one of the user's sessions).
+
+### 13.7 Allowances, capacity, priority, windows, interruption
+
+The engine's rules, unchanged (section 6, ADR 0003 sections 4 and "Ticket 20a"): capacity per session shared across campaigns, follow-ups before first contacts, oldest due first, nothing dropped, overflow to the next reset day; pacing at every send call; the window in the prospect's zone; a step that falls due while the application is off waits for the next sending window. A session has **one** allowance, **messages per day**, the user's number with no default, stored in `social_allowances` (its invite and note columns are zero for these channels and never read). A session whose allowance is zero or unset has no room: a step whose every eligible session (`eligibleSessions`) allows none reads `no_allowance`, never "full today" and never a time.
+
+### 13.8 Replies, test runs, measures
+
+- **The reply mark** is section 7's control with its channel: `POST /api/enrollments/:id/replies` and `POST /api/test-runs/:id/replies` take `channel` among the social channels, and the control's label and request (`CONTROL_LABEL.mark_replied`, `controlRequestOf`) carry it. It is allowed when something of this subject reached the person on **that** channel in this campaign (a message known sent, or handed over and not yet known), and refused otherwise ("Nothing has been sent to them on Instagram in this campaign"). Its effect is `applyReply` with that channel and `<channel>:<request id>`: the lead ends `replied`, in this campaign only. Activity says "You marked them replied on Instagram".
+- **Test runs.** The campaign's test contacts gain the user's own test Instagram account (`campaigns.test_instagram`), read by the normaliser and refused when any person's or company's record holds the same key. A test run's Instagram track sends to it from the real sender session, with ADR 0003 3.6's minute waits. No acceptance is needed, so nothing waits on the user.
+- **Measures** per channel: **messages sent** (message attempts sent), **failed** (failed results on the channel's steps), **replies marked** (leads whose first reply is on the channel), test share counted apart as before. Nothing claims delivery or reading.
+
+### 13.9 Invariants (M1 to M10)
+
+Asserted after every event by the message-request generated runs (`src/server/sequence-runs-message-requests.test.ts`), on the simulated provider's own logs where they say so, for each drawn channel:
+
+1. **M1 Once.** Each step is delivered at most once; a lost answer is never followed by a second handover of the same step (a non-retryable transport).
+2. **M2 The right account.** Every message goes to the destination the record derives at the track's start: the decision maker's own usable account, else the company's; never to a key marked bad before the handover; none for a lead with neither, whose track is skipped with the cause the record derives.
+3. **M3 Nothing after a mark or a stop.** After the user's mark is accepted, or the lead is stopped, nothing more is handed over for that subject until a restart after it.
+4. **M4 Allowances.** On the delivery log, per session and reset day, messages never exceed the session's allowance; a session at zero sends nothing, and a step whose every eligible session is at zero reads `no_allowance`.
+5. **M5 No pair moves.** Every message to a (session, account) belongs to the first subject that reached it, until that subject's work there settled with nothing sent.
+6. **M6 A reply is the reached subject's.** A mark is accepted only on a subject the record knows reached the person on that channel (delivered, or handed over and untold).
+7. **M7 Nothing pending for ever.** After the drain, every pending step of a running lead has a due time or a hold the record derives itself, and none has been due for days with nothing holding it.
+8. **M8 Its own channel, its own sender.** Every handover is on its own track's channel, from a session of that channel in the campaign's pool at that instant, and after the first from the session of its own pair.
+9. **M9 The other tracks carry on.** A message-request track that finishes for any reason changes no other track's progress but by releasing what starts after it; an SMS or LinkedIn track beside it runs as the record predicts on its own.
+10. **M10 Priority at a contested slot.** When a session's slot is contested, a follow-up to a touched lead goes before a first message to a new one, then the oldest due.
+
+ADR 0003's invariants 1 to 14 and 18 to 29 hold for these steps too; **29** (a fresh engine on the same store at the same instant finds nothing to change or hand over) is asserted after every tick in the search and every 10th tick in the fixed seeds, as for LinkedIn.
+
+**The generated runs** (`test/support/generated-message-requests.ts`, own record, own mutations in `test/support/message-request-mutations.ts`; the record imports nothing from `src/domain/sequence/`): one or two campaigns sharing one to three Instagram sessions of both kinds; an Instagram track of one to three messages and, in half the runs, an SMS or a LinkedIn track beside it or after it; people with an own account, with only a company account, with garbage, with none, and company leads; two decision makers of one company sharing its account; allowances from 0 to 4; real windows and the three zones; the provider scripted per account (sends, refuses `invalid_destination`, refuses `not_allowed`, refuses for a limit, loses an answer); events: clock advances, lead and campaign pauses, stops and restarts, skips, the user's reply mark (accepted and refused), the laptop off, a crash between a handover's commit and its call, a session signing out, running edits (a message inserted, removed, reordered), pool edits, a re-import that changes an account, and the user's mark of unresolved work. **Mutations**, one per invariant, each killed by a recorded seed in `pnpm check`: a lost answer handed over again (M1); the company's account preferred to the person's own (M2); a mark recorded without ending the lead (M3); one bucket for every session (M4); a taken pair ignored (M5); a mark accepted with nothing reached (M6); a taken pair held, not skipped (M7); the pair's session not fixed (M8); a finished Instagram track ending the lead (M9); priority by due time alone (M10); and the conversations' version ignoring an Instagram pair (29).
+
+### 13.10 Nothing changes for email, SMS, calls or LinkedIn
+
+Every new branch is taken only for a message-request channel. The evidence is `scripts/no-social-digest.ts` extended with a LinkedIn track: one scripted world of email, SMS, phone and LinkedIn tracks with no Instagram track, run on the integration tip and on this branch, gives identical provider handover and delivery logs, call lists and outcomes; its digest is in the pull request.
+
+### 13.11 Questions for the principal
+
+Numbered on from Q42. Each says what is built meanwhile.
+
+- **Q43. Where a decision maker's own Instagram account comes from.** The verified people file has no Instagram column, only the businesses file. *Built:* an `instagram` column of the people file is read when a file has one; otherwise every Instagram track goes to the company's account. The people file's `source_urls` (pages where the person was found) are not read as their account. Should the scraper add a person column, or should the company's account be the only Instagram destination?
+- **Q44. A message the platform does not allow.** A recipient can turn requests off. *Built:* the platform's refusal (`not_allowed`) fails the track for that lead with the reason shown, the account not marked bad, the lead's other tracks continuing. The alternative is to try again from another session of the pool.
+- **Q45. Which kind of sender may message which kind of account.** *Built:* any session of the pool, of either kind, for any account; the platform's refusal is reported (Q44). If the principal wants, a business session could be kept for company accounts and a personal one for people: one rule in the account choice.
+- **Q46. One company account, several decision makers.** With no own accounts, every decision maker of a company goes to the company's account. *Built:* one conversation per (session, account), so a second lead of the same company goes from another free session of the pool, or is skipped as taken. Should a company's account hear from at most one of the user's sessions, and then only once per campaign?
+- **Q47. The daily allowance's default.** *Built:* none; an unset allowance is no room, read as "no allowance", until the user sets a number. No Instagram or Facebook limit is invented.
+
+### 13.12 What is unverified, and why
+
+As section 12 for LinkedIn: no Instagram session is connected and no test account is designated (#28), so everything is verified on the simulated provider only. Unverified: that a session can send each message and how it answers (sent, refused, unknown), and whether any action is safely retryable; whether a sent request is visible to the recipient; the platform's own limits on the user's accounts; which kinds of sender can message which accounts (Q45); the test run on the user's own account; and whether a session survives the laptop sleeping.
+
 ## The review of `194fc44` (council, review bot and verifier, 16 November 2026)
 
 Fifteen items, each reproduced first as a failing test through HTTP (`src/server/engine/linkedin-review.test.ts`) unless it says otherwise.
@@ -454,5 +555,5 @@ Fifteen items, each reproduced as a failing test first (`src/server/linkedin-scr
 
 - **ADR 0003.** `TrackChannel` and the account channel gain `linkedin`; `FinishReason` gains `invite_not_accepted`; `StepWait` gains `awaiting_acceptance`; a reply's channel gains `linkedin` (a mark only). Its section 11's "Social tracks" line is replaced by this ADR. Its question numbers continue here.
 - **ADR 0001.** A LinkedIn profile is a contact fact of a person read from the import, not a `contact_details` row: it is never matched on, merged or searched. Its bad mark is kept by key.
-- **Tickets 25 and 26** add their channel to the same unions, their destination rule (the decision maker's account, else the company's) to 5, and a message-only track to 3.1 (every step a `message`, the first a message request); they reuse 1, 2, 4's allowance mechanism without the note, 6, 7, 8 and 10 unchanged.
+- **Tickets 25 and 26** are section 13: one shared message-request channel, with Instagram worked through and Facebook one entry in each of 13.2's mappings.
 - **Ticket 27** attaches at `inviteExpired` (3.5).
