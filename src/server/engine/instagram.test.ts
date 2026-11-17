@@ -304,7 +304,7 @@ describe("test runs to the user's own account (ADR 0004 13.8)", () => {
     expect(bad.status).toBe(400);
     expect(JSON.stringify(bad.body)).toContain("Give your Instagram account's address, such as https://www.instagram.com/your.name.");
     const saved = await h.request<{ contacts: { social: { instagram: { address: string | null } } }; definitionVersion: number }>("PUT", `/api/campaigns/${c.id}/test-contacts`, { email: "", mobile: "", instagram: OWN_TEST });
-    expect(saved.status).toBe(200);
+    expect([saved.status, JSON.stringify(saved.body).slice(0, 300)]).toEqual([200, expect.anything()]);
     expect(saved.body.contacts.social.instagram.address).toBe(OWN_TEST);
     const run = await h.request<{ run: { id: string } }>("POST", `/api/campaigns/${c.id}/test-runs`, { requestId: "run-1", renderAs: c.lead("Pat Oneil"), expect: { definitionVersion: saved.body.definitionVersion } });
     expect(run.status).toBe(200);
@@ -342,5 +342,62 @@ describe("the import (ADR 0004 13.4)", () => {
     const track = (await progress(c.lead("Pat Oneil"))).tracks.find((t) => t.trackId === "ig");
     expect(track).toMatchObject({ finishReason: "skipped_missing_channel", messageRequest: { skipCause: "replaced" } });
     expect(delivered("https://www.instagram.com/example_pat.new")).toEqual([]);
+  });
+});
+
+describe("the senders a track chooses (ADR 0004 13.5; the review of f2824d4, item 2)", () => {
+  const S2 = "ig-session-2";
+  const id1 = socialAccountId("instagram", S1);
+  const id2 = socialAccountId("instagram", S2);
+  const senders = (v: { definition: CampaignDefinition }, track = "ig") => v.definition.tracks.find((t) => t.id === track)?.senders;
+  type View = { definition: CampaignDefinition; definitionVersion: number; launch: { blockers: { kind: string; noneChosen?: boolean }[] }; accounts: { id: string; healthy: boolean; socialKind?: string | null }[] };
+
+  test("a chosen pool survives a save, a reload, a second tab saving first, and sessions connecting or disconnecting; a new session is never added by itself", async () => {
+    const { h } = await world({ sessions: [session(S1), session(S2, { kind: "personal" })] });
+    const { campaign: c } = await h.createCampaign("Chosen senders", { businesses: BUSINESSES, people: PEOPLE });
+    const url = `/api/campaigns/${c.id}/sequence`;
+    const get = async () => (await h.request<View>("GET", url)).body;
+    // Tab A chooses session 2 only on one track and both on another; the save keeps each track's own choice.
+    const tracks = [{ ...instagram("ig", three()), senders: [id2] }, { ...instagram("ig2", [step("n1", 0, "Hello again.")], { kind: "after", trackId: "ig", delayDays: 0 }), senders: [id1, id2] }];
+    const saved = await h.request<View>("PUT", url, { ...definition(tracks), save: { session: "A", seq: 1, base: 0 } });
+    expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+    expect([senders(saved.body), senders(saved.body, "ig2")]).toEqual([[id2], [id1, id2]]);
+    // A reload reads the same choice, and the sessions with their kinds.
+    const loaded = await get();
+    expect([senders(loaded), senders(loaded, "ig2")]).toEqual([[id2], [id1, id2]]);
+    expect(loaded.accounts.filter((a) => a.id.startsWith("instagram:")).map((a) => [a.id, a.socialKind])).toEqual([[id1, "business"], [id2, "personal"]]);
+    // Tab B, loaded at revision 1, edits a message and saves first: it carries the choice it loaded.
+    const fromB = { ...loaded.definition, tracks: loaded.definition.tracks.map((t) => (t.id === "ig" ? { ...t, steps: t.steps.map((s, i) => (i === 0 ? { ...s, body: "Edited in tab B." } : s)) } : t)) };
+    expect((await h.request("PUT", url, { ...fromB, save: { session: "B", seq: 1, base: loaded.definitionVersion } })).status).toBe(200);
+    // Tab A, still on revision 1, saves an empty choice: refused, so its stale page cannot clear what is stored.
+    const stale = await h.request("PUT", url, { ...definition([{ ...tracks[0]!, senders: [] }, tracks[1]!]), save: { session: "A", seq: 2, base: 1 } });
+    expect(stale.status).toBe(409);
+    expect([senders(await get()), senders(await get(), "ig2")]).toEqual([[id2], [id1, id2]]);
+    // A third session connects: it is listed, but no track gains it.
+    h.instagram.sessions.set("ig-session-3", session("ig-session-3"));
+    await h.tick();
+    const withThird = await get();
+    expect(withThird.accounts.some((a) => a.id === socialAccountId("instagram", "ig-session-3"))).toBe(true);
+    expect([senders(withThird), senders(withThird, "ig2")]).toEqual([[id2], [id1, id2]]);
+    // Session 2 disconnects: the choice keeps it, still listed, ticked and said as unable to send, and the track
+    // whose only choice it was meets blocker 3 by name; the other track still has session 1.
+    h.instagram.sessions.set(S2, session(S2, { listed: false }));
+    await h.tick();
+    const without = await get();
+    expect([senders(without), senders(without, "ig2")]).toEqual([[id2], [id1, id2]]);
+    expect(without.accounts.find((a) => a.id === id2)?.healthy).toBe(false);
+    expect(without.launch.blockers.map((b) => [b.kind, b.noneChosen ?? false])).toEqual([["no_sender", false]]);
+    // It reconnects: the track can send again, from the session it chose.
+    h.instagram.sessions.set(S2, session(S2, { kind: "personal" }));
+    await h.tick();
+    expect((await get()).launch.blockers).toEqual([]);
+  });
+
+  test("a track with no session chosen is blocker 3, said as no sender chosen, though sessions are connected", async () => {
+    const { h } = await world();
+    const { campaign: c } = await h.createCampaign("None chosen", { businesses: BUSINESSES, people: PEOPLE });
+    const view = await h.defineSequence(c.id, definition([{ ...instagram("ig", three()), senders: [] }]));
+    expect(view.launch.blockers.map((b) => [b.kind, "noneChosen" in b ? b.noneChosen : undefined, b.message])).toEqual([["no_sender", true, "The Instagram track has no sender session chosen."]]);
+    expect(view.launch.canLaunch).toBe(false);
   });
 });

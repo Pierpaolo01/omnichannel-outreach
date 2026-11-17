@@ -82,3 +82,22 @@ describe("migration 25 on the integration tip's own database", () => {
     expect(schema()).toEqual(once);
   });
 });
+
+describe("migration numbers across builds (the review of f2824d4, item 1)", () => {
+  test("a database at the tip's version, migrated by this branch and then by a later build with one more migration, runs every migration once and in order", () => {
+    const db = tipDatabase();
+    const applied: number[] = [];
+    const counting = MIGRATIONS.map((m) => ({ ...m, data: (d: DatabaseSync) => (applied.push(m.version), m.data?.(d)) }));
+    migrate(db, () => "2026-11-17T09:00:00.000Z", counting);
+    const later = { version: MIGRATIONS.length + 1, name: "a later build's migration", sql: "CREATE TABLE later_build_marker (id INTEGER PRIMARY KEY);", data: () => void applied.push(MIGRATIONS.length + 1) };
+    migrate(db, () => "2026-11-18T09:00:00.000Z", [...counting, later]);
+    // This branch's migrations once each, then the later build's, and the later one's change is in the schema.
+    expect(applied).toEqual([...MIGRATIONS.filter((m) => m.version > 24).map((m) => m.version), MIGRATIONS.length + 1]);
+    expect(db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => Number(r["version"]))).toEqual(Array.from({ length: MIGRATIONS.length + 1 }, (_, i) => i + 1));
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'later_build_marker'").get()).toEqual({ name: "later_build_marker" });
+  });
+
+  test("no migration is empty: a number is never reserved by one that changes nothing (delivery workflow, \"Standing checks\")", () => {
+    expect(MIGRATIONS.filter((m) => m.sql.trim() === "" && m.data === undefined).map((m) => m.version)).toEqual([]);
+  });
+});
