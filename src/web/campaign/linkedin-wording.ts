@@ -114,6 +114,8 @@ export const SKIP_CAUSE: Readonly<Record<NonNullable<LinkedinTrackView["skipCaus
   not_a_member_profile: "the LinkedIn address in the import isn’t a member profile (a company page, for one), so it can’t receive an invite",
   company_lead: "a company lead has no member profile to invite",
   replaced: "a later import gave them a different LinkedIn profile, so the one this track started with is no longer theirs",
+  removed_by_import: "a later import no longer has the LinkedIn profile this track started with",
+  added_after_start: "they had no usable LinkedIn profile when this track started; one was imported later",
   marked_bad: "their LinkedIn profile is marked unreachable",
 };
 
@@ -157,3 +159,17 @@ export const MARK_REPLIED = {
   preview: "Mark them replied on LinkedIn? Their outreach in this campaign stops, as any reply stops it, and nothing more goes to them here. Carry on the conversation on LinkedIn.",
   done: "Marked replied on LinkedIn. Carry on the conversation on LinkedIn.",
 } as const;
+
+/**
+ * What a test run's LinkedIn reply mark is for, by what the run's read records as gone (review bot on 82cf16d): a message
+ * recorded sent; else the invitation recorded sent (`LinkedinTrackView.invite`, the field the record's sentences read);
+ * else work handed over and not yet known to have gone, said as that. Never "gone" without the stored fact.
+ */
+export function testReplyHelper(run: { readonly steps: readonly { readonly trackId: string; readonly channel: string; readonly state: string }[]; readonly linkedinTracks: readonly { readonly view: Pick<LinkedinTrackView, "invite"> }[] }): string {
+  // A LinkedIn message recorded sent: a sent row of a LinkedIn track other than its first, the invitation.
+  const message = run.steps.some((r, i, all) => r.channel === "linkedin" && r.state === "sent" && all.findIndex((x) => x.trackId === r.trackId) !== i);
+  if (message) return "Once you have answered a test message on your test profile.";
+  const invites = run.linkedinTracks.map((t) => t.view.invite);
+  if (invites.includes("sent")) return "Only the test invite has gone so far: mark it once you have written back on LinkedIn from your test profile.";
+  return "The test invite is with the LinkedIn session, which hasn’t confirmed whether it went: mark it once you have written back on LinkedIn from your test profile.";
+}

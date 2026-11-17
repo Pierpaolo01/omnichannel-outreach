@@ -9,7 +9,7 @@ import { Icon, type IconName } from "../icons.tsx";
 import { useFocusRescue } from "../focusRescue.ts";
 import { answered, isTestRunPressKey, keepPress, pendingPress, type TestRunPress } from "./testRunPress.ts";
 import { ConfirmStrip } from "../controls/ControlViews.tsx";
-import { WITHDRAWAL_ANSWERS } from "./linkedin-wording.ts";
+import { testReplyHelper, WITHDRAWAL_ANSWERS } from "./linkedin-wording.ts";
 import { endingDetail, endingTitle, progressText, stepDetail, stepStateText, timeIn } from "./testRunWording.ts";
 import type { SequenceEditor } from "./useSequence.ts";
 
@@ -566,8 +566,6 @@ function TestLinkedinControls({ run, presses }: { run: TestRunRead | null; press
     );
   const mark = run.linkedinReply;
   const stuck = run.linkedinTracks.filter((t) => t.view.withdrawalStuck);
-  // A LinkedIn message of this run recorded sent: the first LinkedIn row of a track is its invite.
-  const messageSent = run.steps.some((r, i, all) => r.channel === "linkedin" && r.state === "sent" && all.findIndex((x) => x.trackId === r.trackId) !== i);
   if (mark === null && stuck.length === 0 && closed === null) return null;
   const keyOf = (c: TestConfirmation) => (c.kind === "reply" ? "reply" : `${c.kind}:${c.trackId}`);
   function open(c: TestConfirmation): void {
@@ -639,7 +637,7 @@ function TestLinkedinControls({ run, presses }: { run: TestRunRead | null; press
                 Mark replied on LinkedIn
               </button>
               {/* Worded for what has gone (council on a6c1700, item 7): a message, or only the invite. */}
-              <span className="text-[13px] text-muted">{messageSent ? "Once you have answered a test message on your test profile." : "Only the test invite has gone so far: mark it once you have written back on LinkedIn from your test profile."}</span>
+              <span className="text-[13px] text-muted">{testReplyHelper(run)}</span>
             </div>
           )}
         </>

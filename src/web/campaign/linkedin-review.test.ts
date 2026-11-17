@@ -4,7 +4,7 @@ import { attentionItems } from "../calls/wording.ts";
 import { confirmationChanged, openLeadConfirmation } from "../controls/confirmation.ts";
 import { controlPreviewText, stepWaitWords, type AllowedControl } from "../controls/wording.ts";
 import { usedTodayWarnings } from "./BeforeLaunchTab.tsx";
-import { INVITE_STAYS_OPEN } from "./linkedin-wording.ts";
+import { INVITE_STAYS_OPEN, testReplyHelper } from "./linkedin-wording.ts";
 import { stepWaitReach, whatItDoes } from "./RunningChanges.tsx";
 import { pressDone, testConfirmationGone } from "./TestRunTab.tsx";
 import { withheldExplanation } from "./withheld.ts";
@@ -117,5 +117,21 @@ describe("item 15: LinkedIn steps with no allowance, or none left today, on Toda
     const [item] = attentionItems({ ...NOTHING, waitingForCapacity: [wait(false)] }, TODAY);
     expect(item?.body).toContain("is full for the day. The first resets");
     expect(item?.body).toContain("LinkedIn");
+  });
+});
+
+describe("the review bot on 82cf16d: the test reply mark's helper says only what the run's read records as gone", () => {
+  const row = (stepId: string, state: string) => ({ trackId: "li", stepId, channel: "linkedin", state });
+  const run = (invite: LinkedinTrackView["invite"], steps = [row("i", invite === "sent" ? "sent" : "with_provider"), row("m1", "not_reached")]) => ({ steps, linkedinTracks: [{ view: { invite } }] });
+  test("a message recorded sent", () => {
+    expect(testReplyHelper(run("sent", [row("i", "sent"), row("m1", "sent")]))).toBe("Once you have answered a test message on your test profile.");
+  });
+  test("only the invitation recorded sent", () => {
+    expect(testReplyHelper(run("sent"))).toBe("Only the test invite has gone so far: mark it once you have written back on LinkedIn from your test profile.");
+  });
+  test("the invitation handed over and not known to have gone: never said as gone", () => {
+    const said = testReplyHelper(run("handed"));
+    expect(said).toBe("The test invite is with the LinkedIn session, which hasn’t confirmed whether it went: mark it once you have written back on LinkedIn from your test profile.");
+    expect(said).not.toMatch(/has gone/);
   });
 });

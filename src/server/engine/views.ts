@@ -342,7 +342,9 @@ const earliest = (ts: readonly number[]): number | null => (ts.length === 0 ? nu
 
 /** Why a LinkedIn track was skipped as a missing channel, from the stored facts alone (council on a6c1700, item 10). */
 function skipCauseOf(s: SubjectState, startedWith: string | null): NonNullable<LinkedinTrackView["skipCause"]> {
-  if (startedWith !== null) return "replaced";
+  // Started with a profile no longer theirs (review bot on 82cf16d's audit): replaced by another member profile, or a later
+  // import that holds none (no address, or one that is not a member profile).
+  if (startedWith !== null) return s.lead.importedProfile === "member" ? "replaced" : "removed_by_import";
   if (s.lead.details.some((d) => d.channel === "linkedin" && d.bad)) return "marked_bad";
   switch (s.lead.importedProfile) {
     case undefined:
@@ -350,8 +352,10 @@ function skipCauseOf(s: SubjectState, startedWith: string | null): NonNullable<L
     case "not_member":
       return "not_a_member_profile";
     case "none":
-    case "member":
       return "no_profile";
+    // A usable member profile now, none when the track started: a later import added it.
+    case "member":
+      return "added_after_start";
     default: {
       const unhandled: never = s.lead.importedProfile;
       throw new Error(`An imported profile with no cause: ${String(unhandled)}`);

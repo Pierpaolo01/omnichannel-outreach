@@ -373,4 +373,38 @@ describe("item 10 of a6c1700's council: a skip as a missing channel says its sto
     expect(await cause("Kim Hart")).toBe("not_a_member_profile");
     expect(await cause("Ola Berg")).toBe("no_profile");
   });
+
+  test("a re-import that removes the profile the track started with reads as removed, never as a different profile", async () => {
+    const { h } = await world();
+    h.linkedin.profiles.set(PAT, { acceptAfterMs: null });
+    const { campaign: c } = await h.createCampaign("Removed", { businesses: BUSINESSES, people: PEOPLE });
+    const slow = { ...linkedin(), steps: [step("inv", 0, "Hello."), step("m1", 3, "Thanks.")] };
+    await h.defineSequence(c.id, definition([slow, email({ kind: "after", trackId: "li", delayDays: 9 })]));
+    h.clock = MONDAY_9;
+    expect((await h.launch(c.id)).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + H);
+    const again = await h.request("POST", `/api/campaigns/${c.id}/imports`, csvOf({ businesses: BUSINESSES, people: [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", linkedin_url: "https://www.linkedin.com/company/fictional-harbour" })] }));
+    expect(again.status).toBeLessThan(300);
+    await h.advanceTo(MONDAY_9 + 2 * H);
+    const id = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
+    const view = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${id}`)).body.tracks.find((t) => t.trackId === "li")?.linkedin;
+    expect(view?.skipCause).toBe("removed_by_import");
+  });
+});
+
+describe("the review bot on 82cf16d: a test run's invitation handed over and not known to have gone", () => {
+  test("the run's read carries it as handed, and the mark is allowed by the rule for work handed over and unsettled", async () => {
+    const { h, campaign, lead } = await world();
+    h.linkedin.profiles.set(TEST, { loseAnswer: 50 });
+    const id = await campaign("Unknown test");
+    await h.defineSequence(id, definition([linkedin()]));
+    expect((await h.request("PUT", `/api/campaigns/${id}/test-contacts`, { email: "", mobile: "", linkedin: TEST })).status).toBe(200);
+    const tab = (await h.request<TestRunTab>("GET", `/api/campaigns/${id}/test-runs`)).body;
+    h.clock = MONDAY_9;
+    expect((await h.request("POST", `/api/campaigns/${id}/test-runs`, { requestId: "run-u", renderAs: await lead(id), expect: { definitionVersion: tab.definitionVersion } })).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 2 * MIN);
+    const run = (await h.request<TestRunTab>("GET", `/api/campaigns/${id}/test-runs`)).body.run;
+    expect(run?.linkedinTracks[0]?.view.invite).toBe("handed");
+    expect(run?.linkedinReply).toEqual({ allowed: true });
+  });
 });
