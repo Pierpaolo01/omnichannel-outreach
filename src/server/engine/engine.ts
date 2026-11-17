@@ -1538,7 +1538,6 @@ export class Engine {
       return true;
     }
     if (asked.kind === "connected" || asked.kind === "pending") return false;
-    if (channel !== "email" && channel !== "sms") return false;
     const result = this.rules.presendAnswer(asked, channel, knownReplies);
     if (result.kind === "unavailable") return false;
     await this.update(a.subjectId, now, (s) => {

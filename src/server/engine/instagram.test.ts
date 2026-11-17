@@ -19,7 +19,6 @@ const DAY = 24 * H;
 const MONDAY_9 = Date.parse("2026-11-02T09:00:00Z");
 const ALWAYS = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 0, end: 24 }));
 const S1 = "ig-session-1";
-const S2 = "ig-session-2";
 
 const PAT_OWN = "https://www.instagram.com/example_pat.oneil";
 const HARBOUR = "https://www.instagram.com/example_harbour_physio";
@@ -324,7 +323,6 @@ describe("the import (ADR 0004 13.4)", () => {
     const { h, campaign, delivered, progress } = await world({ messagesPerDay: 20 });
     const people = [person({ person_id: "p9", business_id: "b2", full_name: "Lou Park" })];
     const c = await campaign([instagram("ig", [step("m1", 0, "One."), step("m2", 3, "Two.")])], "Only Instagram");
-    void c;
     const { campaign: only } = await h.createCampaign("Company account only", { businesses: BUSINESSES, people });
     const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${only.id}`)).body.rows;
     // Lou has no email, no mobile, no number of their own: the company's main line and its Instagram account still reach them.

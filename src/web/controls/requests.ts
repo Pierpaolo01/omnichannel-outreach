@@ -94,7 +94,7 @@ function parse(text: string | null): PressEntry | null {
     if (!(typeof value === "object" && value !== null && "v" in value && value.v === 2 && "requestId" in value && typeof value.requestId === "string")) return null;
     // A mark stored before ticket 25 named no channel: it could only be LinkedIn's (ADR 0004 13.8).
     const entry = value as PressEntry | (Omit<PressEntry, "action"> & { action: "mark_replied" });
-    return entry.action === "mark_replied" ? { ...entry, action: "mark_replied:linkedin" } : (entry as PressEntry);
+    return entry.action === "mark_replied" ? { ...entry, action: "mark_replied:linkedin" } : entry;
   } catch {
     return null;
   }

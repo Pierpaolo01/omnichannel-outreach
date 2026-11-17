@@ -6,7 +6,7 @@
  * lead enters when it declines on a call, with no call.
  */
 import { isTimeZone, type WindowRule } from "./clock.ts";
-import { isMessageRequestChannel, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel } from "../social-channels.ts";
+import { isMessageRequestChannel, SOCIAL_CHANNELS, type SocialChannel } from "../social-channels.ts";
 
 export type TrackChannel = "email" | "sms" | "call" | SocialChannel;
 /**

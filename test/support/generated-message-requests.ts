@@ -263,7 +263,6 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
     }
     const roll = rnd();
     const lead = pickOf(rnd, leads);
-    const c = campaigns[lead.campaign]!;
     if (roll < 0.07 && !ended.has(lead.id)) {
       const holds = held.get(lead.id) ?? [];
       const open = holds.find((x) => x.to === null);

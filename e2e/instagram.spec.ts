@@ -9,8 +9,7 @@ import { ACCOUNTS, fakeInstagramApp, TEST_ACCOUNT, type FakeInstagramApp } from 
  * (not a session)" wherever it is named.
  */
 
-const MIN = 60_000;
-const H = 60 * MIN;
+const H = 3_600_000;
 
 const linger = async (page: Page) => {
   if (process.env["RECORD_DEMO"]) await page.waitForTimeout(2_000);
@@ -90,7 +89,8 @@ test("an Instagram track from the canvas through a test run, a launch, a marked 
     await expect(page.getByText(/^The first message went to their company’s Instagram account from your business session/)).toBeVisible();
     await shot(page, "05-record-company-account");
     await at(page, f, `/leads/people/${await f.person("Kim Hart")}`);
-    await expect(page.getByText("Skipped: neither they nor their company have an Instagram account in the import.")).toBeVisible();
+    // Kim ends with no usable channel; Activity gives the skip its recorded cause.
+    await expect(page.getByText("Neither they nor their company have an Instagram account in the import.")).toBeVisible();
     await shot(page, "06-record-skipped");
     await linger(page);
   });
@@ -113,6 +113,7 @@ test("an Instagram track from the canvas through a test run, a launch, a marked 
     const row = page.getByRole("region", { name: "Outreach so far" }).locator("dt", { hasText: /^Instagram$/ }).locator("xpath=following-sibling::dd[1]");
     await expect(row).toContainText("4 messages sent (2 from test runs)");
     await expect(row).toContainText("2 marked replied (1 from test runs)");
+    await page.getByRole("button", { name: "How these are counted" }).click();
     await expect(page.getByText(/nothing shows whether it was accepted or seen/)).toBeVisible();
     await shot(page, "09-measures");
     await linger(page);
@@ -122,13 +123,15 @@ test("an Instagram track from the canvas through a test run, a launch, a marked 
 test.describe("Instagram's states", () => {
   test("with no session, launch is blocked by name, and nothing offers to connect one", async ({ page }) => {
     const f = await fakeInstagramApp("no-session");
-    await at(page, f, `/campaigns/${f.campaign}/launch`);
+    await at(page, f, `/campaigns/${f.campaign}/before-launch`);
     await expect(page.getByText(/has no connected Instagram session/).first()).toBeVisible();
     await expect(page.getByText(/connect/i).filter({ hasText: /Connect an?|Connect your/ })).toHaveCount(0);
     await shot(page, "10-blocked-no-session");
-    await at(page, f, `/campaigns/${f.campaign}?track=ig`);
+    await at(page, f, `/campaigns/${f.campaign}`);
+    await page.getByRole("button", { name: /^Instagram track:/ }).click();
     await expect(page.getByText("No connected Instagram session.")).toBeVisible();
-    await expect(page.getByText("No Instagram session is connected, so Instagram tracks cannot launch.").first()).toBeVisible();
+    // The provider read's own words: here the simulated provider's; the running application's say none is connected.
+    await expect(page.getByText("Simulated Instagram (not a session): tests only.")).toBeVisible();
     await shot(page, "11-inspector-no-session");
   });
 
@@ -148,6 +151,5 @@ test.describe("Instagram's states", () => {
     await expect(page.getByText(/^The first message went to their own Instagram account/)).toBeVisible();
     await expect(page.getByRole("button", { name: /^Mark replied on Instagram/ })).toBeVisible();
     await shot(page, "14-record-running");
-    void MIN;
   });
 });
