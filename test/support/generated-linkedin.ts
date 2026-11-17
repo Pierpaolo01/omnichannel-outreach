@@ -325,7 +325,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const poolAt = (ci: number, at: number) => (pools.get(ci) ?? []).filter((x) => x.at <= at).at(-1)?.pool ?? [];
   /** Attempts whose handover committed and whose call never happened (the crash): their work is unresolved, with no handover logged. */
   const crashedAttempts: string[] = [];
-  const crashed: { subjectId: string; stepId: string }[] = [];
+  const crashTimes: number[] = [];
+  const crashed: { subjectId: string; stepId: string; at: number }[] = [];
   /** The user's marks of a stuck withdrawal as withdrawn, by subject and time. */
   const userWithdrawn = new Map<string, number>();
   const campaignHeld = new Map<string, { from: number; to: number | null }[]>();
@@ -1112,7 +1113,10 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       h.hooks.crashPoint = (point, attemptId) => {
         if (armed && point === "after_handover_commit") {
           armed = false;
-          if (attemptId) crashedAttempts.push(attemptId);
+          if (attemptId) {
+            crashedAttempts.push(attemptId);
+            crashTimes.push(h.clock);
+          }
           features.add("a-crash-between-the-handover-and-its-answer");
           throw new Crash(point);
         }
@@ -1168,7 +1172,7 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     const now = h.clock;
     while (crashed.length < crashedAttempts.length) {
       const a = await h.store.engine.attempt(crashedAttempts[crashed.length]!);
-      crashed.push({ subjectId: a?.subjectId ?? "", stepId: a?.stepId ?? "" });
+      crashed.push({ subjectId: a?.subjectId ?? "", stepId: a?.stepId ?? "", at: crashTimes[crashed.length] ?? 0 });
     }
     // A lead that replied may be restarted from its next unsent step (ADR 0003: "for a lead that replied or was stopped"):
     // L3 asks nothing after a mark only until a restart after it.
@@ -1235,7 +1239,16 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
      * acceptance deadline passed before `at`, and neither the session nor the user had answered the withdrawal by then.
      * Its conversation's fate is then unknown: another subject waits on it, never skips.
      */
+    // Each lead's InMail fallback as the engine stored it, which L22 to L25 check against the record's own judgment. A
+    // track whose InMail was chosen, went, or was overtaken by an acceptance left its invite open (Q50): its conversation
+    // is held, not being withdrawn (seed 24071).
+    const inmailHeld = new Set<string>();
+    for (const l of leads) {
+      const t = (await h.store.engine.subject(l.id, now))?.tracks.find((x) => x.trackId === campaigns[l.campaign]!.li.id);
+      if (t?.inmail === "chosen" || t?.inmail === "sent" || t?.inmail === "accepted") inmailHeld.add(l.id);
+    }
     const beingWithdrawn = (subject: string, session: string, profile: string, at: number): boolean => {
+      if (inmailHeld.has(subject)) return false;
       const owner = leadOfSubject(subject);
       const invite = li.deliveryLog.find((d) => d.subjectId === subject && d.sender === session && d.destination === profile && d.action === "invite");
       if (!owner || !invite || li.deliveryLog.some((d) => d.subjectId === subject && d.destination === profile && d.action !== "invite")) return false;
@@ -1297,7 +1310,10 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       // connection found by the check is not outreach (council on b21af02, item 5).
       const at = marked.get(id) ?? 0;
       const untold = (key: string) => !li.refusals.some((r) => r.key === key && r.at <= at) && !li.deliveryLog.some((d) => d.key === key && d.at <= at);
-      if (!li.deliveryLog.some((d) => d.subjectId === id && d.at <= at) && !li.handoverLog.some((x) => x.subjectId === id && x.at <= at && untold(x.key))) problem(`L12: ${id} was marked replied on LinkedIn though nothing reached them there`);
+      // A handover the application committed and then crashed before asking the session is, to the application, handed with
+      // its outcome untold: it may have reached them (seed 24084), so the mark is allowed.
+      const crashedBefore = crashed.some((x) => x.subjectId === id && x.at <= at);
+      if (!crashedBefore && !li.deliveryLog.some((d) => d.subjectId === id && d.at <= at) && !li.handoverLog.some((x) => x.subjectId === id && x.at <= at && untold(x.key))) problem(`L12: ${id} was marked replied on LinkedIn though nothing reached them there`);
     }
 
     // L2, on the handover log: the engine never even asks the session for a message before the track's connection (an
@@ -1406,14 +1422,19 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           const shown = read.tracks.find((t) => t.trackId === p.trackId);
           // A LinkedIn step whose kind every pool session allows none of (the user's zero) waits, said so: no room.
           const kind = p.trackId === c.li.id ? (p.nextStepId === c.li.steps[0]!.id ? "invites" : "messages") : null;
+          // A chosen InMail's time has come by the expiry, not a connection, and it goes only from the session that sent the
+          // invite, by its messages per day (13.5; seeds 24071, 24084: its session had none, the pool's others had some).
+          const inmailPending = p.trackId === c.li.id && st.campaign.definition.tracks.find((t) => t.id === c.li.id)?.steps.find((s) => s.id === p.nextStepId)?.role === "inmail";
           // Only a step whose time has come by its connection: a message still waiting for acceptance says that first.
-          const awaiting = (p.acceptBy ?? null) !== null && (p.connection ?? null) === null;
+          const awaiting = (p.acceptBy ?? null) !== null && (p.connection ?? null) === null && !inmailPending;
+          const inviter = invite?.sender ?? null;
           // An invite goes only from a session with no invite pending from elsewhere (section 6; seeds 24062, 24094).
-          const fromWhich = kind === "invites" && lead.profile !== null ? usableSessions(lead).filter((id) => !pendingOn(li.profiles.get(lead.profile!) ?? {}, id)) : usableSessions(lead);
+          const fromWhich = inmailPending ? (inviter === null ? [] : [inviter]) : kind === "invites" && lead.profile !== null ? usableSessions(lead).filter((id) => !pendingOn(li.profiles.get(lead.profile!) ?? {}, id)) : usableSessions(lead);
           const noRoom = kind !== null && !awaiting && fromWhich.length > 0 && fromWhich.every((id) => (allowances.get(id)?.[kind] ?? 0) === 0);
           // The read says no allowance exactly when the record finds none on any session the step may use (zero or never
           // set), and full for the day only where an allowance exists and is used up (ticket 24b, item 15).
-          if (noRoom && (shown?.hold ?? null) === null) {
+          // A chosen InMail with no credit backing it says that first: its credit, then its session's room (13.5).
+          if (noRoom && (shown?.hold ?? null) === null && !(inmailPending && shown?.nextStep?.when.why === "inmail_unavailable")) {
             if (shown?.nextStep?.when.why !== "no_allowance") problem(`L13: ${lead.id}'s ${p.nextStepId} has no allowance on any session and its read does not say so (${JSON.stringify(shown?.nextStep?.when)})`);
             else features.add("a-step-waiting-on-a-zero-allowance");
             continue;
