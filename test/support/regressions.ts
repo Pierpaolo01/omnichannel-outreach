@@ -324,7 +324,7 @@ export async function markNotSentFreesCapacity(rules?: Partial<Rules>): Promise<
     await h.advanceTo(MONDAY_9 + 2 * H);
     const before = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body;
     const pat = (await h.store.engine.subject(lead("Pat Oneil"), h.clock))!.attempts[0]!;
-    expect(before.heldCapacity).toEqual([{ accountId: "inbox-a", held: 1, capacity: 1, sentToday: 0, work: [expect.objectContaining({ attemptId: pat.id, enrollmentId: lead("Pat Oneil"), stepId: "s1", destination: "pat@harbour.example", unresolvedSince: expect.any(String) })] }]);
+    expect(before.heldCapacity).toEqual([{ accountId: "inbox-a", channel: "email", held: 1, capacity: 1, sentToday: 0, work: [expect.objectContaining({ attemptId: pat.id, enrollmentId: lead("Pat Oneil"), stepId: "s1", destination: "pat@harbour.example", unresolvedSince: expect.any(String) })] }]);
     expect(port.deliveries.map((d) => d.subjectId)).toEqual([]);
     expect(await h.engine.markAttempt(pat.id, "not_sent")).toBe(true);
     await h.advanceTo(MONDAY_9 + 3 * H);
