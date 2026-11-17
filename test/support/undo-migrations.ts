@@ -36,11 +36,13 @@ export const UNDO_23 = `
   DROP TRIGGER conversations_progress_insert;
   DROP TRIGGER conversations_progress_update;
   DROP TRIGGER conversations_progress_delete;
-  DROP TRIGGER conversations_enrollment_ended;
-  DROP TRIGGER conversations_test_run_ended;
+  DROP TRIGGER conversations_enrollment_update;
+  DROP TRIGGER conversations_test_run_update;
   DROP TRIGGER conversations_reply_insert;
   DROP TRIGGER conversations_reply_update;
-  DROP TABLE conversation_version;
+  DROP TRIGGER conversations_reply_delete;
+  DROP INDEX sms_bindings_by_owner;
+  DROP TABLE conversation_versions;
   ALTER TABLE sms_bindings DROP COLUMN channel;
   DELETE FROM schema_migrations WHERE version >= 23;
 `;

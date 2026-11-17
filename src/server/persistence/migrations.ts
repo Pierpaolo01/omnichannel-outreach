@@ -1123,42 +1123,45 @@ export const MIGRATIONS: readonly Migration[] = [
       -- An account's channel never changes either: the same id on another channel is another account (ADR 0004 1.1).
       CREATE TRIGGER sender_accounts_channel_fixed BEFORE UPDATE OF channel ON sender_accounts WHEN NEW.channel IS NOT OLD.channel
       BEGIN SELECT RAISE(ABORT, 'an account''s channel never changes'); END;
-      -- An INSERT OR REPLACE on the same key is a change too: refused before the old row is removed (the re-check of dd3969c, item 3).
+      -- An INSERT OR REPLACE is a change too, refused before the old row is removed (the re-checks of dd3969c, item 3, and of
+      -- 8c85b2f, item 2): on the pair's own key, and on the active sender and recipient it would replace.
       CREATE TRIGGER sms_bindings_channel_fixed_on_replace BEFORE INSERT ON sms_bindings
       WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE seq = NEW.seq AND channel IS NOT NEW.channel)
+        OR EXISTS (SELECT 1 FROM sms_bindings WHERE sender_number = NEW.sender_number AND recipient_key = NEW.recipient_key AND released_at IS NULL AND channel IS NOT NEW.channel)
       BEGIN SELECT RAISE(ABORT, 'a pair''s channel never changes'); END;
       CREATE TRIGGER sender_accounts_channel_fixed_on_replace BEFORE INSERT ON sender_accounts
       WHEN EXISTS (SELECT 1 FROM sender_accounts WHERE id = NEW.id AND channel IS NOT NEW.channel)
       BEGIN SELECT RAISE(ABORT, 'an account''s channel never changes'); END;
+      CREATE INDEX sms_bindings_by_owner ON sms_bindings(owner_subject);
 
-      -- The conversations' version (ADR 0004, "The conversations' version"; the re-check of dd3969c, item 1): one counter the
-      -- database itself moves on every write to a fact a pair's ownership or knownness is read from, whatever wrote it. The
-      -- inputs, the same list the ownership query reads (smsBindings in sqlite-engine-store.ts): the pair rows; the owner's
-      -- provider work; the owner's track progress (a connection, an acceptance, a withdrawal); the owner's ending; and SMS
-      -- replies. A row of a subject that owns no pair moves nothing.
-      CREATE TABLE conversation_version (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL);
-      INSERT INTO conversation_version (id, seq) VALUES (1, 0);
-      CREATE TRIGGER conversations_pair_insert AFTER INSERT ON sms_bindings BEGIN UPDATE conversation_version SET seq = seq + 1; END;
-      CREATE TRIGGER conversations_pair_update AFTER UPDATE ON sms_bindings BEGIN UPDATE conversation_version SET seq = seq + 1; END;
-      CREATE TRIGGER conversations_pair_delete AFTER DELETE ON sms_bindings BEGIN UPDATE conversation_version SET seq = seq + 1; END;
-      CREATE TRIGGER conversations_work_insert AFTER INSERT ON provider_work WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject = NEW.subject_id)
-      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
-      CREATE TRIGGER conversations_work_update AFTER UPDATE ON provider_work WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject IN (NEW.subject_id, OLD.subject_id))
-      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
-      CREATE TRIGGER conversations_work_delete AFTER DELETE ON provider_work WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject = OLD.subject_id)
-      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
-      CREATE TRIGGER conversations_progress_insert AFTER INSERT ON track_progress WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject = NEW.subject_id)
-      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
-      CREATE TRIGGER conversations_progress_update AFTER UPDATE ON track_progress WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject IN (NEW.subject_id, OLD.subject_id))
-      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
-      CREATE TRIGGER conversations_progress_delete AFTER DELETE ON track_progress WHEN EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject = OLD.subject_id)
-      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
-      CREATE TRIGGER conversations_enrollment_ended AFTER UPDATE OF ended ON enrollments WHEN NEW.ended IS NOT OLD.ended AND EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject = NEW.id)
-      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
-      CREATE TRIGGER conversations_test_run_ended AFTER UPDATE OF ended ON test_runs WHEN NEW.ended IS NOT OLD.ended AND EXISTS (SELECT 1 FROM sms_bindings WHERE owner_subject = NEW.id)
-      BEGIN UPDATE conversation_version SET seq = seq + 1; END;
-      CREATE TRIGGER conversations_reply_insert AFTER INSERT ON reply_events BEGIN UPDATE conversation_version SET seq = seq + 1; END;
-      CREATE TRIGGER conversations_reply_update AFTER UPDATE OF state ON reply_events WHEN NEW.state IS NOT OLD.state BEGIN UPDATE conversation_version SET seq = seq + 1; END;
+      -- The conversations' versions, per destination (ADR 0004, "The conversations' version"; the re-checks of dd3969c, item 1,
+      -- and of 8c85b2f, item 1): a counter per mobile or profile that the database moves itself, in the same write, on every
+      -- write to a fact a pair's ownership or knownness is read from, whatever wrote it. The inputs are the same list the
+      -- ownership query reads (CONVERSATION_PAIRS_QUERY in sqlite-engine-store.ts): the pair rows; the owner's provider work;
+      -- the owner's track progress (a connection, an acceptance, a withdrawal); the owner's ending; and replies. Each write
+      -- moves only the destinations it belongs to: a pair row its recipient; an owner's work, progress or ending the recipients
+      -- of the pairs that subject owns; a reply its address. An update moves them only when it changes a column the query
+      -- reads (CONVERSATION_INPUTS). A cache remembers only its own destinations' versions.
+      CREATE TABLE conversation_versions (recipient_key TEXT PRIMARY KEY, seq INTEGER NOT NULL);
+      CREATE TRIGGER conversations_pair_insert AFTER INSERT ON sms_bindings BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES (NEW.recipient_key, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_pair_update AFTER UPDATE ON sms_bindings BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES (OLD.recipient_key, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; INSERT INTO conversation_versions (recipient_key, seq) VALUES (NEW.recipient_key, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_pair_delete AFTER DELETE ON sms_bindings BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES (OLD.recipient_key, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_work_insert AFTER INSERT ON provider_work BEGIN INSERT INTO conversation_versions (recipient_key, seq) SELECT DISTINCT recipient_key, 1 FROM sms_bindings WHERE owner_subject = NEW.subject_id ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_work_update AFTER UPDATE OF subject_id, account_id, destination, settled, sent_wall ON provider_work WHEN NEW.subject_id IS NOT OLD.subject_id OR NEW.account_id IS NOT OLD.account_id OR NEW.destination IS NOT OLD.destination OR NEW.settled IS NOT OLD.settled OR NEW.sent_wall IS NOT OLD.sent_wall
+      BEGIN INSERT INTO conversation_versions (recipient_key, seq) SELECT DISTINCT recipient_key, 1 FROM sms_bindings WHERE owner_subject = OLD.subject_id ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; INSERT INTO conversation_versions (recipient_key, seq) SELECT DISTINCT recipient_key, 1 FROM sms_bindings WHERE owner_subject = NEW.subject_id ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_work_delete AFTER DELETE ON provider_work BEGIN INSERT INTO conversation_versions (recipient_key, seq) SELECT DISTINCT recipient_key, 1 FROM sms_bindings WHERE owner_subject = OLD.subject_id ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_progress_insert AFTER INSERT ON track_progress BEGIN INSERT INTO conversation_versions (recipient_key, seq) SELECT DISTINCT recipient_key, 1 FROM sms_bindings WHERE owner_subject = NEW.subject_id ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_progress_update AFTER UPDATE OF subject_id, connection, destination_detail_id, invite_withdrawal, accepted_wall ON track_progress WHEN NEW.subject_id IS NOT OLD.subject_id OR NEW.connection IS NOT OLD.connection OR NEW.destination_detail_id IS NOT OLD.destination_detail_id OR NEW.invite_withdrawal IS NOT OLD.invite_withdrawal OR NEW.accepted_wall IS NOT OLD.accepted_wall
+      BEGIN INSERT INTO conversation_versions (recipient_key, seq) SELECT DISTINCT recipient_key, 1 FROM sms_bindings WHERE owner_subject = OLD.subject_id ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; INSERT INTO conversation_versions (recipient_key, seq) SELECT DISTINCT recipient_key, 1 FROM sms_bindings WHERE owner_subject = NEW.subject_id ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_progress_delete AFTER DELETE ON track_progress BEGIN INSERT INTO conversation_versions (recipient_key, seq) SELECT DISTINCT recipient_key, 1 FROM sms_bindings WHERE owner_subject = OLD.subject_id ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_enrollment_update AFTER UPDATE OF id, campaign_id, person_id, ended ON enrollments WHEN NEW.id IS NOT OLD.id OR NEW.campaign_id IS NOT OLD.campaign_id OR NEW.person_id IS NOT OLD.person_id OR NEW.ended IS NOT OLD.ended BEGIN INSERT INTO conversation_versions (recipient_key, seq) SELECT DISTINCT recipient_key, 1 FROM sms_bindings WHERE owner_subject = NEW.id ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_test_run_update AFTER UPDATE OF id, campaign_id, linkedin_key, ended ON test_runs WHEN NEW.id IS NOT OLD.id OR NEW.campaign_id IS NOT OLD.campaign_id OR NEW.linkedin_key IS NOT OLD.linkedin_key OR NEW.ended IS NOT OLD.ended BEGIN INSERT INTO conversation_versions (recipient_key, seq) SELECT DISTINCT recipient_key, 1 FROM sms_bindings WHERE owner_subject = NEW.id ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      -- A reply belongs to the pair of the number it reached and the mobile it came from: its address is the destination.
+      -- Every write to one moves it (the re-check of 8c85b2f, item 3): an insert, a change of a column the rule reads (its
+      -- state, number, mobile or time), and a delete.
+      CREATE TRIGGER conversations_reply_insert AFTER INSERT ON reply_events BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES (NEW.address, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_reply_update AFTER UPDATE OF event_id, state, inbox, address, received_wall ON reply_events WHEN NEW.event_id IS NOT OLD.event_id OR NEW.state IS NOT OLD.state OR NEW.inbox IS NOT OLD.inbox OR NEW.address IS NOT OLD.address OR NEW.received_wall IS NOT OLD.received_wall BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES (OLD.address, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; INSERT INTO conversation_versions (recipient_key, seq) VALUES (NEW.address, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER conversations_reply_delete AFTER DELETE ON reply_events BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES (OLD.address, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
     `,
   },
 ];

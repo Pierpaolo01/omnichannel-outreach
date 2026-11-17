@@ -9,7 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { awaitingAcceptance, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
+import { awaitingAcceptance, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, type ConversationVersions, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import type { OutreachStatus } from "../../domain/outreach-status.ts";
@@ -146,6 +146,14 @@ const QUOTA_WAIT = Number.MAX_SAFE_INTEGER;
 export const ENGINE_CONTACT_FRESH_MS = 60_000;
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * The conversations' versions a cache reads (ADR 0004, "The conversations' version"): the store's per-destination counters,
+ * read once per pass, so each subject's check of its own destinations is in memory.
+ */
+function versionsOf(versions: ReadonlyMap<string, number>): ConversationVersions {
+  return (destinations) => destinations.map((d) => `${d}:${versions.get(d) ?? 0}`).join("|");
+}
 
 export class Engine {
   private readonly store: EngineStore;
@@ -1096,7 +1104,7 @@ export class Engine {
     // The user's zone decides the day an unworked call expires at, so it is part of the cache key.
     const settings = JSON.stringify(await this.store.callSettings());
     // Another subject's conversations change without touching this subject's version (question Q7 answered).
-    const conversations = await this.store.conversationsVersion();
+    const conversations = versionsOf(await this.store.conversationVersions());
     for (const [id, subjectVersion] of await this.store.runningSubjectVersions()) {
       const version = `${subjectVersion}|${settings}`;
       const now = this.now();
@@ -1367,7 +1375,7 @@ export class Engine {
     const now = this.now();
     const ready: { item: ReadyItem; snapshot: SubjectState }[] = [];
     // A hold on an unsettled conversation changes with another subject's conversations, not this one's version.
-    const conversations = await this.store.conversationsVersion();
+    const conversations = versionsOf(await this.store.conversationVersions());
     for (const [id, version] of await this.store.runningSubjectVersions()) {
       const known = this.nothingReady.get(id);
       if (known?.key === version && this.rules.readinessHolds(known, now, conversations)) continue;

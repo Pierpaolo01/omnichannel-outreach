@@ -87,7 +87,20 @@ export const CONVERSATION_PAIRS_QUERY = `SELECT b.sender_number, b.recipient_key
              OR b.recipient_key IN (SELECT value FROM json_each(:profiles))
              OR b.recipient_key IN (SELECT destination FROM attempts WHERE subject_id = :subject))
          ORDER BY b.seq`;
-export const CONVERSATION_INPUT_TABLES = ["sms_bindings", "provider_work", "track_progress", "enrollments", "test_runs", "reply_events"] as const;
+/**
+ * The inputs of the ownership rule, written down once (ADR 0004, "The conversations' version"): each table the query reads a
+ * fact from, with the columns it reads ("*": every column). Migration 23's triggers move a destination's version on an
+ * insert or delete of a row, and on an update only when one of these columns changes. A test holds the three together.
+ */
+export const CONVERSATION_INPUTS = {
+  sms_bindings: "*",
+  provider_work: ["subject_id", "account_id", "destination", "settled", "sent_wall"],
+  track_progress: ["subject_id", "connection", "destination_detail_id", "invite_withdrawal", "accepted_wall"],
+  enrollments: ["id", "campaign_id", "person_id", "ended"],
+  test_runs: ["id", "campaign_id", "linkedin_key", "ended"],
+  reply_events: ["event_id", "state", "inbox", "address", "received_wall"],
+} as const;
+export const CONVERSATION_INPUT_TABLES = Object.keys(CONVERSATION_INPUTS) as (keyof typeof CONVERSATION_INPUTS)[];
 /** What the ownership query reads that is no fact of ownership: the owner's campaign's name, and the lead's destinations. */
 export const CONVERSATION_LOOKUP_TABLES = ["campaigns", "live_contact_details", "attempts", "json_each"] as const;
 
@@ -827,11 +840,11 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   /**
-   * The conversations' version (ADR 0004, "The conversations' version"): the counter the database moves itself, by trigger,
-   * on every write to a fact the ownership query below reads (`conversation_version`, migration 23). No list of events.
+   * The conversations' versions per destination (ADR 0004, "The conversations' version"): the counters the database moves
+   * itself, by trigger, on every write to a fact the ownership query below reads (`conversation_versions`, migration 23).
    */
-  async conversationsVersion(): Promise<string> {
-    return String(num(this.sql("SELECT seq FROM conversation_version WHERE id = 1").get() ?? { seq: 0 }, "seq"));
+  async conversationVersions(): Promise<ReadonlyMap<string, number>> {
+    return new Map(this.sql("SELECT recipient_key, seq FROM conversation_versions").all().map((r) => [str(r, "recipient_key"), num(r, "seq")]));
   }
 
   async accounts(now: number): Promise<AccountState[]> {

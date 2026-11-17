@@ -1,3 +1,4 @@
+import type { DatabaseSync } from "node:sqlite";
 import { Crash, EngineHarness } from "./engine-harness.ts";
 import { linkedinAccountId } from "../../src/server/engine/ports.ts";
 import { business, csvOf, person } from "./export-builder.ts";
@@ -39,6 +40,12 @@ export interface LinkedinRunOptions {
   readonly maxWrites?: number;
   /** A replay also stops after this many engine ticks: a broken engine can tick for ever writing little. */
   readonly maxTicks?: number;
+  /**
+   * How often invariant 29's fresh engine is compared with the worker (a fresh engine per check doubles a run's engine work):
+   * 1 (the default) after every tick; N after every Nth tick and after every tick that moved a conversation's version (the
+   * per-push fixed seeds); 0 never (a replay of a mutation that breaks another invariant).
+   */
+  readonly freshEvery?: number;
 }
 
 export interface LinkedinRun {
@@ -334,8 +341,22 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   // providers, finds nothing to change and nothing to hand over. A cache keyed on less than what it read (a change of
   // conversations) leaves the worker idle where a fresh one acts. Not while draining, after a problem, or past the bound.
   let draining = false;
+  const freshEvery = options.freshEvery ?? 1;
+  let ticksSinceFresh = 0;
+  let conversationsSeen = "";
+  const conversationsNow = () => {
+    const row = (h.store.engine as unknown as { db: DatabaseSync }).db.prepare("SELECT COALESCE(SUM(seq), 0) AS s, COUNT(*) AS n FROM conversation_versions").get() as { s: number; n: number };
+    return `${row.n}/${row.s}`;
+  };
   h.afterTick = async () => {
-    if (draining || bounded() || problems.length > 0) return;
+    if (draining || bounded() || problems.length > 0 || freshEvery === 0) return;
+    // Counted: every Nth tick, and every tick after which a conversation's version moved.
+    ticksSinceFresh++;
+    const conversations = conversationsNow();
+    const moved = conversations !== conversationsSeen;
+    conversationsSeen = conversations;
+    if (freshEvery > 1 && !moved && ticksSinceFresh < freshEvery) return;
+    ticksSinceFresh = 0;
     const handovers = () => h.linkedin.handoverLog.length + (h.smsProvider?.handoverLog.length ?? 0) + h.fake.handoverLog.length;
     const handed = handovers();
     const changed = await h.freshEngineTick();

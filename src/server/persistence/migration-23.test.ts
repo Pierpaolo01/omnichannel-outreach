@@ -86,6 +86,10 @@ describe("migrations 22 and 23 on the integration tip's own database", () => {
     expect(() =>
       db.exec("INSERT OR REPLACE INTO sms_bindings (seq, sender_number, recipient_key, owner_subject, created_at, channel) SELECT seq, sender_number, recipient_key, owner_subject, created_at, 'linkedin' FROM sms_bindings"),
     ).toThrow(/never changes/);
+    // Nor by an INSERT OR REPLACE that leaves out the key but names the active sender and recipient (the re-check of 8c85b2f, item 2).
+    expect(() =>
+      db.exec("INSERT OR REPLACE INTO sms_bindings (sender_number, recipient_key, owner_subject, created_at, channel) SELECT sender_number, recipient_key, owner_subject, created_at, 'linkedin' FROM sms_bindings"),
+    ).toThrow(/never changes/);
     expect(db.prepare("SELECT channel FROM sms_bindings").all()).toEqual([{ channel: "sms" }]);
 
     await h.tick();

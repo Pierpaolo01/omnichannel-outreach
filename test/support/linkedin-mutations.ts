@@ -44,7 +44,7 @@ function connectedAtTheSend(s: SubjectState): SubjectState {
 }
 
 /** A swap of one of progress.ts's rule flags for a replay, undone after it. */
-function flag<K extends "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession">(name: K, value: (typeof progressRules)[K]): () => () => void {
+function flag<K extends "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession" | "conversationKeysOwnOnly">(name: K, value: (typeof progressRules)[K]): () => () => void {
   return () => {
     const was = progressRules[name];
     progressRules[name] = value;
@@ -260,13 +260,21 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     seed: 11,
     rules: {},
     patch: () => {
-      const proto = SqliteEngineStore.prototype as unknown as { conversationsVersion: () => Promise<string> };
-      const was = proto.conversationsVersion;
-      proto.conversationsVersion = () => Promise.resolve("0");
+      const proto = SqliteEngineStore.prototype as unknown as { conversationVersions: () => Promise<ReadonlyMap<string, number>> };
+      const was = proto.conversationVersions;
+      proto.conversationVersions = () => Promise.resolve(new Map());
       return () => {
-        proto.conversationsVersion = was;
+        proto.conversationVersions = was;
       };
     },
+  },
+  // 29 (the re-check of 8c85b2f, item 1): a cache remembers only its own pairs' destinations, so a change to another
+  // subject's pair on the same destination leaves a subject waiting on it cached.
+  "a change to another subject's pair on the same destination does not invalidate a waiting subject": {
+    invariant: "29",
+    seed: 11,
+    rules: {},
+    patch: flag("conversationKeysOwnOnly", true),
   },
   // L13: a taken pair held instead of skipped: the second campaign's lead is left waiting on it for ever.
   "a taken LinkedIn pair is held, not skipped": {

@@ -431,10 +431,11 @@ export interface EngineStore {
   /** Every SMS conversation binding of a mobile (E.164), from any number, oldest first (ADR 0003 4.5). */
   smsBindingsOf(recipient: string): Promise<SmsBindingRecord[]>;
   /**
-   * A version of every SMS conversation (question Q7 answered): it changes when a binding is taken or released, or when a
-   * binding's owner has its text known sent. The evaluation caches look again at a waiting SMS track when it changes.
+   * The conversations' versions, per destination (ADR 0004, "The conversations' version"): for each mobile or profile any
+   * pair has ever touched, a counter the database moves by trigger, in the same write, whenever a fact that pair's ownership
+   * or knownness is read from is written. A cache remembers the versions of its own destinations only.
    */
-  conversationsVersion(): Promise<string>;
+  conversationVersions(): Promise<ReadonlyMap<string, number>>;
   accounts(now: number): Promise<AccountState[]>;
   accountLabels(): Promise<Record<string, string>>;
   /** Moves the account's next pacing slot to at least `callStart` plus its gap. */

@@ -281,6 +281,11 @@ export const rules = {
    * answer for the track and asks only its first healthy session, as `b21af02` to `e261ffa` did.
    */
   checksPerSession: true,
+  /**
+   * A cached evaluation remembers the versions of every destination it could take or wait on; true only for the mutation
+   * that remembers only the destinations of pairs it owns, so another subject's pair on its destination never moves it.
+   */
+  conversationKeysOwnOnly: false,
   connectionGate: (track: TrackDefinition, stepId: string, progress: TrackProgress): boolean => {
     const kind = linkedinStepKind(track, stepId);
     return kind !== null && kind !== "invite" && (progress.connection ?? null) === null;
@@ -1156,14 +1161,40 @@ export function conversationRecheck(state: SubjectState, now: number): { readonl
  * caches"). The worker's evaluation cache and the Before launch projection's both settle a subject with this function
  * and look at it again with `stillSettled`, so the two cannot look at different instants or facts: until its next delayed
  * track start, its user's next day while a call task is open (the skip limit), its waiting SMS track's due instant or
- * window opening; and, while an SMS track waits to hand over, until the SMS conversations it could read change
- * (`conversations`, a version of every binding and of whether its owner's text is known sent; null when none matters).
+ * window opening; and, while an SMS or LinkedIn track waits to hand over, until the conversations it could read change:
+ * the versions of its own destinations' pairs (`conversationKeysOf`; ADR 0004, "The conversations' version"), remembered
+ * with the keys they were read for. Null when no conversation matters.
  */
 export interface SettledEvaluation {
   readonly until: number;
   readonly conversations: string | null;
+  /** The destinations whose pairs it read (its own mobiles and profiles, and where its attempts went). */
+  readonly conversationKeys?: readonly string[];
 }
-export function settledEvaluation(state: SubjectState, now: number, nextUserDay: number, conversations: string): SettledEvaluation {
+
+/**
+ * The conversations' versions as a cache reads them (ADR 0004, "The conversations' version"): for the given destinations,
+ * the version of each one's pairs, as one string. The worker reads the store's per-destination versions; the projection
+ * its own.
+ */
+export type ConversationVersions = (destinations: readonly string[]) => string;
+
+/**
+ * The destinations whose pairs a subject could take or wait on: its lead's mobiles and profiles (every detail's key), and
+ * where its attempts went. Another subject's write to a pair of one of these moves its version; nothing else does.
+ */
+export function conversationKeysOf(state: SubjectState): string[] {
+  if (rules.conversationKeysOwnOnly) return [...new Set(state.smsBindings.filter((b) => b.owner === state.subject.id).map((b) => b.recipient))].sort();
+  return [...new Set([...state.lead.details.map((d) => d.key), ...state.attempts.map((a) => a.destination)])].sort();
+}
+
+function remembered(state: SubjectState, matters: boolean, conversations: ConversationVersions): Pick<SettledEvaluation, "conversations" | "conversationKeys"> {
+  if (!matters) return { conversations: null };
+  const keys = conversationKeysOf(state);
+  return { conversations: conversations(keys), conversationKeys: keys };
+}
+
+export function settledEvaluation(state: SubjectState, now: number, nextUserDay: number, conversations: ConversationVersions): SettledEvaluation {
   const lead = leadNow(state.subject.clock, now);
   const at = state.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => now + ((p.startAt ?? 0) - lead));
   // A LinkedIn invite's acceptance deadline: the evaluation at it finishes the track (ADR 0004 3.3).
@@ -1171,7 +1202,7 @@ export function settledEvaluation(state: SubjectState, now: number, nextUserDay:
   if (state.callTasks.some((t) => t.open)) at.push(nextUserDay);
   const recheck = conversationRecheck(state, now);
   if (recheck.at !== null) at.push(recheck.at);
-  return { until: Math.min(Infinity, ...at.filter((t) => t > now)), conversations: recheck.onNewBinding ? conversations : null };
+  return { until: Math.min(Infinity, ...at.filter((t) => t > now)), ...remembered(state, recheck.onNewBinding, conversations) };
 }
 /**
  * How long a readiness check that found nothing to claim holds (the worker's `nothingReady`, the projection's `ready`):
@@ -1179,7 +1210,7 @@ export function settledEvaluation(state: SubjectState, now: number, nextUserDay:
  * conversations change: a hold on an unsettled conversation (`sms_conversation_unsettled`) makes `readyItems` return
  * nothing, and a release or a text found sent changes that with no change to the subject itself.
  */
-export function settledReadiness(state: SubjectState, now: number, conversations: string): SettledEvaluation {
+export function settledReadiness(state: SubjectState, now: number, conversations: ConversationVersions): SettledEvaluation {
   const lead = leadNow(state.subject.clock, now);
   const at = [
     // An invite held as pending elsewhere is checked again at the end of its settling period (question Q42's interim).
@@ -1189,12 +1220,12 @@ export function settledReadiness(state: SubjectState, now: number, conversations
     ...state.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null).map((p) => now + ((p.dueAt ?? 0) - lead)),
     ...state.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => now + ((p.startAt ?? 0) - lead)),
   ];
-  return { until: Math.min(Infinity, ...at.filter((t) => t > now)), conversations: conversationRecheck(state, now).onNewBinding ? conversations : null };
+  return { until: Math.min(Infinity, ...at.filter((t) => t > now)), ...remembered(state, conversationRecheck(state, now).onNewBinding, conversations) };
 }
 
-/** Whether a settled evaluation still holds at `now`, with the conversations as they are now. */
-export function stillSettled(entry: SettledEvaluation, now: number, conversations: string): boolean {
-  return now < entry.until && (entry.conversations === null || entry.conversations === conversations);
+/** Whether a settled evaluation still holds at `now`, with its own destinations' conversations as they are now. */
+export function stillSettled(entry: SettledEvaluation, now: number, conversations: ConversationVersions): boolean {
+  return now < entry.until && (entry.conversations === null || entry.conversations === conversations(entry.conversationKeys ?? []));
 }
 
 /**

@@ -12,11 +12,12 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
  */
 export const LINKEDIN_SEED = 24000;
 /**
- * Offsets from LINKEDIN_SEED: the four the search failed on at e261ffa (46, 69, 73, 93), the four the local run of offsets 30
- * to 99 failed on before this round's push (35, 62, 71, 94; ADR 0004, "The review of e261ffa"), then a greedy cover of every
- * behaviour below over offsets 0 to 29 (16 November 2026).
+ * Offsets from LINKEDIN_SEED: the four the search failed on at e261ffa (46, 69, 73, 93; ADR 0004, "The review of e261ffa"),
+ * then a greedy cover of every behaviour below over offsets 0 to 29 (16 November 2026). The four the local run of offsets 30
+ * to 99 failed on before e261ffa's next push (35, 62, 71, 94) run in the search only, to keep `pnpm check` inside CI's job:
+ * three were the record's errors, and 62's engine change has its own test through HTTP.
  */
-export const LINKEDIN_FIXED_SEEDS: readonly number[] = [5, 8, 18, 29, 35, 46, 62, 69, 71, 73, 93, 94];
+export const LINKEDIN_FIXED_SEEDS: readonly number[] = [5, 8, 18, 29, 46, 69, 73, 93];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const LINKEDIN_FEATURES: readonly string[] = [
   "a-campaign-paused",
@@ -76,6 +77,14 @@ export const LINKEDIN_FEATURES: readonly string[] = [
 ];
 /** Behaviours the runs can name that the fixed seeds do not reach, each pinned by an example test instead (`linkedin-review.test.ts`). */
 export const LINKEDIN_OTHER_FEATURES: readonly string[] = ["unresolved-marked-sent"];
+/**
+ * Invariant 29's fresh-engine comparison in `pnpm check` (a fresh engine per check doubles a run's engine work, and the
+ * per-push set must fit CI's check job): after every FRESH_EVERY-th worker tick and after every tick that moved a
+ * conversation's version, in the fixed seeds; after every tick in the full search, and in the replays of the mutations that
+ * break 29 (their recorded seeds); not in the replays of mutations that break another invariant.
+ */
+const FRESH_EVERY = 10;
+const freshFor = (mutation: { readonly invariant: string }): number => (mutation.invariant === "29" ? 1 : 0);
 const SEARCH_SEEDS = 100;
 const MAX_SEEDS = 30;
 /** Every mutation replay stops after this many engine writes or ticks: an unmutated run of the 100 needs under 300 of each. */
@@ -99,7 +108,7 @@ export function linkedinChunks(): void {
       test(`seeds ${chunk.map((o) => LINKEDIN_SEED + o).join(", ")}`, async () => {
         const failures: string[] = [];
         for (const offset of chunk) {
-          const { problems, stats } = await runLinkedin(LINKEDIN_SEED + offset);
+          const { problems, stats } = await runLinkedin(LINKEDIN_SEED + offset, { freshEvery: FULL_SEARCH ? 1 : FRESH_EVERY });
           for (const f of stats.features) {
             reached.add(f);
             if (!LINKEDIN_FEATURES.includes(f) && !LINKEDIN_OTHER_FEATURES.includes(f)) failures.push(`seed ${LINKEDIN_SEED + offset} reached "${f}", which is not in LINKEDIN_FEATURES`);
@@ -126,13 +135,13 @@ export function linkedinOracle(): void {
       const breaks = (problems: readonly string[]) => problems.some((p) => linkedinInvariantsOf(p).includes(mutation.invariant));
       if (!FULL_SEARCH) {
         const undo = mutation.patch?.();
-        const { problems } = await runLinkedin(LINKEDIN_SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES, maxTicks: RUN_TICKS }).finally(() => undo?.());
+        const { problems } = await runLinkedin(LINKEDIN_SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES, maxTicks: RUN_TICKS, freshEvery: freshFor(mutation) }).finally(() => undo?.());
         expect(breaks(problems), `seed ${LINKEDIN_SEED + mutation.seed} no longer breaks ${mutation.invariant}; run the sequence-search workflow and update its seed. Problems: ${problems.join("; ")}`).toBe(true);
         return;
       }
       const undo = mutation.patch?.();
-      let caught: string | null = breaks((await runLinkedin(LINKEDIN_SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES, maxTicks: RUN_TICKS })).problems) ? `recorded seed offset ${mutation.seed}` : null;
-      for (let i = 0; i < MAX_SEEDS && caught === null; i++) if (breaks((await runLinkedin(LINKEDIN_SEED + i, { rules: mutation.rules, maxWrites: RUN_WRITES, maxTicks: RUN_TICKS })).problems)) caught = `seed offset ${i}`;
+      let caught: string | null = breaks((await runLinkedin(LINKEDIN_SEED + mutation.seed, { rules: mutation.rules, maxWrites: RUN_WRITES, maxTicks: RUN_TICKS, freshEvery: freshFor(mutation) })).problems) ? `recorded seed offset ${mutation.seed}` : null;
+      for (let i = 0; i < MAX_SEEDS && caught === null; i++) if (breaks((await runLinkedin(LINKEDIN_SEED + i, { rules: mutation.rules, maxWrites: RUN_WRITES, maxTicks: RUN_TICKS, freshEvery: freshFor(mutation) })).problems)) caught = `seed offset ${i}`;
       undo?.();
       report(`killing seed: LinkedIn mutation "${name}" (${mutation.invariant}): ${caught ?? `none in offsets 0-${MAX_SEEDS - 1}`}; recorded seed ${mutation.seed}`);
       expect(caught, `no seed broke ${mutation.invariant} for "${name}"`).not.toBeNull();

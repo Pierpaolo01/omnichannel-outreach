@@ -336,16 +336,42 @@ Twelve items. Each real bug is reproduced through HTTP first (`linkedin-review.t
 
 What the new draws found in the engine, fixed here: an invite pending from elsewhere was not held between two checks outside its window (it is now held until a check finds it gone); and a LinkedIn step whose kind no session allowed read a time it could never keep (it reads `sending_capacity`). And in the record, fixed: a re-import that replaced a connected profile, a rate-limited invite retried from another session, and a request a crash failed after its write committed.
 
-## The conversations' version (the re-check of dd3969c, item 1)
+## The conversations' version (the re-checks of dd3969c, item 1, and of 8c85b2f, items 1 and 3)
 
-Every cache that skips work while "nothing changed" keys on the conversations' version too: the worker's evaluation and readiness caches, and the projection's. Four times a cache outlived a change of conversations, because the version was a list of events someone remembered to include. It is now made by construction. The database moves one counter (`conversation_version`, migration 23) by trigger, in the same write, on every write to a fact a pair's ownership or knownness is read from, whatever wrote it. **The inputs, written down once** (`CONVERSATION_INPUT_TABLES` in `sqlite-engine-store.ts`):
-- the pair rows (`sms_bindings`);
-- the owner's provider work (`provider_work`: what went, and when);
-- the owner's track progress (`track_progress`: a connection, an acceptance, a withdrawal);
-- the owner's ending (`enrollments.ended`, `test_runs.ended`);
-- replies (`reply_events`: a resolved SMS reply on the pair).
+Every cache that skips work while "nothing changed" keys on the conversations' version too: the worker's evaluation and readiness caches, and the projection's. Four times a cache outlived a change of conversations, because the version was a list of events someone remembered to include. It is now made by construction. The database moves the version itself, by trigger, in the same write, on every write to a fact a pair's ownership or knownness is read from, whatever wrote it.
 
-A write to a subject that owns no pair moves nothing. The ownership query (`CONVERSATION_PAIRS_QUERY`) reads exactly these tables, and otherwise only names and the lead's destinations (`CONVERSATION_LOOKUP_TABLES`). A test fails when the query reads a table that is neither an input with its trigger nor a lookup, or an input has no trigger. The generated LinkedIn runs now assert invariant 29 after every worker tick, as the track runs do: a fresh engine on the same store at the same instant finds nothing to change and nothing to hand over. Its mutation, "the conversations' version ignores every change", is killed at seed 11. The re-check's scenario is a test through HTTP: an acceptance during a withdrawal stores the waiting campaign's skip and sends its email, with no restart. It fails on `dd3969c`'s version.
+**The inputs, written down once** (`CONVERSATION_INPUTS` in `sqlite-engine-store.ts`, with the columns the ownership query reads):
+- the pair rows (`sms_bindings`, every column);
+- the owner's provider work (`provider_work`: subject, account, destination, `settled`, `sent_wall`);
+- the owner's track progress (`track_progress`: subject, `connection`, `destination_detail_id`, `invite_withdrawal`, `accepted_wall`);
+- the owner's ending and identity (`enrollments` and `test_runs`: `ended`, campaign, person or test profile);
+- replies (`reply_events`: state, number, mobile, time).
+
+An insert or delete of a row moves the version; an update moves it only when it changes one of those columns. The ownership query (`CONVERSATION_PAIRS_QUERY`) reads exactly these, and otherwise only names and the lead's destinations (`CONVERSATION_LOOKUP_TABLES`). A test fails if any of these holds:
+- the query reads a table that is neither an input nor a lookup;
+- an input has no trigger;
+- a listed column is not one the query reads;
+- an update trigger watches other columns than its list.
+
+**Per destination, not global** (the re-check of 8c85b2f, item 1). A single counter made every pair-owning subject's cached answer go stale on any one subject's write: at 2,000 leads with an SMS pair each, a tick after 20 progress writes read 3,998 subjects. The version is now one counter per mobile or profile (`conversation_versions`), and each write moves only the destinations it belongs to:
+- a pair row moves its recipient;
+- an owner's work, progress or ending moves the recipients of the pairs that subject owns (`sms_bindings_by_owner` is the index for it);
+- a reply moves its address.
+
+A cached evaluation remembers the versions of its own destinations only: its lead's mobiles and profiles, and where its attempts went (`conversationKeysOf`). Another subject's write moves it only through a pair on one of those destinations. The engine reads all versions once per pass, so each subject's check is in memory. The projection, which builds its own world, keeps one version for every pair.
+
+**Tests and mutations.** The generated LinkedIn runs assert invariant 29 (a fresh engine on the same store at the same instant finds nothing to change or hand over) as the track runs do. Two mutations break it:
+- "the conversations' version ignores every change": seed 11 in the LinkedIn runs;
+- "a change to another subject's pair on the same destination does not invalidate a waiting subject" (a cache remembering only the destinations of pairs it owns): seed 11 in the LinkedIn runs, seed 50 in the track runs.
+
+The re-check's acceptance-during-a-withdrawal scenario is a test through HTTP; it fails on `dd3969c`'s version.
+
+**What the per-push set checks, and what only the search does.** A fresh engine per comparison doubles a run's engine work. With it after every tick, the per-push check outgrew CI's 40-minute job on `8c85b2f`. So:
+- **`pnpm check`'s fixed LinkedIn seeds** compare after every 10th worker tick, and after every tick that moved a conversation's version (`freshEvery` 10, `FRESH_EVERY` in `linkedin-chunks.ts`).
+- **The two mutations that break invariant 29** are replayed with a comparison after every tick, on their recorded seeds.
+- **Other mutations' replays** make no comparison, since they target other invariants.
+- **The full search** (CI's `sequence-search` shards) compares after every tick, on every seed.
+- **The track runs** compare after every tick, as before.
 
 ## The review of `e261ffa` (review bot, search and re-check, 16 November 2026)
 
@@ -375,17 +401,17 @@ A write to a subject that owns no pair moves nothing. The ownership query (`CONV
 - **24094 (L13): the record.** One session was pending from elsewhere with invite room; the two clear sessions had the user's zero. By section 6's rule the track waits for capacity, and the read said so. The record counted the pending session's room, though no invite goes from it.
 - **24062 (L13): the record as in 24094, and an engine read.** Outside the window the checks age unasked, and the read went back to judging room over every session, promising the next opening for an invite that can never go. A read now judges room on every session's latest answer (`inviteSessions`), while a claim still waits for fresh answers. A test through HTTP fails without the change.
 
-The run was clean after these, and all four are in the fixed seeds too.
+The run was clean after these. They ran in the fixed seeds for one push, and since the re-check of `8c85b2f` they run in the search only, to keep `pnpm check` inside CI's job: three were the record's errors, and 24062's engine change has its own test through HTTP.
 
 One more found locally while drawing restarts: offset 29, L3. The record held that nothing follows a marked reply, but a lead marked replied may be restarted from its next unsent step (ADR 0003, "for a lead that replied or was stopped"), and the engine did that. The record wrong; L3 now asks nothing after a mark only until a restart after it.
 
-The four are in the fixed seeds (5, 8, 18, 29, 35, 46, 62, 69, 71, 73, 93, 94), each passing for the reason in the table.
+The four are in the fixed seeds (5, 8, 18, 29, 46, 69, 73, 93), each passing for the reason in the table.
 
 ## As built (part a, 16 November 2026)
 
 - **Code.** `src/domain/linkedin-profile.ts` (the URL rule); `definition.ts` (`linkedin`, `acceptWaitDays`, `linkedinPool`, `linkedinStepKind`, the validator); `progress.ts` (the LinkedIn section: `awaitingAcceptance`, `acceptDeadline`, `connect`, `recordAcceptance`, `inviteExpired`, `inviteAlreadyConnected`, the withdrawal answer); `dispatch.ts` (`forAction`, the kind's view of an account; `noteFor`, decided in `handOver`; the `awaiting_acceptance` read); `controls.ts` (`markReplied`); the engine's LinkedIn port, event, pre-send and withdrawal passes; migration 22; `rulesWith` (`rules.ts`), so a swapped `inviteExpired` is the one every evaluation applies, in the engine and in the reads.
 - **Routes.** `POST /api/enrollments/:id/replies`, `PUT /api/sender-accounts/:id/allowances`, `GET /api/linkedin-provider`, and the test profile (`linkedin`) on `PUT /api/campaigns/:id/test-contacts`.
-- **Tests.** `src/domain/linkedin-profile.test.ts`; `src/server/engine/linkedin.test.ts` (invite with note, acceptance, follow-ups; already connected; the expiry with withdrawal and the track after it; a late acceptance; missing and unreachable profiles; allowances and the note; the reply mark; the running app's blocker 3); the generated runs `test/support/generated-linkedin.ts` with mutations in `test/support/linkedin-mutations.ts`, each killed by its recorded seed offset from 24000 (10.3's table). Fixed seeds 5, 8, 18, 29, 35, 46, 62, 69, 71, 73, 93 and 94 reach every behaviour the runs name (`LINKEDIN_FEATURES`); one more (`unresolved-marked-sent`) is pinned by an example test. The connection gate is one function (`connectionGate`), read by the due-time resolution and by handover predicate 19; the pre-send check's `pending` is a second layer (`outstandingInviteStops`), so the mutations of the first layer turn it off too.
+- **Tests.** `src/domain/linkedin-profile.test.ts`; `src/server/engine/linkedin.test.ts` (invite with note, acceptance, follow-ups; already connected; the expiry with withdrawal and the track after it; a late acceptance; missing and unreachable profiles; allowances and the note; the reply mark; the running app's blocker 3); the generated runs `test/support/generated-linkedin.ts` with mutations in `test/support/linkedin-mutations.ts`, each killed by its recorded seed offset from 24000 (10.3's table). Fixed seeds 5, 8, 18, 29, 46, 69, 73 and 93 reach every behaviour the runs name (`LINKEDIN_FEATURES`); one more (`unresolved-marked-sent`) is pinned by an example test. The connection gate is one function (`connectionGate`), read by the due-time resolution and by handover predicate 19; the pre-send check's `pending` is a second layer (`outstandingInviteStops`), so the mutations of the first layer turn it off too.
 - **L2 is checked on the handover log**, not only deliveries: the simulated platform refuses a message to a non-connection, so a broken engine's early message never lands, and the invariant is that the engine never asks.
 - **Two holes the first runs found and the record now models:** the acceptance deadline was neither a wake of the worker nor a horizon of its evaluation cache, so an expiry waited for an unrelated tick (`settledEvaluation` and `nextWakeAt` now include it); and the record's held-time arithmetic had to walk the holds forward (`afterHolds`) rather than iterate.
 - **Not built in part a:** the canvas, the record's screens and the measures panel (part b); a test run's tab line for awaiting acceptance (the read gives the reason; part b words it).

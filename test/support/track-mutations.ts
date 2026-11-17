@@ -242,10 +242,18 @@ const RULES: Record<string, Partial<Rules>> = {
   // Review bot on b21af02: the LinkedIn session taken from any pair the subject owns, whatever its channel (a module seam,
   // `PATCHES` below).
   "a binding lookup ignores the channel": {},
+  // The re-check of 8c85b2f, item 1: a cache remembers only its own pairs' destinations (`PATCHES` below).
+  "a change to another subject's pair on the same destination does not invalidate a waiting subject": {},
 };
 
 /** Swaps outside the engine's rules (a module seam), applied for a replay and undone after it. */
 const PATCHES: Record<string, () => () => void> = {
+  "a change to another subject's pair on the same destination does not invalidate a waiting subject": () => {
+    progressRules.conversationKeysOwnOnly = true;
+    return () => {
+      progressRules.conversationKeysOwnOnly = false;
+    };
+  },
   "a binding lookup ignores the channel": () => {
     progressRules.pairsByChannel = false;
     return () => {
@@ -288,6 +296,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "first messages before follow-ups": { invariant: "12", seed: 3 },
   "newest due first": { invariant: "12", seed: 3 },
   "a binding lookup ignores the channel": { invariant: "L16", seed: 3 },
+  "a change to another subject's pair on the same destination does not invalidate a waiting subject": { invariant: "29", seed: 50 },
 };
 
 export const TRACK_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly patch?: () => () => void }> = Object.fromEntries(
