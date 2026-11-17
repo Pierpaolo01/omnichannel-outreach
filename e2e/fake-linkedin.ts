@@ -64,9 +64,10 @@ export const LINKEDIN_DEFINITION: CampaignDefinition = { timezone: "Europe/Londo
  * `fresh`: leads imported, no sequence (the canvas from empty). `ready`: the LinkedIn sequence, not launched, with the user's
  * test profile saved. `running`: launched, Wednesday noon (Pat connected, Nia and Ivo waiting for acceptance, Ola stopped
  * with her invite open, a second campaign skipping Pat). `later`: the same, Friday noon (Nia's withdrawal stuck at unknown,
- * Ivo's acceptance recorded after his track ended).
+ * Ivo's acceptance recorded after his track ended). `testing`: `ready`, with a test run whose invite went to the test profile
+ * and waits for the user to accept it.
  */
-export type LinkedinScenario = "fresh" | "ready" | "running" | "later";
+export type LinkedinScenario = "fresh" | "ready" | "testing" | "running" | "later";
 
 export interface FakeLinkedinApp {
   readonly url: string;
@@ -109,9 +110,16 @@ async function start(scenario: LinkedinScenario): Promise<FakeLinkedinApp> {
   const enrollment = async (name: string, campaignId = campaign.id) => (await rows()).find((r) => r.name === name)?.enrollments.find((e) => e.campaign.id === campaignId)?.id ?? "";
   let second: string | null = null;
   if (scenario !== "fresh") await h.defineSequence(campaign.id, LINKEDIN_DEFINITION);
-  if (scenario === "ready") {
+  if (scenario === "ready" || scenario === "testing") {
     const contacts = await h.request("PUT", `/api/campaigns/${campaign.id}/test-contacts`, { email: "", mobile: "", linkedin: TEST_PROFILE });
     if (contacts.status !== 200) throw new Error(`test profile refused: ${JSON.stringify(contacts.body)}`);
+  }
+  if (scenario === "testing") {
+    const tab = (await h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${campaign.id}/test-runs`)).body;
+    h.clock = LI_MONDAY_8 + H + 30 * MIN;
+    const run = await h.request("POST", `/api/campaigns/${campaign.id}/test-runs`, { requestId: "li-test-1", renderAs: await enrollment("Pat Oneil"), expect: { definitionVersion: tab.definitionVersion } });
+    if (run.status !== 200) throw new Error(`test run refused: ${JSON.stringify(run.body)}`);
+    await h.advanceTo(h.clock + 10 * MIN);
   }
   if (scenario === "running" || scenario === "later") {
     h.clock = LI_MONDAY_8;

@@ -477,7 +477,7 @@ function RunRead({ run, tab, presses }: { run: TestRunRead; tab: TestRunTabView;
           );
         })}
       </ol>
-      {run.linkedinReply !== null && run.running && <TestReplyMark run={run} presses={presses} />}
+      {run.linkedinReply !== null && <TestReplyMark run={run} presses={presses} />}
     </>
   );
 }

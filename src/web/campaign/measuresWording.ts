@@ -22,7 +22,7 @@ export function messagesLine(m: MessageMeasures): string {
 export function linkedinLine(m: LinkedinMeasures): string {
   if (m.invitesSent === 0 && m.messagesSent === 0 && m.failed === 0 && m.replies === 0) return "None sent yet";
   const t = m.fromTests;
-  return `${m.invitesSent} ${m.invitesSent === 1 ? "invite" : "invites"} sent${fromTests(t.invitesSent)} · ${m.invitesAccepted} accepted${fromTests(t.invitesAccepted)} · ${m.messagesSent} ${m.messagesSent === 1 ? "message" : "messages"} sent${fromTests(t.messagesSent)} · ${m.failed} failed${fromTests(t.failed)} · ${plural(m.replies, "lead", "leads")} marked replied${fromTests(t.replies)}`;
+  return `${m.invitesSent} ${m.invitesSent === 1 ? "invite" : "invites"} sent${fromTests(t.invitesSent)} · ${m.invitesAccepted} accepted${fromTests(t.invitesAccepted)} · ${m.messagesSent} ${m.messagesSent === 1 ? "message" : "messages"} sent${fromTests(t.messagesSent)} · ${m.failed} failed${fromTests(t.failed)} · ${t.replies > 0 ? `${m.replies} marked replied${fromTests(t.replies)}` : `${plural(m.replies, "lead", "leads")} marked replied`}`;
 }
 
 /** The calls logged, test calls included: made, connected, interested, declined, and callbacks pending. */

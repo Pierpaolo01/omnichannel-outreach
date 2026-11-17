@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
 import type { BeforeLaunchView, CampaignDefinition, CampaignListItem, CompanyRecord, ControlStepView, ControlView, EnrollmentRead, ImportRecord, LeadControlApi, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, RecordCalls, RecordColleagues, RecordControls, RecordLead, SequenceView, SummaryEntry, TodayView } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
+import { fakeLinkedinApp, type FakeLinkedinApp, type LinkedinScenario } from "./fake-linkedin.ts";
 import { FAKE_INBOX, FAKE_NUMBERS, OWN_TEST_EMAIL, OWN_TEST_MOBILE, TWO_CHANNELS, fakeCallsApp, fakeInterruptionApp, fakePeopleApp, fakeProviderApp, fakeTestRunApp, fakeMeasuresApp, type MeasuresScenario, type CallsScenario, type FakeCallsApp, type FakePeopleApp, type FakeProviderApp, type FakeTestRunApp, type InterruptionScenario } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
 
@@ -2224,7 +2225,20 @@ export const SCREENS: readonly Screen[] = [
   { name: "measures: with a test run", open: async (page) => { await measuresScreen(page, "with-test"); await settle(page, "from test runs"); } },
   { name: "measures: a paused campaign", open: async (page) => { await measuresScreen(page, "paused"); await settle(page, "1 callback pending"); } },
   { name: "measures: figures that may be out of date", open: async (page) => { await staleMeasures(page); } },
+  // Ticket 24b: a LinkedIn track on the simulated provider (`fakeLinkedinApp`); no LinkedIn session is connected anywhere.
+  { name: "linkedin: the canvas and the track's inspector", open: async (page) => { await linkedinScreen(page, "ready", (f) => `/campaigns/${f.campaign}?track=li`); await settle(page, "Wait for acceptance"); } },
+  { name: "linkedin: before launch", open: async (page) => { await linkedinScreen(page, "ready", (f) => `/campaigns/${f.campaign}/before-launch`); await settle(page, "have a LinkedIn profile"); } },
+  { name: "linkedin: a test run waiting for you to accept the invite", open: async (page) => { await linkedinScreen(page, "testing", (f) => `/campaigns/${f.campaign}/test-run`); await settle(page, "Waiting for you to accept the invite on your test profile"); } },
+  { name: "linkedin: a record with a withdrawal LinkedIn never confirmed", open: async (page) => { await linkedinScreen(page, "later", async (f) => `/leads/people/${await f.person("Nia Cole")}`); await settle(page, "It’s still there"); } },
+  { name: "linkedin: today with a withdrawal to check", open: async (page) => { await linkedinScreen(page, "later", () => "/"); await settle(page, "Check whether Nia Cole’s LinkedIn invite was withdrawn"); } },
 ];
+
+/** Opens a page of ticket 24b's simulated-LinkedIn app, at its clock. */
+async function linkedinScreen(page: Page, scenario: LinkedinScenario, path: (f: FakeLinkedinApp) => string | Promise<string>): Promise<void> {
+  const f = await fakeLinkedinApp(scenario, `linkedin-screens-${scenario}`);
+  await page.clock.setFixedTime(f.h.clock);
+  await page.goto(`${f.url}${await path(f)}`);
+}
 
 /**
  * Standing check (e2e/focus.spec.ts): a keyboard action that removes or replaces the focused

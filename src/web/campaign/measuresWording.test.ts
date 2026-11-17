@@ -81,6 +81,13 @@ describe("LinkedIn measures in words (ADR 0004 section 8)", () => {
   });
 });
 
+describe("a marked LinkedIn reply from a test run is never called a lead (ticket 24b)", () => {
+  test("with a test run among them, replies are said as replies", () => {
+    const zero = { invitesSent: 0, invitesAccepted: 0, messagesSent: 0, failed: 0, replies: 0 };
+    expect(linkedinLine({ invitesSent: 2, invitesAccepted: 2, messagesSent: 2, failed: 0, replies: 2, fromTests: { ...zero, replies: 1 } })).toBe("2 invites sent · 2 accepted · 2 messages sent · 0 failed · 2 marked replied (1 from test runs)");
+  });
+});
+
 describe("how LinkedIn figures are counted (ticket 24b)", () => {
   test("said only for a campaign with a LinkedIn track, claiming no delivery or reading", () => {
     expect(measureNotes(["email"])).toEqual(MEASURE_NOTES);
