@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { ACCOUNTS, fakeInstagramApp, TEST_ACCOUNT, type FakeInstagramApp } from "./fake-instagram.ts";
+import { ACCOUNTS, fakeInstagramApp, IG_MONDAY_8, TEST_ACCOUNT, type FakeInstagramApp } from "./fake-instagram.ts";
 
 /**
  * Ticket 25's demonstration (recorded with RECORD_DEMO=1; screenshots with EVIDENCE_DIR) and its states, on the **simulated**
@@ -183,5 +183,59 @@ test.describe("Instagram's states", () => {
     await expect(page.getByText(/^The first message went to their own Instagram account/)).toBeVisible();
     await expect(page.getByRole("button", { name: /^Mark replied on Instagram/ })).toBeVisible();
     await shot(page, "14-record-running");
+  });
+});
+
+test.describe("the sender choice and what has left the app (the council on 5a30b9f, item 5)", () => {
+  const SESSION_1 = /^Simulated Instagram \(not a session\) ig-session-1/;
+  const SESSION_2 = /^Simulated Instagram \(not a session\) ig-session-2/;
+
+  test("two sessions ticked, one of them unable to send, said beside it", async ({ page }) => {
+    const f = await fakeInstagramApp("two-sessions");
+    await at(page, f, `/campaigns/${f.campaign}?track=ig`);
+    await expect(page.getByRole("checkbox", { name: SESSION_1 })).toBeChecked();
+    await expect(page.getByRole("checkbox", { name: SESSION_2 })).toBeChecked();
+    await expect(page.getByText("can’t send: the provider reports it unavailable")).toBeVisible();
+    await page.getByRole("checkbox", { name: SESSION_2 }).scrollIntoViewIfNeeded();
+    await shot(page, "17-sender-choice-two-sessions-one-cannot-send");
+  });
+
+  test("a stale tab's save is refused: what it typed is kept, and the saved version is offered", async ({ browser }) => {
+    const f = await fakeInstagramApp("two-sessions", "two-sessions-stale");
+    const context = await browser.newContext();
+    const a = await context.newPage();
+    const b = await context.newPage();
+    for (const p of [a, b]) await at(p, f, `/campaigns/${f.campaign}?track=ig&step=ig-m1`);
+    // Tab B unticks the session that cannot send, and its save lands.
+    await b.getByRole("checkbox", { name: SESSION_2 }).uncheck();
+    await expect(b.getByRole("status").filter({ hasText: "Saved" }).first()).toBeVisible();
+    // Tab A, loaded before it, edits the message: refused, nothing of B's choice is overwritten.
+    await a.getByLabel("Message request message").fill("Hi {{first_name|there}}, written in a tab that loaded earlier.");
+    await expect(a.getByText("This campaign was changed elsewhere since this page loaded it.")).toBeVisible();
+    await expect(a.getByRole("button", { name: "Load the saved version" })).toBeVisible();
+    await shot(a, "18-stale-save-refused");
+    await context.close();
+  });
+
+  test("the inspector at a narrow width", async ({ page }) => {
+    const f = await fakeInstagramApp("two-sessions", "two-sessions-narrow");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await at(page, f, `/campaigns/${f.campaign}?track=ig`);
+    await expect(page.getByRole("checkbox", { name: SESSION_1 })).toBeVisible();
+    // Nothing runs off the side of the page.
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.getByRole("checkbox", { name: SESSION_1 }).scrollIntoViewIfNeeded();
+    await shot(page, "19-inspector-narrow");
+  });
+
+  test("a step claimed and not yet handed over: the record says nothing has gone out yet", async ({ page }) => {
+    const f = await fakeInstagramApp("claimed");
+    expect(f.h.clock).toBe(IG_MONDAY_8 + H + 60_000);
+    expect(f.h.instagram.handoverLog).toHaveLength(1);
+    const waiting = f.h.instagram.handoverLog[0]!.subjectId === (await f.enrollment("Pat Oneil")) ? "Nia Cole" : "Pat Oneil";
+    await at(page, f, `/leads/people/${await f.person(waiting)}`);
+    await expect(page.getByText(/^Nothing has gone out yet\./)).toBeVisible();
+    await expect(page.getByText(/was handed over/)).toHaveCount(0);
+    await shot(page, "20-record-claimed-not-handed-over");
   });
 });

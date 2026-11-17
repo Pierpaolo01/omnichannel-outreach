@@ -18,6 +18,9 @@ const H = 60 * MIN;
 export const IG_MONDAY_8 = Date.parse("2026-11-02T08:00:00Z");
 export const IG_SESSION = "ig-session-1";
 export const IG_SESSION_ID = socialAccountId("instagram", IG_SESSION);
+/** A second simulated session, a personal profile signed out: chosen, but it cannot send (the `two-sessions` scenario). */
+export const IG_SESSION_2 = "ig-session-2";
+export const IG_SESSION_2_ID = socialAccountId("instagram", IG_SESSION_2);
 export const TEST_ACCOUNT = "https://www.instagram.com/example_my_own_test";
 const account = (name: string) => `https://www.instagram.com/example_${name}`;
 export const ACCOUNTS = { pat: account("pat.oneil"), harbour: account("harbour_lane_physio"), quay: account("quayside_clinic") } as const;
@@ -54,9 +57,11 @@ export const INSTAGRAM_DEFINITION: CampaignDefinition = { timezone: "Europe/Lond
  * `fresh`: leads imported, no sequence (the canvas from empty). `ready`: the Instagram sequence, not launched, with the user's
  * test account saved. `running`: launched, Monday 10:00 (Pat's and Nia's first messages sent, Kim skipped). `no-allowance`:
  * as `running` with the session's allowance never set, so nothing goes and the read says why. `no-session`: the sequence, with
- * no Instagram session at all, as the running application has none: launch is blocked.
+ * no Instagram session at all, as the running application has none: launch is blocked. `two-sessions`: the sequence, not
+ * launched, choosing two sessions, one of them signed out. `claimed`: launched at 09:00 on one session pacing its messages
+ * ten minutes apart, a minute later: the first lead's message went, the second's is claimed and not yet handed over.
  */
-export type InstagramScenario = "fresh" | "ready" | "running" | "no-allowance" | "no-session";
+export type InstagramScenario = "fresh" | "ready" | "running" | "no-allowance" | "no-session" | "two-sessions" | "claimed";
 
 export interface FakeInstagramApp {
   readonly url: string;
@@ -79,7 +84,15 @@ async function start(scenario: InstagramScenario): Promise<FakeInstagramApp> {
   const h = new EngineHarness({
     start: IG_MONDAY_8 - H,
     accounts: [{ id: FAKE_INBOX, capacity: 30, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
-    instagram: { sessions: scenario === "no-session" ? [] : [{ id: IG_SESSION, kind: "business", gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }] },
+    instagram: {
+      sessions:
+        scenario === "no-session"
+          ? []
+          : [
+              { id: IG_SESSION, kind: "business", gapMs: scenario === "claimed" ? 10 * MIN : MIN, k: 1, healthy: true, resetZone: "Europe/London" },
+              ...(scenario === "two-sessions" ? [{ id: IG_SESSION_2, kind: "personal" as const, gapMs: MIN, k: 1, healthy: false, resetZone: "Europe/London" }] : []),
+            ],
+    },
   });
   await h.tick();
   // The user's allowance for the simulated session (ADR 0004 13.7: no default).
@@ -92,7 +105,8 @@ async function start(scenario: InstagramScenario): Promise<FakeInstagramApp> {
   const rows = async () => (await h.request<LeadSearchResult>("GET", "/api/leads?limit=500")).body.rows;
   const person = async (name: string) => (await rows()).find((r) => r.name === name)?.id ?? "";
   const enrollment = async (name: string) => (await rows()).find((r) => r.name === name)?.enrollments.find((e) => e.campaign.id === campaign.id)?.id ?? "";
-  if (scenario !== "fresh") await h.defineSequence(campaign.id, INSTAGRAM_DEFINITION);
+  if (scenario === "two-sessions") await h.defineSequence(campaign.id, { ...INSTAGRAM_DEFINITION, tracks: [{ ...INSTAGRAM_TRACK, senders: [IG_SESSION_ID, IG_SESSION_2_ID] }] });
+  else if (scenario !== "fresh") await h.defineSequence(campaign.id, INSTAGRAM_DEFINITION);
   if (scenario === "ready") {
     const contacts = await h.request("PUT", `/api/campaigns/${campaign.id}/test-contacts`, { email: "", mobile: "", instagram: TEST_ACCOUNT });
     if (contacts.status !== 200) throw new Error(`test account refused: ${JSON.stringify(contacts.body)}`);
@@ -102,6 +116,12 @@ async function start(scenario: InstagramScenario): Promise<FakeInstagramApp> {
     const launched = await h.launch(campaign.id);
     if (launched.status !== 200) throw new Error(`launch refused: ${JSON.stringify(launched.body)}`);
     await h.advanceTo(IG_MONDAY_8 + 2 * H);
+  }
+  if (scenario === "claimed") {
+    h.clock = IG_MONDAY_8 + H;
+    const launched = await h.launch(campaign.id);
+    if (launched.status !== 200) throw new Error(`launch refused: ${JSON.stringify(launched.body)}`);
+    await h.advanceTo(IG_MONDAY_8 + H + MIN);
   }
   return { url: await serveHarness(h), h, campaign: campaign.id, person, enrollment };
 }
