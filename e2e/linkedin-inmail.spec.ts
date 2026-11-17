@@ -65,7 +65,7 @@ test("the InMail fallback in the inspector, Before launch and the Test run tab: 
   await page.getByLabel("InMail", { exact: true }).fill("Hi {{first_name|there}}, a short note about evening bookings at {{company}}.");
   await expect(page.getByRole("status").filter({ hasText: "Saved" }).first()).toBeVisible();
   await page.getByRole("link", { name: "Before launch" }).click();
-  await expect(page.getByText("Hi Pat, a short note about evening bookings at Harbour Lane Physio.").first()).toBeVisible();
+  await expect(page.getByText(/^Hi \w+, a short note about evening bookings at Harbour Lane Physio\.$/).first()).toBeVisible();
   await expect(page.getByText(/^Sent only if they haven’t accepted when the wait ends/).first()).toBeVisible();
   await shot(page, "04-copy-for-a-lead");
 

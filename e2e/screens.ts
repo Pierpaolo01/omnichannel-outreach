@@ -2231,6 +2231,9 @@ export const SCREENS: readonly Screen[] = [
   { name: "linkedin: a test run waiting for you to accept the invite", open: async (page) => { await linkedinScreen(page, "testing", (f) => `/campaigns/${f.campaign}/test-run`); await settle(page, "Waiting for you to accept the invite on your test profile"); } },
   { name: "linkedin: a record with a withdrawal LinkedIn never confirmed", open: async (page) => { await linkedinScreen(page, "later", async (f) => `/leads/people/${await f.person("Nia Cole")}`); await settle(page, "It’s still there"); } },
   { name: "linkedin: today with a withdrawal to check", open: async (page) => { await linkedinScreen(page, "later", () => "/"); await settle(page, "Check whether Nia Cole’s LinkedIn invite was withdrawn"); } },
+  // Ticket 27: the InMail fallback, switched on, in the inspector; and a record whose wait ends with an InMail.
+  { name: "linkedin: the inspector with the InMail fallback on", open: async (page) => { await linkedinScreen(page, "inmail-ready", (f) => `/campaigns/${f.campaign}?track=li`); await settle(page, "Send an InMail if they don’t accept in time"); } },
+  { name: "linkedin: a record waiting, with the InMail fallback on", open: async (page) => { await linkedinScreen(page, "inmail", async (f) => `/leads/people/${await f.person("Nia Cole")}`); await settle(page, "an InMail goes instead"); } },
 ];
 
 /** Opens a page of ticket 24b's simulated-LinkedIn app, at its clock. */
