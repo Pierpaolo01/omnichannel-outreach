@@ -1,3 +1,4 @@
+import { isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
 import type { SendChannelApi } from "../../shared/api.ts";
 import type { AttentionLead, InterruptionNoticeView, NeedsAttention, SendingInterruptedView } from "../../shared/api.ts";
 import { dateIn, holdReasonClause, isoDateIn, timeIn, type AttentionItem } from "./wording.ts";
@@ -44,7 +45,12 @@ const CHANNEL_WORDS: Record<Channel, { provider: string; accounts: string; accou
   email: { provider: "Instantly", accounts: "inboxes", account: "inbox", send: (n) => `${n} email ${n === 1 ? "send" : "sends"}`, due: (n) => (n === 1 ? "email" : "emails") },
   sms: { provider: "the SMS provider", accounts: "numbers", account: "SMS number", send: (n) => `${n} ${n === 1 ? "text" : "texts"}`, due: (n) => (n === 1 ? "text" : "texts") },
   linkedin: { provider: "the LinkedIn session", accounts: "LinkedIn sessions", account: "LinkedIn session", send: (n) => `${n} LinkedIn ${n === 1 ? "step" : "steps"}`, due: (n) => (n === 1 ? "LinkedIn step" : "LinkedIn steps") },
-  instagram: { provider: "the Instagram session", accounts: "Instagram sessions", account: "Instagram session", send: (n) => `${n} Instagram ${n === 1 ? "message" : "messages"}`, due: (n) => (n === 1 ? "Instagram message" : "Instagram messages") },
+  ...(Object.fromEntries(
+    MESSAGE_REQUEST_CHANNELS.map((c) => {
+      const name = SOCIAL_CHANNELS[c].name;
+      return [c, { provider: `the ${name} session`, accounts: `${name} sessions`, account: `${name} session`, send: (n: number) => `${n} ${name} ${n === 1 ? "message" : "messages"}`, due: (n: number) => (n === 1 ? `${name} message` : `${name} messages`) }];
+    }),
+  ) as { readonly [C in MessageRequestChannel]: { provider: string; accounts: string; account: string; send: (n: number) => string; due: (n: number) => string } }),
 };
 
 const capital = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
@@ -163,13 +169,14 @@ function noAllowanceItem(steps: readonly NeedsAttention["waitingForCapacity"][nu
   const first = steps[0] as NeedsAttention["waitingForCapacity"][number];
   const leads = new Set(steps.map((w) => w.enrollmentId)).size;
   const kinds = [...new Set(steps.map((w) => w.action))];
-  const instagram = first.channel === "instagram";
-  const platform = instagram ? "Instagram" : "LinkedIn";
-  const what = instagram ? "messages" : kinds.length === 1 && kinds[0] === "invite" ? "invites" : kinds.length === 1 && kinds[0] === "message" ? "LinkedIn messages" : "invites or messages";
+  // In the step's own channel's words (ticket 25): a message-request channel has messages only.
+  const request = isMessageRequestChannel(first.channel);
+  const platform = isSocialChannel(first.channel) ? SOCIAL_CHANNELS[first.channel].name : "LinkedIn";
+  const what = request ? "messages" : kinds.length === 1 && kinds[0] === "invite" ? "invites" : kinds.length === 1 && kinds[0] === "message" ? "LinkedIn messages" : "invites or messages";
   const body = `No ${platform} session ${leads === 1 ? "it" : "they"} may use has an allowance for ${what}, so ${leads === 1 ? "it waits" : "they wait"}. With no allowance there is no room on any day, so no time is given; nothing is dropped.`;
   // LinkedIn's key is as it was (ticket 24b); another channel's carries the channel.
-  const key = instagram ? `no-allowance-${first.campaign.id}-${first.channel}` : `no-allowance-${first.campaign.id}`;
-  const step = instagram ? "Instagram message" : "LinkedIn step";
+  const key = request ? `no-allowance-${first.campaign.id}-${first.channel}` : `no-allowance-${first.campaign.id}`;
+  const step = request ? `${platform} message` : "LinkedIn step";
   if (leads === 1) return { key, tone: "pause", title: `${leadName(first)}’s ${step} can’t go yet`, body: `In ${first.campaign.name}: ${body}`, action: recordAction(first) };
   return {
     key,
@@ -216,9 +223,11 @@ function detailLine(channel: ReachChannel, why: "missing" | "bad"): string {
       return why === "missing" ? "they have no number to call" : "every number to call is marked wrong";
     case "linkedin":
       return why === "missing" ? "they have no LinkedIn profile in the import" : "their LinkedIn profile is marked unreachable";
-    case "instagram":
-      return why === "missing" ? "neither they nor their company have an Instagram account in the import" : "every Instagram account they could use is marked unreachable";
     default: {
+      if (isMessageRequestChannel(channel)) {
+        const name = SOCIAL_CHANNELS[channel].name;
+        return why === "missing" ? `neither they nor their company have an ${name} account in the import` : `every ${name} account they could use is marked unreachable`;
+      }
       const unhandled: never = channel;
       throw new Error(`A channel with no sentence: ${String(unhandled)}`);
     }

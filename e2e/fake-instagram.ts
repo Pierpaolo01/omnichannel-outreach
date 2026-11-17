@@ -45,9 +45,10 @@ export const INSTAGRAM_TRACK: TrackDefinition = {
   window: WEEKDAYS,
   start: { kind: "entry" },
   removed: false,
+  senders: [IG_SESSION_ID],
   steps: [step("ig-m1", 0, "Hi {{first_name|there}}, I help clinics like {{company}} fill evening slots. Could I send a short video?"), step("ig-m2", 2, "{{first_name|Hi}}, shall I send the video over? A yes is enough.")],
 };
-export const INSTAGRAM_DEFINITION: CampaignDefinition = { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [FAKE_INBOX], smsPool: [], instagramPool: [IG_SESSION_ID], tracks: [INSTAGRAM_TRACK] };
+export const INSTAGRAM_DEFINITION: CampaignDefinition = { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [FAKE_INBOX], smsPool: [], tracks: [INSTAGRAM_TRACK] };
 
 /**
  * `fresh`: leads imported, no sequence (the canvas from empty). `ready`: the Instagram sequence, not launched, with the user's

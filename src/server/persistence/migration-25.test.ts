@@ -6,7 +6,7 @@ import { addChannel } from "./add-channel.ts";
 import { migrate, MIGRATIONS } from "./migrations.ts";
 
 /**
- * Migration 26 (ticket 25, ADR 0004 section 13) on a database the integration tip wrote with its own code: the rows of
+ * Migration 25 (ticket 25, ADR 0004 section 13) on a database the integration tip wrote with its own code: the rows of
  * `test/fixtures/upgrade/tip-9ae8c38-linkedin-skip.sql` (a campaign, a lead, a LinkedIn track, provider work and a pair) on
  * migrations 1 to 24, the integration tip's schema. Every row of every table survives the rebuilds with every column it had;
  * the CHECKs take Instagram; the destination triggers take a message-request account's id for its own lead and refuse any
@@ -27,13 +27,13 @@ const tables = (db: DatabaseSync) => db.prepare("SELECT name FROM sqlite_master 
 const columns = (db: DatabaseSync, table: string) => db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all().map((r) => String(r["name"]));
 const rowsOf = (db: DatabaseSync, table: string, cols: readonly string[]) => db.prepare(`SELECT ${cols.map((c) => `"${c}"`).join(", ")} FROM ${table} ORDER BY rowid`).all();
 
-describe("migration 26 on the integration tip's own database", () => {
+describe("migration 25 on the integration tip's own database", () => {
   test("every row keeps every column it had, foreign keys hold, and the version is recorded", () => {
     const db = tipDatabase();
     const before = new Map(tables(db).map((t) => [t, { cols: columns(db, t), rows: rowsOf(db, t, columns(db, t)) }]));
     const triggersBefore = db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all().map((r) => String(r["name"]));
     migrate(db, () => "2026-11-17T09:00:00.000Z");
-    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: 26 });
+    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: 25 });
     for (const [table, was] of before) {
       if (table === "schema_migrations") continue;
       expect(rowsOf(db, table, was.cols), table).toEqual(was.rows);

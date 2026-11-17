@@ -55,7 +55,7 @@ export function messageRequestRecord<T>(of: (channel: MessageRequestChannel) => 
 
 /**
  * A message-request account as a detail id (ADR 0004 13.4): the channel, whose it is (`p` a person's own, `c` a company's),
- * that person's or company's id, and the key, fixed at a track's start. The destination triggers of migration 26 accept it.
+ * that person's or company's id, and the key, fixed at a track's start. The destination triggers of migration 25 accept it.
  */
 export function accountDetailId(channel: MessageRequestChannel, belongsTo: "person" | "company", ownerId: string, key: string): string {
   return `${channel}:${belongsTo === "person" ? "p" : "c"}:${ownerId}:${key}`;

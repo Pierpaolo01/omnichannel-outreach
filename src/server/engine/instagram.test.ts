@@ -35,7 +35,14 @@ const emailTrack = (id: string, start: TrackDefinition["start"] = { kind: "entry
   start,
   removed: false,
 });
-const definition = (tracks: TrackDefinition[], pool = [socialAccountId("instagram", S1)]): CampaignDefinition => ({ timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [], instagramPool: pool, tracks });
+/** The user's chosen senders go on each Instagram track (ADR 0004 13.5). */
+const definition = (tracks: TrackDefinition[], pool = [socialAccountId("instagram", S1)]): CampaignDefinition => ({
+  timezone: "Europe/London",
+  callSkipLimitDays: 2,
+  emailPool: ["inbox-a"],
+  smsPool: [],
+  tracks: tracks.map((t) => (t.channel === "instagram" ? { ...t, senders: t.senders ?? pool } : t)),
+});
 const session = (id: string, fields: Partial<FakeSocialSession> = {}): FakeSocialSession => ({ id, kind: "business", gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London", ...fields });
 const three = () => [step("m1", 0, "Hello {{first_name|there}}, I work with clinics like {{company}}."), step("m2", 2, "Following up."), step("m3", 3, "Last note.")];
 

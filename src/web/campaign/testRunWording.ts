@@ -1,3 +1,4 @@
+import { isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type SocialChannel } from "../../domain/social-channels.ts";
 import type { TestRunEnding, TestRunRead, TestStepRow } from "../../shared/api.ts";
 import { clockTime } from "../time.ts";
 import { stepWaitWords } from "../controls/wording.ts";
@@ -20,7 +21,7 @@ export function timeIn(zone: string, iso: string, readAt: string): string {
   return `${new Intl.DateTimeFormat("en-GB", { timeZone: zone, weekday: "short" }).format(new Date(iso))} ${clock}`;
 }
 
-type RunFacts = Pick<TestRunRead, "steps">;
+type RunFacts = Pick<TestRunRead, "steps"> & Partial<Pick<TestRunRead, "stopReply">>;
 
 /** The main sequence's steps, and the branch's once entered: the steps a finished run could have sent. */
 function reachable(run: RunFacts): TestStepRow[] {
@@ -55,7 +56,12 @@ export function endingTitle(ending: TestRunEnding, run: RunFacts | null): string
 export function endingDetail(ending: TestRunEnding, run: RunFacts): string {
   switch (ending) {
     case "your_reply":
-      return "A reply from your test email or mobile, or one you marked on LinkedIn, stopped it, as a prospect’s reply stops their outreach.";
+      // Said from the stored channel of the reply that stopped it (ticket 25): a social one is the user's own mark.
+      return isSocialChannel(run.stopReply)
+        ? `The reply you marked on ${SOCIAL_CHANNELS[run.stopReply].name} stopped it, as a prospect’s reply stops their outreach.`
+        : run.stopReply === "email" || run.stopReply === "sms"
+          ? `A reply from your test ${run.stopReply === "email" ? "email" : "mobile"} stopped it, as a prospect’s reply stops their outreach.`
+          : "A reply from your test email or mobile, or one you marked on LinkedIn, stopped it, as a prospect’s reply stops their outreach.";
     case "finished":
       return finishedDetail(run);
     case "no_contact_left":
@@ -74,13 +80,13 @@ export function endingDetail(ending: TestRunEnding, run: RunFacts): string {
 }
 
 /** The failure reasons a step's result can carry (the engine's words), each said for itself (council on dee365d, item 13). */
-const FAILURE_REASONS = ["invalid address", "invalid number", "profile unreachable", "not connected"] as const;
+const FAILURE_REASONS = ["invalid address", "invalid number", "profile unreachable", "not connected", "account unreachable", "not allowed"] as const;
 type FailureReason = (typeof FAILURE_REASONS)[number];
 const isFailureReason = (r: string | null): r is FailureReason => (FAILURE_REASONS as readonly (string | null)[]).includes(r);
 
 /** Why a step failed, from its own reason through one exhaustive switch; with none known, by its channel as before. */
 export function failureWords(row: Pick<TestStepRow, "channel" | "reason">): string {
-  if (!isFailureReason(row.reason)) return row.channel === "sms" ? "number not reachable" : row.channel === "linkedin" ? "profile not reachable" : row.channel === "instagram" ? "account not reachable" : "bounced";
+  if (!isFailureReason(row.reason)) return row.channel === "sms" ? "number not reachable" : row.channel === "linkedin" ? "profile not reachable" : isMessageRequestChannel(row.channel) ? "account not reachable" : "bounced";
   switch (row.reason) {
     case "invalid address":
       return "bounced";
@@ -91,6 +97,11 @@ export function failureWords(row: Pick<TestStepRow, "channel" | "reason">): stri
     // Q37's interim: the connection is gone, and the profile is still the person's; it is not marked wrong.
     case "not connected":
       return "no longer connected on LinkedIn, so the message couldn’t go";
+    // A message-request channel's two refusals (ADR 0004 13.3, Q44), in the step's own channel's name.
+    case "account unreachable":
+      return "account not reachable";
+    case "not allowed":
+      return `${isSocialChannel(row.channel) ? SOCIAL_CHANNELS[row.channel].name : "The platform"} didn’t allow the message; the account isn’t marked wrong`;
     default: {
       const unhandled: never = row.reason;
       throw new Error(`A failure reason with no words: ${String(unhandled)}`);
@@ -109,7 +120,7 @@ export function stepStateText(row: TestStepRow, zone: string, readAt: string): s
     case "skipped":
       return "Skipped";
     case "with_provider":
-      return row.channel === "sms" ? "With the SMS provider" : row.channel === "linkedin" ? "With the LinkedIn session" : row.channel === "instagram" ? "With the Instagram session" : "With Instantly";
+      return row.channel === "sms" ? "With the SMS provider" : isSocialChannel(row.channel) ? `With the ${SOCIAL_CHANNELS[row.channel].name} session` : "With Instantly";
     case "held":
       return "On hold";
     case "due": {
@@ -163,12 +174,14 @@ export function stepDetail(row: TestStepRow, run: Pick<TestRunRead, "email" | "m
     const said = expiryLine(view?.withdrawal ?? null, "this test", view ?? { withdrawalAsked: false, withdrawalStuck: false });
     return `Skipped: ${said.charAt(0).toLowerCase()}${said.slice(1)}`;
   }
-  if (row.state === "skipped") return row.reason === "missing_channel" ? `Skipped: no test ${row.channel === "email" ? "email" : row.channel === "linkedin" ? "LinkedIn profile" : row.channel === "instagram" ? "Instagram account" : "mobile"} saved` : SKIPPED_BECAUSE[row.reason ?? ""] ?? "Skipped";
+  if (row.state === "skipped") return row.reason === "missing_channel" ? `Skipped: no test ${row.channel === "email" ? "email" : isSocialChannel(row.channel) ? `${SOCIAL_CHANNELS[row.channel].name} ${SOCIAL_CHANNELS[row.channel].addressNoun}` : "mobile"} saved` : SKIPPED_BECAUSE[row.reason ?? ""] ?? "Skipped";
   if (row.channel === "call") return row.state === "on_your_list" ? "Log any outcome to continue. The canvas paths apply." : `To ${run.mobile ?? "your mobile"}`;
   if (row.state === "held") return `On hold because ${row.hold ? holdReasonClause(row.hold, row.holdOwners ?? [], row.channel) : "something waits on you"}. Nothing is dropped.`;
   if (row.state === "due" && row.waits === "awaiting_acceptance") return "Accept it by hand on your test profile. A test doesn’t shorten the wait for acceptance; the messages after it wait about a minute each.";
   if (row.state === "due") return "The wait is cut to about a minute";
-  return `To ${(row.channel === "sms" ? run.mobile : row.channel === "linkedin" ? (run.linkedin ?? null) : row.channel === "instagram" ? (run.social?.instagram ?? null) : run.email) ?? ""}`;
+  // Where it went, by its own channel's stored contact (ticket 25): never another channel's.
+  const to = row.channel === "email" ? run.email : row.channel === "sms" ? run.mobile : row.channel === "linkedin" ? (run.linkedin ?? null) : isMessageRequestChannel(row.channel) ? (run.social?.[row.channel] ?? null) : null;
+  return `To ${to ?? ""}`;
 }
 
 /** "4 of 8 steps done": steps with a result (sent, failed, skipped or logged) of the steps the run can reach in the main sequence and any branch it entered. */
@@ -184,8 +197,8 @@ function finishedDetail(run: RunFacts): string {
   const steps = reachable(run);
   const sent = steps.filter(went).length;
   if (sent === steps.length) return "Every step of the sequence went to your test contacts.";
-  const missing = (contact: "email" | "mobile" | "linkedin" | "instagram") =>
-    steps.filter((s) => s.state === "skipped" && s.reason === "missing_channel" && (contact === "email" ? s.channel === "email" : contact === "linkedin" || contact === "instagram" ? s.channel === contact : s.channel === "sms" || s.channel === "call"));
+  const missing = (contact: "email" | "mobile" | SocialChannel) =>
+    steps.filter((s) => s.state === "skipped" && s.reason === "missing_channel" && (contact === "email" ? s.channel === "email" : contact === "mobile" ? s.channel === "sms" || s.channel === "call" : s.channel === contact));
   const parts: string[] = [`${sent} of ${steps.length} ${steps.length === 1 ? "step" : "steps"} went to your test contacts.`];
   const noMobile = missing("mobile");
   if (noMobile.length > 0) {
@@ -195,7 +208,10 @@ function finishedDetail(run: RunFacts): string {
     parts.push(`${what.charAt(0).toUpperCase()}${what.slice(1)} ${noMobile.length === 1 ? "was" : "were"} skipped: no test mobile was saved.`);
   }
   if (missing("linkedin").length > 0) parts.push(`The LinkedIn ${missing("linkedin").length === 1 ? "step was" : "steps were"} skipped: no test LinkedIn profile was saved.`);
-  if (missing("instagram").length > 0) parts.push(`The Instagram ${missing("instagram").length === 1 ? "message was" : "messages were"} skipped: no test Instagram account was saved.`);
+  for (const c of MESSAGE_REQUEST_CHANNELS) {
+    const n = missing(c).length;
+    if (n > 0) parts.push(`The ${SOCIAL_CHANNELS[c].name} ${n === 1 ? "message was" : "messages were"} skipped: no test ${SOCIAL_CHANNELS[c].name} account was saved.`);
+  }
   if (missing("email").length > 0) parts.push(`The ${missing("email").length === 1 ? "email was" : "emails were"} skipped: no test email was saved.`);
   const other = steps.filter((s) => !went(s) && !(s.state === "skipped" && s.reason === "missing_channel")).length;
   if (other > 0) parts.push(`${other} ${other === 1 ? "other step did" : "other steps did"} not go: each says why below.`);

@@ -5,7 +5,8 @@
  * step is next, when it is due or what a control did. History is said in the past tense; a present state only as the
  * read says it at its instant.
  */
-import { MARK_REPLIED_WORDS } from "../campaign/reply-mark-wording.ts";
+import { markLabels, markRepliedWords } from "../campaign/reply-mark-wording.ts";
+import { isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
 import type { TrackChannelApi, SendChannelApi } from "../../shared/api.ts";
 import { STATUS_GROUPS, statusGroup, type StatusGroup } from "../../domain/outreach-status.ts";
 import { clockTime } from "../time.ts";
@@ -31,8 +32,7 @@ export const CONTROL_LABEL = {
   resume_from_next_step: "Resume from the next step",
   move_to_win_back: "Move to win-back",
   // Ticket 24b: the reply mark and a stuck withdrawal's two answers, pressed and stored like the controls; the mark per channel (ticket 25).
-  "mark_replied:linkedin": MARK_REPLIED_WORDS.linkedin.label,
-  "mark_replied:instagram": MARK_REPLIED_WORDS.instagram.label,
+  ...markLabels((c) => markRepliedWords(c).label),
   invite_withdrawn: "It’s withdrawn",
   invite_kept: "It’s still there",
 } as const satisfies Record<RecordControl, string>;
@@ -45,8 +45,7 @@ export const CONTROL_PENDING = {
   stop: "Stopping",
   resume_from_next_step: "Resuming from the next step",
   move_to_win_back: "Moving to win-back",
-  "mark_replied:linkedin": MARK_REPLIED_WORDS.linkedin.pending,
-  "mark_replied:instagram": MARK_REPLIED_WORDS.instagram.pending,
+  ...markLabels((c) => markRepliedWords(c).pending),
   invite_withdrawn: "Marking the invite withdrawn",
   invite_kept: "Marking the invite still there",
 } as const satisfies Record<RecordControl, string>;
@@ -81,13 +80,13 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
       return `${lower(stepTitle(step.track, step.channel, step.number))} of ${step.of}${on}`;
     // A social step by its role (ticket 24b, ticket 25): "the first message", "the message request", "follow-up 2 on LinkedIn track 2".
     case "linkedin":
-    case "instagram": {
+    default: {
+      if (step.channel !== "linkedin" && !isSocialChannel(step.channel)) {
+        const unhandled: never = step.channel;
+        throw new Error(`A step on a channel with no name: ${String(unhandled)}`);
+      }
       const title = lower(stepTitle(step.track, step.channel, step.number));
       return `${title.startsWith("follow-up") ? title : `the ${title}`}${on}`;
-    }
-    default: {
-      const unhandled: never = step.channel;
-      throw new Error(`A step on a channel with no name: ${String(unhandled)}`);
     }
   }
 }
@@ -146,7 +145,10 @@ export function stepWaitWords(why: StepWaitApi, channel: TrackChannelApi): strin
       return "waiting for sending capacity: every account it may use is full today";
     // Item 15: no session it may use has any allowance of the step's kind, so nothing resets it and no time is given.
     case "no_allowance":
-      return "waiting: no LinkedIn session it may use has an allowance for this kind of step";
+      // In the step's own channel's name (ticket 25): never another channel's.
+      return isMessageRequestChannel(channel)
+        ? `waiting: no ${SOCIAL_CHANNELS[channel].name} session it may use has an allowance for messages`
+        : "waiting: no LinkedIn session it may use has an allowance for this kind of step";
     case "call_capacity":
       return "waiting for room on your call list, on a day with calling hours";
     case "on_call_list":
@@ -401,5 +403,10 @@ export const REPLY_WORDS: Readonly<Record<SendChannelApi, { readonly how: string
   email: { how: "Replied by email", title: "Replied by email", answer: "Answer in Instantly.", activity: "Read and answer the reply in Instantly." },
   sms: { how: "Replied by text", title: "Replied by text", answer: "Answer on your phone.", activity: "Answer the reply on your phone." },
   linkedin: { how: "Marked replied on LinkedIn by you", title: "You marked them replied on LinkedIn", answer: "Carry on the conversation on LinkedIn.", activity: "Carry on the conversation on LinkedIn." },
-  instagram: { how: "Marked replied on Instagram by you", title: "You marked them replied on Instagram", answer: "Carry on the conversation on Instagram.", activity: "Carry on the conversation on Instagram." },
+  ...(Object.fromEntries(
+    MESSAGE_REQUEST_CHANNELS.map((c) => {
+      const name = SOCIAL_CHANNELS[c].name;
+      return [c, { how: `Marked replied on ${name} by you`, title: `You marked them replied on ${name}`, answer: `Carry on the conversation on ${name}.`, activity: `Carry on the conversation on ${name}.` }];
+    }),
+  ) as { readonly [C in MessageRequestChannel]: { readonly how: string; readonly title: string; readonly answer: string; readonly activity: string } }),
 };

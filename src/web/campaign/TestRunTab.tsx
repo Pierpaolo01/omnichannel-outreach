@@ -10,8 +10,11 @@ import { useFocusRescue } from "../focusRescue.ts";
 import { answered, isTestRunPressKey, keepPress, pendingPress, type TestRunPress } from "./testRunPress.ts";
 import { ConfirmStrip } from "../controls/ControlViews.tsx";
 import { testReplyHelper, WITHDRAWAL_ANSWERS } from "./linkedin-wording.ts";
-import { MARK_REPLIED_WORDS, messageRequestTestHelper } from "./reply-mark-wording.ts";
-import { SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS, type SocialChannel } from "../../domain/social-channels.ts";
+import { markRepliedWords, messageRequestTestHelper } from "./reply-mark-wording.ts";
+import { MESSAGE_REQUEST_CHANNELS, messageRequestRecord, SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel } from "../../domain/social-channels.ts";
+
+/** What the user typed on the Test run tab: the social fields only where the page offers them. */
+type Typed = { readonly email: string; readonly mobile: string; readonly linkedin?: string } & { readonly [C in MessageRequestChannel]?: string };
 import { endingDetail, endingTitle, progressText, stepDetail, stepStateText, timeIn } from "./testRunWording.ts";
 import type { SequenceEditor } from "./useSequence.ts";
 
@@ -47,13 +50,12 @@ export function TestRunTab({ campaignId, editor }: { campaignId: string; editor:
 
 /** A disabled secondary button, as the app's others: no slab, muted text that meets AA in both themes. */
 /** What the run panel says of the social replies the user marks here (ticket 24b; ticket 25): nothing with no such track. */
-function markedRepliesNote(run: TestRunRead): string {
-  const linkedin = run.replyMarks.linkedin !== undefined;
-  const instagram = run.replyMarks.instagram !== undefined;
-  if (linkedin && instagram) return "; a LinkedIn or Instagram reply is never detected, so mark it here once you have answered on your test profile or account";
-  if (linkedin) return "; a LinkedIn reply is never detected, so mark it here once you have answered on your test profile";
-  if (instagram) return "; an Instagram reply is never detected, so mark it here once you have answered on your test account";
-  return "";
+export function markedRepliesNote(run: Pick<TestRunRead, "replyMarks">): string {
+  const marked = SOCIAL_CHANNEL_LIST.filter((c) => run.replyMarks[c] !== undefined);
+  if (marked.length === 0) return "";
+  const names = orList(marked.map((c) => SOCIAL_CHANNELS[c].name));
+  const nouns = orList([...new Set(marked.map((c) => SOCIAL_CHANNELS[c].addressNoun))]);
+  return `; ${/^[AEIOU]/.test(names) ? "an" : "a"} ${names} reply is never detected, so mark it here once you have answered on your test ${nouns}`;
 }
 
 /** "a or b", "a, b or c": as this tab has always written its lists (no serial comma). */
@@ -199,10 +201,12 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   const [linkedin, setLinkedin] = useState(tab.contacts.linkedin ?? "");
   // The test profile is asked for while the sequence has a LinkedIn track, or one is saved (ticket 24b).
   const asksLinkedin = editor.view.definition.tracks.some((t) => !t.removed && t.channel === "linkedin") || tab.contacts.linkedin !== null;
-  // The test Instagram account likewise (ticket 25; ADR 0004 13.8).
-  const instagramId = useId();
-  const [instagram, setInstagram] = useState(tab.contacts.social.instagram.address ?? "");
-  const asksInstagram = editor.view.definition.tracks.some((t) => !t.removed && t.channel === "instagram") || tab.contacts.social.instagram.address !== null;
+  // The test account of each message-request channel likewise (ticket 25; ADR 0004 13.8), one field per channel the sequence
+  // has a track on, or one is saved for: driven by the registry, so a new channel needs no code here.
+  const socialId = useId();
+  const [social, setSocial] = useState(() => messageRequestRecord((c) => tab.contacts.social[c].address ?? ""));
+  const asked = MESSAGE_REQUEST_CHANNELS.filter((c) => editor.view.definition.tracks.some((t) => !t.removed && t.channel === c) || tab.contacts.social[c].address !== null);
+  const askedSocial = (values: { readonly [C in MessageRequestChannel]: string }) => Object.fromEntries(asked.map((c) => [c, values[c]])) as { readonly [C in MessageRequestChannel]?: string };
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<{ n: number; focus: boolean }>({ n: 0, focus: false });
   const [fieldError, setFieldError] = useState<{ field: "email" | "mobile" | SocialChannel; message: string } | null>(null);
@@ -214,11 +218,11 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   const { press, sending, refusal, said } = presses;
 
   // Compared by the server's own reading of a contact (review bot on 55d6ac6): "+447700900456" is the stored "+44 7700 900456".
-  const typed = { email, mobile, ...(asksLinkedin ? { linkedin } : {}), ...(asksInstagram ? { instagram } : {}) };
-  const dirty = contactsUnsaved(typed, { ...tab.contacts, instagram: tab.contacts.social.instagram.address });
+  const typed: Typed = { email, mobile, ...(asksLinkedin ? { linkedin } : {}), ...askedSocial(social) };
+  const dirty = contactsUnsaved(typed, { ...tab.contacts, ...messageRequestRecord((c) => tab.contacts.social[c].address) });
   const lead = tab.leads.find((l) => l.id === renderAs) ?? tab.leads[0] ?? null;
   const running = tab.run?.running === true;
-  const noContact = tab.contacts.email === null && tab.contacts.mobile === null && tab.contacts.linkedin === null && tab.contacts.social.instagram.address === null;
+  const noContact = tab.contacts.email === null && tab.contacts.mobile === null && tab.contacts.linkedin === null && MESSAGE_REQUEST_CHANNELS.every((c) => tab.contacts.social[c].address === null);
   // A kept press blocks another until the server answers it (Try again resends it): it is never replaced, so never orphaned.
   const pending = press !== null;
 
@@ -236,11 +240,10 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   // One save at a time (review bot on ffa202c; verifier R1): a save asked for while one waits is queued, the latest draft
   // only, and sent after that one's answer, so an older answer can never land after a newer save. The fields take only
   // the answer to the newest save, and only where they still hold what it sent.
-  type Typed = { email: string; mobile: string; linkedin?: string; instagram?: string };
   const current = useRef<Typed>(typed);
   useEffect(() => {
-    current.current = { email, mobile, ...(asksLinkedin ? { linkedin } : {}), ...(asksInstagram ? { instagram } : {}) };
-  }, [email, mobile, linkedin, asksLinkedin, instagram, asksInstagram]);
+    current.current = typed;
+  });
   const inFlight = useRef(false);
   const queued = useRef<Typed | null>(null);
   const [queuedNext, setQueuedNext] = useState(false);
@@ -260,7 +263,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
         setEmail((now) => (now === sent.email ? (stored.contacts.email ?? "") : now));
         setMobile((now) => (now === sent.mobile ? (stored.contacts.mobile ?? "") : now));
         if (sent.linkedin !== undefined) setLinkedin((now) => (now === sent.linkedin ? (stored.contacts.linkedin ?? "") : now));
-        if (sent.instagram !== undefined) setInstagram((now) => (now === sent.instagram ? (stored.contacts.social.instagram.address ?? "") : now));
+        setSocial((now) => messageRequestRecord((c) => (sent[c] !== undefined && now[c] === sent[c] ? (stored.contacts.social[c].address ?? "") : now[c])));
       }
     } catch (error) {
       const body = error instanceof ApiRequestError ? (error.body as { error?: { field?: "email" | "mobile" | SocialChannel; message?: string } } | null) : null;
@@ -280,7 +283,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
       // Focus moves to "Saved." only when the user is not typing past the save (item 16): the fields still hold what it
       // sent, and focus is not in one of them.
       const typing = form.current?.contains(document.activeElement) === true && document.activeElement instanceof HTMLInputElement;
-      const edited = current.current.email !== sent.email || current.current.mobile !== sent.mobile || current.current.linkedin !== sent.linkedin || current.current.instagram !== sent.instagram;
+      const edited = current.current.email !== sent.email || current.current.mobile !== sent.mobile || current.current.linkedin !== sent.linkedin || MESSAGE_REQUEST_CHANNELS.some((c) => current.current[c] !== sent[c]);
       setSaved((prev) => ({ n: prev.n + 1, focus: !typing && !edited }));
     }
   };
@@ -298,7 +301,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
     void send(draft);
   };
 
-  const hint = noContact ? `Add your ${orList(["email", "mobile", ...(asksLinkedin ? ["LinkedIn profile"] : []), ...(asksInstagram ? ["Instagram account"] : [])])}, and save them, to run a test.` : dirty ? "Save your contacts to run a test with them." : editor.unsaved ? "Your latest change to the sequence isn’t saved yet; a test runs the saved version." : "";
+  const hint = noContact ? `Add your ${orList(["email", "mobile", ...(asksLinkedin ? ["LinkedIn profile"] : []), ...asked.map((c) => `${SOCIAL_CHANNELS[c].name} ${SOCIAL_CHANNELS[c].addressNoun}`)])}, and save them, to run a test.` : dirty ? "Save your contacts to run a test with them." : editor.unsaved ? "Your latest change to the sequence isn’t saved yet; a test runs the saved version." : "";
   const status = pending ? (press.kind === "reply" ? `Marking the test replied: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : press.kind === "withdrawn" || press.kind === "kept" ? `Marking the test’s invite: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : press.kind === "run" ? `Starting the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.` : `Stopping the test: ${sending ? "waiting for the server’s answer" : "no answer yet"}.`) : (said?.text ?? hint);
 
   return (
@@ -330,19 +333,23 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
             error={fieldError?.field === "linkedin" ? fieldError.message : tab.contacts.linkedinIsALead ? "A lead has this profile now, so tests can’t use it. Use another of your own." : null}
           />
         )}
-        {asksInstagram && (
-          <ContactField
-            id={instagramId}
-            label="Your Instagram account, for the messages"
-            icon="instagram"
-            value={instagram}
-            onChange={setInstagram}
-            type="url"
-            placeholder="https://www.instagram.com/your.account"
-            error={fieldError?.field === "instagram" ? fieldError.message : tab.contacts.social.instagram.isALead ? "A lead or a company has this account now, so tests can’t use it. Use another of your own." : null}
-          />
-        )}
-        <p className="text-[13.5px] text-muted">Only contacts that are your own. They are never leads: a lead’s email{asksLinkedin || asksInstagram ? `, number${asksLinkedin ? ", profile" : ""}${asksInstagram ? " or account" : ""}` : " or number"} is refused.</p>
+        {asked.map((c) => {
+          const facts = SOCIAL_CHANNELS[c];
+          return (
+            <ContactField
+              key={c}
+              id={`${socialId}-${c}`}
+              label={`Your ${facts.name} ${facts.addressNoun}, for the messages`}
+              icon={c}
+              value={social[c]}
+              onChange={(v) => setSocial((now) => ({ ...now, [c]: v }))}
+              type="url"
+              placeholder={facts.exampleAddress}
+              error={fieldError?.field === c ? fieldError.message : tab.contacts.social[c].isALead ? `A lead or a company has this ${facts.addressNoun} now, so tests can’t use it. Use another of your own.` : null}
+            />
+          );
+        })}
+        <p className="text-[13.5px] text-muted">Only contacts that are your own. They are never leads: a lead’s email{asksLinkedin || asked.length > 0 ? `, number${asksLinkedin ? ", profile" : ""}${asked.length > 0 ? " or account" : ""}` : " or number"} is refused.</p>
         <div className="flex flex-wrap items-center gap-3">
           {/* Disabled while a save waits: a second press is queued by Enter in a field, never sent beside it. */}
           <button type="submit" className={`btn btn-sm border-line-strong bg-base-100 font-medium ${DISABLED}`} disabled={saving || !dirty}>
@@ -452,7 +459,8 @@ function ContactField({ id, label, icon, value, onChange, type, placeholder, err
   );
 }
 
-const STEP_ICON: Record<TestStepRow["channel"], IconName> = { email: "email", sms: "sms", call: "call", linkedin: "linkedin", instagram: "instagram" };
+/** Every track channel has an icon of its own name. */
+const STEP_ICON = (channel: TestStepRow["channel"]): IconName => channel;
 
 function RunPanel({ tab, starting, presses }: { tab: TestRunTabView; starting: boolean; presses: Presses }) {
   const run = tab.run;
@@ -520,7 +528,7 @@ function RunRead({ run, tab }: { run: TestRunRead; tab: TestRunTabView }) {
                 className={`mt-0.5 grid size-7 flex-none place-items-center rounded-full ${done ? "bg-base-content text-base-100" : now ? "bg-you-soft text-you shadow-[inset_0_0_0_1.5px_currentColor]" : s.state === "failed" ? "bg-crit-soft text-crit" : "text-muted shadow-[inset_0_0_0_1px_var(--color-line-strong)]"}`}
                 aria-hidden="true"
               >
-                <Icon name={done ? "ok" : s.state === "failed" ? "bad" : s.branch === "win_back" && s.state === "not_reached" ? "reply" : STEP_ICON[s.channel]} className="size-[15px]" />
+                <Icon name={done ? "ok" : s.state === "failed" ? "bad" : s.branch === "win_back" && s.state === "not_reached" ? "reply" : STEP_ICON(s.channel)} className="size-[15px]" />
               </span>
               <span className="min-w-0 flex-1">
                 <span className={`block text-[14.5px] ${s.state === "not_reached" ? "text-ink-2" : "font-medium"}`}>
@@ -678,7 +686,7 @@ function TestLinkedinControls({ run, presses }: { run: TestRunRead | null; press
                   onClick={() => open({ kind: "reply", channel, runId: run.id, status: run.status, wasRunning: run.running })}
                 >
                   <Icon name={channel} className="size-4" />
-                  {MARK_REPLIED_WORDS[channel].label}
+                  {markRepliedWords(channel).label}
                 </button>
                 {/* Worded for what has gone (council on a6c1700, item 7): a message, or only the invite. */}
                 <span className="text-[13px] text-muted">{channel === "linkedin" ? testReplyHelper(mark.work) : messageRequestTestHelper(channel, mark.work)}</span>

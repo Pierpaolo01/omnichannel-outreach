@@ -182,6 +182,8 @@ export function accountView(a: AccountState, label: string): SenderAccountViewAp
     usedToday: a.used,
     waiting: a.waitReason,
     ...(a.kinds ? { kinds: kindsView(a.kinds) } : {}),
+    // What a message-request session reports of itself (ADR 0004 13.5): the inspector lists each session with it.
+    ...(a.socialKind ? { socialKind: a.socialKind } : {}),
   };
 }
 

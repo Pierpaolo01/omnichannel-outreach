@@ -31,6 +31,7 @@ import {
   stepDef,
   threadOf,
   trackHold,
+  trackPoolOf,
   windowOf,
   withSocialSender,
   type HoldReason,
@@ -351,7 +352,7 @@ function noSenderKnown(state: SubjectState, trackId: string, now: number): { kin
   if (isSocialChannel(channel)) return noAllowanceOnAnySession(state, trackId, now) ? { kind: "waits", why: "sending_capacity" } : null;
   if (channel !== "email" && channel !== "sms") return null;
   const fixed = senderOf(state, channel);
-  const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];
+  const ids = fixed !== null ? [fixed] : [...trackPoolOf(state, trackId)];
   const connected = ids.map((id) => state.accounts[id]).filter((a): a is AccountState => a !== undefined && a.channel === channel && a.problem !== "not_listed");
   if (connected.length === 0) return { kind: "waits", why: "sender_unavailable" };
   if (connected.every((a) => a.dailyLimit <= 0)) return { kind: "waits", why: "sending_capacity" };
@@ -597,7 +598,7 @@ export function handoverFailures(state: SubjectState, attempt: Attempt, account:
   if (state.work.find((w) => w.key === attempt.idempotencyKey)?.settled !== null) failed.push(15);
   const channel = channelOf(state, attempt.trackId) ?? "email";
   const fixed = senderOf(state, channel);
-  if (account.channel !== channel || (fixed !== null ? fixed !== account.id : !poolOf(state.campaign.definition, channel).includes(account.id))) failed.push(10);
+  if (account.channel !== channel || (fixed !== null ? fixed !== account.id : !trackPoolOf(state, attempt.trackId).includes(account.id))) failed.push(10);
   // 11. For SMS, the pair is unbound, or bound to this subject.
   // 11. For a channel of conversations (SMS, LinkedIn), the pair is unbound, or bound to this subject.
   if (holdsConversations(channel) && !pairFree(state, account.id, attempt.destination, channel)) failed.push(11);

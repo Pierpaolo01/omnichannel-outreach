@@ -98,6 +98,7 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
     linkedin: run.contacts.linkedin?.value ?? null,
     social: messageRequestRecord((ch) => run.contacts[ch]?.value ?? null),
     status: deriveStatus(s),
+    stopReply: s.subject.stopReply?.channel ?? null,
     linkedinTracks: s.tracks.filter((t) => s.campaign.definition.tracks.find((d) => d.id === t.trackId)?.channel === "linkedin").map((t) => ({ trackId: t.trackId, view: linkedinTrackView(s, t.trackId) })),
     mayStillSend: s.work.filter(maySend).length,
     steps: stepsOf(s, rules, now, env),

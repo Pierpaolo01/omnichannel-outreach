@@ -86,6 +86,8 @@ const trackBody = requestObject({
   callSkipLimitDays: z.number().optional(),
   /** A LinkedIn track's wait for its invite to be accepted, in days (ADR 0004 3.1); the validator checks it. */
   acceptWaitDays: z.number().optional(),
+  /** A message-request track's chosen sender sessions (ADR 0004 13.5); the validator refuses them on any other track. */
+  senders: z.array(z.string().min(1).max(200)).max(100).optional(),
 });
 const definitionBody = requestObject({
   timezone: z.string().trim().min(1),
@@ -94,8 +96,6 @@ const definitionBody = requestObject({
   smsPool: z.array(z.string().min(1).max(200)).max(100).default([]),
   /** LinkedIn sender sessions (ADR 0004 1.1); absent from a definition saved without LinkedIn tracks. */
   linkedinPool: z.array(z.string().min(1).max(200)).max(100).optional(),
-  /** Instagram sender sessions (ADR 0004 13.5); absent from a definition saved without Instagram tracks. */
-  instagramPool: z.array(z.string().min(1).max(200)).max(100).optional(),
   callScript: z.string().max(20_000).default(""),
   tracks: z.array(trackBody).max(20),
   /** Who wrote the save (ADR 0003 1.1.1): its editing session, its number there, and the revision it last saw. */
@@ -108,16 +108,16 @@ const impactBody = requestObject({ definition: definitionBody.omit({ save: true,
 
 /** A definition as stored: a declined path only when the canvas set one; the phone track's fields travel in the same save (ADR 0003 1.1.1). */
 function definitionFromBody(fields: Omit<z.infer<typeof definitionBody>, "save" | "impact">): CampaignDefinition {
-  const { linkedinPool, instagramPool, ...rest } = fields;
+  const { linkedinPool, ...rest } = fields;
   return {
     ...rest,
     ...(linkedinPool !== undefined ? { linkedinPool } : {}),
-    ...(instagramPool !== undefined ? { instagramPool } : {}),
-    tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, acceptWaitDays, ...t }) => ({
+    tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, acceptWaitDays, senders, ...t }) => ({
       ...t,
       ...(declinedPath ? { declinedPath } : {}),
       ...(callSkipLimitDays !== undefined ? { callSkipLimitDays } : {}),
       ...(acceptWaitDays !== undefined ? { acceptWaitDays } : {}),
+      ...(senders !== undefined ? { senders } : {}),
     })),
   };
 }
@@ -152,7 +152,7 @@ const leadControlBody = requestObject({
 // Ticket 21: the user's own test contacts, Run test and Stop test (ADR 0003 "Ticket 21").
 const markRepliedBody = requestObject({
   requestId: controlRequestId,
-  channel: z.enum(SOCIAL_CHANNEL_LIST as unknown as readonly [SocialChannel, ...SocialChannel[]], { message: "Only a social reply is marked by hand (LinkedIn or Instagram): email and SMS replies are detected." }),
+  channel: z.enum(SOCIAL_CHANNEL_LIST as unknown as readonly [SocialChannel, ...SocialChannel[]], { message: `Only a social reply is marked by hand (${SOCIAL_CHANNEL_LIST.map((c) => SOCIAL_CHANNELS[c].name).join(" or ")}): email and SMS replies are detected.` }),
   expect: z.strictObject({ status: z.enum(OUTREACH_STATUSES) }, { message: "Send the status the confirmation showed." }).optional(),
 });
 const inviteWithdrawalBody = requestObject({ requestId: controlRequestId, trackId: z.string().min(1).max(100), answer: z.enum(["withdrawn", "kept"]) });
@@ -161,7 +161,12 @@ const allowancesBody = requestObject({
   messagesPerDay: z.number().int().min(0).max(10_000),
   notesPerMonth: z.number().int().min(0).max(100_000),
 });
-const testContactsBody = requestObject({ email: z.string().max(320), mobile: z.string().max(40), linkedin: z.string().max(300).optional(), instagram: z.string().max(300).optional() });
+// The user's own test address on each social channel, one optional field per channel of the registry (ADR 0004 8, 13.8).
+const testContactsBody = requestObject({
+  email: z.string().max(320),
+  mobile: z.string().max(40),
+  ...(Object.fromEntries(SOCIAL_CHANNEL_LIST.map((c) => [c, z.string().max(300).optional()])) as { [C in SocialChannel]: z.ZodOptional<z.ZodString> }),
+});
 const runTestBody = requestObject({
   requestId: controlRequestId,
   renderAs: z.string().trim().min(1, "Choose the lead the test's copy is written for.").max(200),
@@ -859,8 +864,9 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
   app.put("/campaigns/:id/test-contacts", async (c) => {
     const body = testContactsBody.safeParse(await readJson(c));
     if (!body.success) return invalid(c, body.error);
-    const { linkedin, instagram, ...rest } = body.data;
-    const parsed = parseTestContacts({ ...rest, ...(linkedin === undefined ? {} : { linkedin }), ...(instagram === undefined ? {} : { instagram }) });
+    // A social field the page did not send is left out, so it is not compared or changed.
+    const { email, mobile } = body.data;
+    const parsed = parseTestContacts({ email, mobile, ...Object.fromEntries(SOCIAL_CHANNEL_LIST.flatMap((c) => (body.data[c] === undefined ? [] : [[c, body.data[c]]]))) });
     if (!parsed.ok) return c.json<TestContactsRefusal>({ error: { code: "invalid_test_contact", message: parsed.message, field: parsed.field } }, 400);
     const saved = await store.engine.saveTestContacts(c.req.param("id"), parsed.contacts);
     if (!saved.ok) return "missing" in saved ? notFound(c, "campaign") : c.json<TestContactsRefusal>({ error: { code: "test_contact_is_a_lead", message: saved.message, field: saved.field } }, 409);

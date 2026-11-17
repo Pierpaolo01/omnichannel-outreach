@@ -46,7 +46,7 @@ describe("the Test run tab says only what the run's facts say (ticket 21)", () =
     expect(endingTitle("your_reply", null)).toBe("Stopped by your reply");
     expect(endingTitle("edited", null)).toBe("Stopped by an edit");
     const steps = [row({}), row({ stepId: "e2", state: "due" }), row({ stepId: "w1", branch: "win_back", state: "not_reached", at: null })];
-    expect(progressText({ id: "t", running: true, ending: null, startedAt: READ, endedAt: null, renderAs: { id: "l", name: "Pat" }, email: null, mobile: null, linkedin: null, status: "active", mayStillSend: 0, steps, linkedinTracks: [], replyMarks: {}, social: { instagram: null } })).toBe("1 of 2 steps done");
+    expect(progressText({ id: "t", running: true, ending: null, startedAt: READ, endedAt: null, renderAs: { id: "l", name: "Pat" }, email: null, mobile: null, linkedin: null, status: "active", mayStillSend: 0, steps, linkedinTracks: [], replyMarks: {}, social: { instagram: null }, stopReply: null })).toBe("1 of 2 steps done");
   });
 
   test("a finished test says what went and what was skipped and why, never that every step ran when some did not (council on ffa202c, item 13)", () => {

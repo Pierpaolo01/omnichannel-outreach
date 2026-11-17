@@ -4,8 +4,9 @@ import { useLocation, useSearch } from "wouter";
 import { skipLimitOf } from "../../domain/sequence/calls.ts";
 import { MERGE_FIELDS } from "../../domain/sequence/copy.ts";
 import { NO_WIN_BACK_BRANCH, declinedPathOf, winBackAvailable, type DeclinedPath } from "../../domain/sequence/definition.ts";
-import { isMessageRequestChannel } from "../../domain/social-channels.ts";
-import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, LinkedinProviderStatus, SmsProviderStatus, SocialProvidersStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
+import { isMessageRequestChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
+import { messageRequestLimits, messageRequestNote } from "./message-request-wording.ts";
+import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, LinkedinProviderStatus, SequenceView, SmsProviderStatus, SocialProvidersStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
 import { stepTitle } from "../../shared/track-label.ts";
 import { useApi } from "../api.ts";
 import { ErrorState } from "../components.tsx";
@@ -15,6 +16,7 @@ import { arrange, type ArrangeOperation } from "./arrangement.ts";
 import { whyNoSmsNumber } from "./sms-wording.ts";
 import {
   STEP_NOUN,
+  stepNounOf,
   WEEK,
   fallbackIn,
   fieldLabel,
@@ -178,10 +180,12 @@ export function SequenceTab({ campaignId, editor, paused = false }: { campaignId
                   <Icon name="linkedin" className="size-4" />
                   LinkedIn track
                 </button>
-                <button type="button" className="btn gap-1.5 border-line-strong bg-base-100 font-medium" disabled={editor.locked} onClick={() => add("instagram")}>
-                  <Icon name="instagram" className="size-4" />
-                  Instagram track
-                </button>
+                {MESSAGE_REQUEST_CHANNELS.map((c) => (
+                  <button key={c} type="button" className="btn gap-1.5 border-line-strong bg-base-100 font-medium" disabled={editor.locked} onClick={() => add(c)}>
+                    <Icon name={c} className="size-4" />
+                    {SOCIAL_CHANNELS[c].name} track
+                  </button>
+                ))}
               </div>
             </>
           }
@@ -528,7 +532,7 @@ function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, ch
         <h3 id={headingId} className="text-[13px] font-semibold text-hand">
           Win-back branch <span className="font-normal text-ink-2">· for leads who decline on a call</span>
         </h3>
-        {!launched && !empty && <AddTrackMenu id={ADD_WIN_BACK_ID} label="Add win-back track" channels={["email", "sms", "linkedin", "instagram"]} disabled={locked} onAdd={(channel) => channel !== "call" && onAdd(channel)} />}
+        {!launched && !empty && <AddTrackMenu id={ADD_WIN_BACK_ID} label="Add win-back track" channels={["email", "sms", "linkedin", ...MESSAGE_REQUEST_CHANNELS]} disabled={locked} onAdd={(channel) => channel !== "call" && onAdd(channel)} />}
       </div>
       {empty ? (
         <div className="flex max-w-[460px] flex-col items-start gap-2 pt-1">
@@ -547,10 +551,12 @@ function WinBackBox({ empty, launched, locked, stacked, gutter, width, onAdd, ch
                 <Icon name="linkedin" className="size-4" />
                 LinkedIn track
               </button>
-              <button type="button" className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium" disabled={locked} aria-label="Add a win-back Instagram track" onClick={() => onAdd("instagram")}>
-                <Icon name="instagram" className="size-4" />
-                Instagram track
-              </button>
+              {MESSAGE_REQUEST_CHANNELS.map((c) => (
+                <button key={c} type="button" className="btn btn-sm gap-1.5 border-line-strong bg-base-100 font-medium" disabled={locked} aria-label={`Add a win-back ${SOCIAL_CHANNELS[c].name} track`} onClick={() => onAdd(c)}>
+                  <Icon name={c} className="size-4" />
+                  {SOCIAL_CHANNELS[c].name} track
+                </button>
+              ))}
             </div>
           )}
         </div>
@@ -638,7 +644,7 @@ function DeclinedEdges({ edges }: { edges: readonly DeclinedEdge[] }) {
 }
 
 /** The channel's word on a track's node. */
-const CHANNEL_ON_NODE: Record<TrackDefinition["channel"], string> = { email: "Email", sms: "SMS", call: "Phone", linkedin: "LinkedIn", instagram: "Instagram" };
+const CHANNEL_ON_NODE = (channel: TrackDefinition["channel"]): string => (channel === "email" ? "Email" : channel === "sms" ? "SMS" : channel === "call" ? "Phone" : SOCIAL_CHANNELS[channel].name);
 
 function TrackNode({ track, def, selected, blockers, launched, onSelect }: { track: TrackDefinition; def: CampaignDefinition; selected: boolean; blockers: readonly LaunchBlocker[]; launched: boolean; onSelect: () => void }) {
   const steps = liveSteps(track);
@@ -661,7 +667,7 @@ function TrackNode({ track, def, selected, blockers, launched, onSelect }: { tra
     >
       <span className="flex items-center gap-1.5 text-[12px] font-medium text-muted">
         <Icon name={track.channel} className="size-[15px]" />
-        {CHANNEL_ON_NODE[track.channel]}
+        {CHANNEL_ON_NODE(track.channel)}
         {issues > 0 && <span className="ml-auto flex items-center gap-1 font-semibold text-crit before:size-[7px] before:rounded-full before:bg-current before:content-['']">{issues} to fix</span>}
       </span>
       <span className="text-[14.5px] font-semibold leading-[1.3]">{title}</span>
@@ -687,7 +693,7 @@ function AddTrackMenu({
   onAdd,
   id = ADD_TRACK_ID,
   label = "Add track",
-  channels = ["email", "sms", "call", "linkedin", "instagram"],
+  channels = ["email", "sms", "call", "linkedin", ...MESSAGE_REQUEST_CHANNELS],
 }: {
   disabled: boolean;
   onAdd: (channel: TrackChannelApi) => void;
@@ -709,7 +715,7 @@ function AddTrackMenu({
       { key: "sms", label: "SMS track", icon: "sms" },
       { key: "call", label: "Phone track", icon: "call" },
       { key: "linkedin", label: "LinkedIn track", icon: "linkedin" },
-      { key: "instagram", label: "Instagram track", icon: "instagram" },
+      ...MESSAGE_REQUEST_CHANNELS.map((c) => ({ key: c, label: `${SOCIAL_CHANNELS[c].name} track`, icon: c })),
     ] as const
   ).filter((e) => channels.includes(e.key));
   useEffect(() => {
@@ -834,7 +840,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
   // A message-request track (ticket 25; ADR 0004 13.3): messages only, the first a message request.
   const request = isMessageRequestChannel(track.channel);
   const channel: SendChannelApi = track.channel === "call" ? "email" : track.channel;
-  const noun = STEP_NOUN[channel];
+  const noun = stepNounOf(channel);
   // One lock from the editor state, read by every authoring control (PR 41 council, items 9 and 12).
   const locked = editor.locked;
   const changeTrack = (change: (t: TrackDefinition) => TrackDefinition) =>
@@ -852,7 +858,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
         )}
         {request && (
           <p className="rounded-field bg-raised px-3 py-2 text-[13.5px] text-ink-2">
-            An Instagram track sends a text-only message to the decision maker’s own Instagram account from the import, or to their company’s when they have none, then follow-ups after their waits. Someone who doesn’t follow your session gets the first message as a message request; Instagram doesn’t tell the app whether they accept or read it. The messages go on until they answer and you mark them replied.
+            {messageRequestNote(SOCIAL_CHANNELS[channel as MessageRequestChannel].name)}
           </p>
         )}
         <div role="group" aria-label={linkedin ? "Invite and messages" : sms || request ? (request ? "Messages" : "Texts") : "Emails"} className="flex min-w-0 flex-col">
@@ -895,7 +901,7 @@ function Inspector({ track, editor, facts, factsFailed, onRetryFacts, openStep, 
           )}
         </div>
         {linkedin && <AcceptWaitControl track={track} locked={locked} launched={editor.launched} onChange={(days) => changeTrack((t) => ({ ...t, acceptWaitDays: days }))} />}
-        <TimingAndSender track={track} editor={editor} onWindow={(window) => changeTrack((t) => ({ ...t, window }))} />
+        <TimingAndSender track={track} editor={editor} onWindow={(window) => changeTrack((t) => ({ ...t, window }))} onSenders={(senders) => changeTrack((t) => ({ ...t, senders }))} />
         <RemoveTrack track={track} editor={editor} onRemoved={onRemoved} />
     </InspectorFrame>
   );
@@ -1206,7 +1212,7 @@ function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle,
   const request = isMessageRequestChannel(channel);
   const sms = channel === "sms" || linkedin || request;
   const name = stepTitle({ branch: "main" }, channel, index + 1);
-  const noun = linkedin ? (index === 0 ? "note" : "message") : STEP_NOUN[channel].toLowerCase();
+  const noun = linkedin ? (index === 0 ? "note" : "message") : stepNounOf(channel).toLowerCase();
   const first = index === 0;
   // The invite's note may be empty: a plain invite is a choice, never a blocker (ADR 0004 3.1).
   const invite = linkedin && first;
@@ -1253,7 +1259,7 @@ function StepBlock({ channel, step, index, steps, open, facts, editor, onToggle,
               aria-label={`Days to wait before ${name}`}
             />
           </label>
-          {linkedin ? (index === 1 ? "days after they accept the invite" : `days after ${lowerFirst(stepTitle({ branch: "main" }, "linkedin", index))}`) : request ? `days after the ${lowerFirst(stepTitle({ branch: "main" }, channel, index))}` : `days after ${STEP_NOUN[channel]} ${index}`}
+          {linkedin ? (index === 1 ? "days after they accept the invite" : `days after ${lowerFirst(stepTitle({ branch: "main" }, "linkedin", index))}`) : request ? `days after the ${lowerFirst(stepTitle({ branch: "main" }, channel, index))}` : `days after ${stepNounOf(channel)} ${index}`}
         </div>
       )}
       <div className={`rounded-field border bg-base-100 ${open ? "border-line-strong" : "border-line"} ${first ? "" : ""}`}>
@@ -1447,7 +1453,7 @@ function Fallbacks({ step, noun, facts, onChange }: { step: StepDefinition; noun
   );
 }
 
-function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; editor: SequenceEditor; onWindow: (window: TrackDefinition["window"]) => void }) {
+function TimingAndSender({ track, editor, onWindow, onSenders }: { track: TrackDefinition; editor: SequenceEditor; onWindow: (window: TrackDefinition["window"]) => void; onSenders?: (senders: readonly string[]) => void }) {
   const hours = windowHours(track.window);
   const days = track.window.map((w) => w.day);
   const locked = editor.locked;
@@ -1482,11 +1488,13 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
               <LinkedinProviderReason />
               <div className="text-[12.5px] text-muted">Launch is blocked while this track has no session.</div>
             </>
+          ) : request && (accounts.length > 0 || (track.senders ?? []).length > 0) ? (
+            <SenderChoice track={track} accounts={accounts} locked={locked} onChange={(senders) => onSenders?.(senders)} />
           ) : request && accounts.length === 0 ? (
             // ADR 0004 13.1: the running app has no Instagram session; nothing here suggests one can be connected from the application.
             <>
-              <span className="font-semibold text-crit">No connected Instagram session.</span>
-              <SocialProviderReason />
+              <span className="font-semibold text-crit">No connected {SOCIAL_CHANNELS[track.channel as MessageRequestChannel].name} session.</span>
+              <SocialProviderReason channel={track.channel as MessageRequestChannel} />
               <div className="text-[12.5px] text-muted">Launch is blocked while this track has no session.</div>
             </>
           ) : accounts.length === 0 ? (
@@ -1518,11 +1526,10 @@ function TimingAndSender({ track, editor, onWindow }: { track: TrackDefinition; 
             </ul>
           )}
           {request && (
-            <ul className="mt-1.5 flex list-disc flex-col gap-0.5 pl-4 text-[12.5px] text-muted" aria-label="What limits Instagram messages">
-              <li>Messages go to the decision maker’s own Instagram account from the import, else to their company’s. A lead with neither skips this track, and the tracks after it start.</li>
-              <li>Each session sends only within the messages a day you allow it; with none set, it sends nothing. Follow-ups go before first messages.</li>
-              <li>An account another lead or campaign already reached from the same session is skipped here, and who reached it is named on the record. Two people at one company with no account of their own share their company’s.</li>
-              <li>A personal profile and a business account are used alike; if Instagram refuses a message, the track ends for that lead and says so.</li>
+            <ul className="mt-1.5 flex list-disc flex-col gap-0.5 pl-4 text-[12.5px] text-muted" aria-label={`What limits ${SOCIAL_CHANNELS[track.channel as MessageRequestChannel].name} messages`}>
+              {messageRequestLimits(SOCIAL_CHANNELS[track.channel as MessageRequestChannel].name, (track.senders ?? []).length).map((line) => (
+                <li key={line}>{line}</li>
+              ))}
             </ul>
           )}
           {sms && (
@@ -1703,10 +1710,57 @@ function LinkedinProviderReason() {
   return result.state === "ready" ? <div className="text-[12.5px] text-ink-2">{result.data.message}</div> : null;
 }
 
-/** Why no Instagram session is connected, in the provider read's own words (GET /api/social-providers); nothing while unknown. */
-function SocialProviderReason() {
+/**
+ * A message-request track's sender choice (ADR 0004 13.5: "the user chooses each track's sender account"): one checkbox per
+ * connected session of the channel, named with its kind, stored on the track (`senders`). A newly connected session is never
+ * added by itself; a chosen session the provider no longer reports stays chosen and says that it sends nothing until it is
+ * connected again. None chosen is launch blocker 3, said here as such.
+ */
+function SenderChoice({ track, accounts, locked, onChange }: { track: TrackDefinition; accounts: readonly SequenceView["accounts"][number][]; locked: boolean; onChange: (senders: readonly string[]) => void }) {
+  const chosen = track.senders ?? [];
+  const legendId = useId();
+  const listed = new Set(accounts.map((a) => a.id));
+  const gone = chosen.filter((id) => !listed.has(id));
+  const name = isMessageRequestChannel(track.channel) ? SOCIAL_CHANNELS[track.channel].name : "";
+  const kindWord = (kind: string | undefined) => (kind === "business" ? "a business account" : kind === "personal" ? "a personal profile" : "kind not reported");
+  const toggle = (id: string, on: boolean) => onChange(on ? [...chosen.filter((x) => x !== id), id] : chosen.filter((x) => x !== id));
+  return (
+    <fieldset disabled={locked} className="flex min-w-0 flex-col gap-1" aria-describedby={chosen.length === 0 ? `${legendId}-none` : undefined}>
+      <legend id={legendId} className="sr-only">{`${name} sessions this track sends from`}</legend>
+      {accounts.map((a) => (
+        <label key={a.id} className="flex cursor-pointer items-start gap-2 [overflow-wrap:anywhere]">
+          <input type="checkbox" className="checkbox checkbox-sm mt-0.5" checked={chosen.includes(a.id)} onChange={(e) => toggle(a.id, e.target.checked)} />
+          <span>
+            {a.label}
+            <span className="text-muted"> · {kindWord(a.socialKind)}</span>
+            {!a.healthy && <span className="text-crit"> {CANNOT_SEND}</span>}
+          </span>
+        </label>
+      ))}
+      {gone.map((id) => (
+        <label key={id} className="flex cursor-pointer items-start gap-2 [overflow-wrap:anywhere]">
+          <input type="checkbox" className="checkbox checkbox-sm mt-0.5" checked onChange={(e) => toggle(id, e.target.checked)} />
+          <span>
+            {id}
+            <span className="text-crit"> · chosen, but not connected now: it sends nothing until it is</span>
+          </span>
+        </label>
+      ))}
+      {chosen.length === 0 ? (
+        <p id={`${legendId}-none`} className="text-[12.5px] font-semibold text-crit">
+          No session chosen. Choose at least one: launch is blocked until you do.
+        </p>
+      ) : (
+        <p className="text-[12.5px] text-muted">Only the sessions you tick send this track’s messages. A session connected later isn’t added by itself.</p>
+      )}
+    </fieldset>
+  );
+}
+
+/** Why no session of a message-request channel is connected, in the provider read's own words (GET /api/social-providers). */
+function SocialProviderReason({ channel }: { channel: MessageRequestChannel }) {
   const { result } = useApi<SocialProvidersStatus>("/api/social-providers");
-  return result.state === "ready" ? <div className="text-[12.5px] text-ink-2">{result.data.instagram.message}</div> : null;
+  return result.state === "ready" ? <div className="text-[12.5px] text-ink-2">{result.data[channel].message}</div> : null;
 }
 
 /** One line on why no inbox is connected, from GET /api/email-provider; nothing if it is unknown. */

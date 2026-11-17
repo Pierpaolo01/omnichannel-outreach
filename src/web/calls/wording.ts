@@ -3,6 +3,7 @@
  * reads only what the server reported (the queue, the call task, an outcome's answer, Needs
  * attention); none decides anything about order, counts, hours, capacity or an outcome's effect.
  */
+import { isMessageRequestChannel, SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
 import type { PausedCampaignCalls, CallbackListingView, CallNumberView, CallOffListView, CallOutcomeApi, DeclinedPathApi, DeclinePreviewView, DeclineTrackView, CallQueueItem, CallsView, CallTaskView, FinishReasonApi, NeedsAttention, OutreachStatus, RecordCallView, RecordCalls, RecordedNumberView, TodayView, WindowRule, HoldReasonApi, ConversationOwnerView } from "../../shared/api.ts";
 import { clockTime, localClock } from "../time.ts";
 import { WIN_BACK_HAS_NO_TRACKS, type TrackChannel } from "../../domain/sequence/definition.ts";
@@ -489,7 +490,7 @@ export function attentionItems(n: NeedsAttention, today: Pick<TodayView, "overdu
   }
   for (const c of n.heldCapacity) {
     // A LinkedIn session's capacity is two allowances (council on dee365d, item 4): its held work is said without a sum.
-    items.push({ key: `held-${c.accountId}`, tone: "pause", title: c.channel === "linkedin" ? `${c.held} of ${c.accountId}’s LinkedIn steps today ${c.held === 1 ? "is" : "are"} held` : c.channel === "instagram" ? `${c.held} of ${c.accountId}’s Instagram messages today ${c.held === 1 ? "is" : "are"} held` : `${c.held} of ${c.accountId}’s ${c.capacity} sends today are held`, body: "The provider hasn’t confirmed whether those messages went, so their room stays taken while it hasn’t." });
+    items.push({ key: `held-${c.accountId}`, tone: "pause", title: c.channel === "linkedin" ? `${c.held} of ${c.accountId}’s LinkedIn steps today ${c.held === 1 ? "is" : "are"} held` : isMessageRequestChannel(c.channel) ? `${c.held} of ${c.accountId}’s ${SOCIAL_CHANNELS[c.channel].name} messages today ${c.held === 1 ? "is" : "are"} held` : `${c.held} of ${c.accountId}’s ${c.capacity} sends today are held`, body: "The provider hasn’t confirmed whether those messages went, so their room stays taken while it hasn’t." });
   }
   items.push(...heldTrackItems(n.heldTracks));
   items.push(...withdrawalStuckItems(n.inviteWithdrawalsUnknown ?? []));

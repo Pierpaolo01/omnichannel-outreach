@@ -7,7 +7,7 @@ import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, maySend, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, waitSpan, wallOfLead, windowOpensAt, type Freeze, type LeadClock } from "./clock.ts";
 import { render } from "./copy.ts";
-import { holdsConversations, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, poolOf, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import { holdsConversations, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, poolOf, trackPool, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import { isMessageRequestChannel, type MessageRequestChannel, type SocialChannel } from "../social-channels.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
 import type { Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, LeadDetail, LinkedinSkipCause, SocialSkipCause, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";
@@ -1013,7 +1013,7 @@ function recipientOf(state: SubjectState, trackId: string): string | null {
 export function candidatesFor(state: SubjectState, trackId: string): string[] {
   const channel = channelOf(state, trackId) ?? "email";
   const fixed = senderOf(state, channel);
-  const ids = fixed !== null ? [fixed] : [...poolOf(state.campaign.definition, channel)];
+  const ids = fixed !== null ? [fixed] : [...trackPoolOf(state, trackId)];
   if (!holdsConversations(channel)) return ids;
   const recipient = recipientOf(state, trackId);
   return recipient === null ? ids : ids.filter((id) => pairFree(state, id, recipient, channel));
@@ -1058,9 +1058,15 @@ export function claimRefusal(state: SubjectState, item: { readonly trackId: stri
 }
 
 /** The numbers an SMS track may text from: the subject's fixed sender, else its pool as the definition holds it now. */
-function usableNumbers(state: SubjectState, channel: ConversationChannel): readonly string[] {
+function usableNumbers(state: SubjectState, trackId: string, channel: ConversationChannel): readonly string[] {
   const fixed = senderOf(state, channel);
-  return fixed !== null ? [fixed] : poolOf(state.campaign.definition, channel);
+  return fixed !== null ? [fixed] : trackPoolOf(state, trackId);
+}
+
+/** The sender accounts a track of this subject may use (ADR 0004 13.5): its own chosen senders, or its channel's pool. */
+export function trackPoolOf(state: SubjectState, trackId: string): readonly string[] {
+  const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
+  return track ? trackPool(state.campaign.definition, track) : [];
 }
 
 /** Another subject's binding of `sender` with the track's mobile, if any. */
@@ -1078,7 +1084,7 @@ function blockedNumbers(state: SubjectState, trackId: string, now: number): SmsB
   if (!holdsConversations(channel)) return null;
   const stepId = progressOf(state, trackId)?.nextStepId;
   if (!stepId || claimRefusal(state, { trackId, stepId }, now) !== null) return null;
-  const numbers = usableNumbers(state, channel);
+  const numbers = usableNumbers(state, trackId, channel);
   const recipient = recipientOf(state, trackId);
   if (numbers.length === 0 || recipient === null || candidatesFor(state, trackId).length > 0) return null;
   return numbers.flatMap((n) => otherBinding(state, n, recipient, channel) ?? []);

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import type { MessageRequestTrackView, TrackProgressView } from "../../shared/api.ts";
 import { messageRequestTrackLines } from "./message-request-wording.ts";
-import { MARK_REPLIED_WORDS, channelOfMark, markRepliedControl } from "./reply-mark-wording.ts";
+import { markRepliedWords, channelOfMark, markRepliedControl } from "./reply-mark-wording.ts";
 import { MESSAGE_REQUEST_STEP_KIND_AT, stepTitle, trackLabel } from "../../shared/track-label.ts";
 import { messageRequestStepKind, type CampaignDefinition, type TrackDefinition } from "../../domain/sequence/definition.ts";
 
@@ -39,8 +39,8 @@ describe("the reply mark carries its channel", () => {
     expect(channelOfMark("mark_replied:instagram")).toBe("instagram");
     expect(channelOfMark("mark_replied:linkedin")).toBe("linkedin");
     expect(channelOfMark("pause")).toBeNull();
-    expect(MARK_REPLIED_WORDS.linkedin.label).toBe("Mark replied on LinkedIn");
-    expect(MARK_REPLIED_WORDS.instagram.done).toBe("Marked replied on Instagram. Carry on the conversation on Instagram.");
+    expect(markRepliedWords("linkedin").label).toBe("Mark replied on LinkedIn");
+    expect(markRepliedWords("instagram").done).toBe("Marked replied on Instagram. Carry on the conversation on Instagram.");
   });
 });
 

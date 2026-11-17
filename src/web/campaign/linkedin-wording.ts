@@ -10,7 +10,7 @@ import { statusGroup } from "../../domain/outreach-status.ts";
 import type { AttentionItem } from "../calls/wording.ts";
 import { dateIn } from "../calls/wording.ts";
 import { conversationTaken } from "./sms-wording.ts";
-import { MARK_REPLIED_WORDS } from "./reply-mark-wording.ts";
+import { markRepliedWords } from "./reply-mark-wording.ts";
 
 /** How the invite's note went, from the choice stored with the work at the handover (ADR 0004 section 4). */
 export function noteLine(note: NonNullable<LinkedinTrackView["note"]>): string {
@@ -155,7 +155,7 @@ export function withdrawalStuckItems(stuck: NonNullable<NeedsAttention["inviteWi
 }
 
 /** The reply mark's confirmation and answer (ADR 0004 section 7): a mark of the user's, never a detected reply. */
-export const MARK_REPLIED = MARK_REPLIED_WORDS.linkedin;
+export const MARK_REPLIED = markRepliedWords("linkedin");
 
 /**
  * What a test run's LinkedIn reply mark is for, said from the work that allows it (review bot on c20c8f0): the read's own

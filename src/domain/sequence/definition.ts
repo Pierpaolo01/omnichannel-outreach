@@ -6,7 +6,7 @@
  * lead enters when it declines on a call, with no call.
  */
 import { isTimeZone, type WindowRule } from "./clock.ts";
-import { isMessageRequestChannel, SOCIAL_CHANNELS, type SocialChannel } from "../social-channels.ts";
+import { isMessageRequestChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel } from "../social-channels.ts";
 
 export type TrackChannel = "email" | "sms" | "call" | SocialChannel;
 /**
@@ -17,7 +17,7 @@ export type TrackChannel = "email" | "sms" | "call" | SocialChannel;
 export type ConversationChannel = "sms" | SocialChannel;
 export const holdsConversations = (channel: TrackChannel | undefined): channel is ConversationChannel => channel === "sms" || channel === "linkedin" || isMessageRequestChannel(channel);
 /** Every channel of conversations, for tests that every one has its words. */
-export const CONVERSATION_CHANNELS: readonly ConversationChannel[] = ["sms", "linkedin", "instagram"];
+export const CONVERSATION_CHANNELS: readonly ConversationChannel[] = ["sms", ...SOCIAL_CHANNEL_LIST];
 
 /** The channels a sender account serves (a phone track needs none): email, SMS and the social channels (ADR 0004). */
 export type SendChannel = Exclude<TrackChannel, "call">;
@@ -62,6 +62,12 @@ export interface TrackDefinition {
    * accepted. Required on a LinkedIn track and on no other.
    */
   readonly acceptWaitDays?: number;
+  /**
+   * A message-request track's sender sessions, chosen by the user for this track (ADR 0004 13.5: "the user chooses each
+   * track's sender account"): the sessions it may send from, each a personal profile or a business account. Absent or
+   * empty: none chosen, which launch blocker 3 names. On a message-request track only.
+   */
+  readonly senders?: readonly string[];
 }
 
 export interface CampaignDefinition {
@@ -77,8 +83,6 @@ export interface CampaignDefinition {
   readonly callScript?: string;
   /** LinkedIn sender sessions LinkedIn tracks may use (ADR 0004 1.1). Absent before ticket 24: none. */
   readonly linkedinPool?: readonly string[];
-  /** Instagram sender sessions Instagram tracks may use (ADR 0004 13.5). Absent before ticket 25: none. */
-  readonly instagramPool?: readonly string[];
   readonly tracks: readonly TrackDefinition[];
 }
 
@@ -126,15 +130,33 @@ export function emptyDefinition(timezone: string): CampaignDefinition {
 }
 
 /** The definition's field that holds each sending channel's pool (ADR 0004 13.2): one entry per channel. */
-export const POOL_FIELD = { email: "emailPool", sms: "smsPool", linkedin: "linkedinPool", instagram: "instagramPool" } as const satisfies { readonly [C in SendChannel]: keyof CampaignDefinition };
+/**
+ * The definition's field that holds each campaign-wide pool (ADR 0004 13.2). A message-request channel has none: each of its
+ * tracks holds the senders the user chose for it (`senders`), so a new message-request channel adds no field here.
+ */
+export const POOL_FIELD = { email: "emailPool", sms: "smsPool", linkedin: "linkedinPool" } as const satisfies { readonly [C in Exclude<SendChannel, MessageRequestChannel>]: keyof CampaignDefinition };
 
-/** The sender accounts a track on `channel` may use. */
+/**
+ * The sender accounts tracks on `channel` may use: the campaign's pool, or for a message-request channel every session any
+ * of its live tracks on that channel chose (for loading accounts and judging what competes). A track's own senders are
+ * `trackPool`'s: dispatch, the validator and the launch check read that.
+ */
 export function poolOf(def: CampaignDefinition, channel: TrackChannel): readonly string[] {
-  return channel === "call" ? [] : (def[POOL_FIELD[channel]] ?? []);
+  if (channel === "call") return [];
+  if (isMessageRequestChannel(channel)) return [...new Set(def.tracks.filter((t) => !t.removed && t.channel === channel).flatMap((t) => t.senders ?? []))];
+  return def[POOL_FIELD[channel]] ?? [];
 }
 
-/** Every pool of the definition, by channel: the one list a validator or a comparison of pools walks. */
-export const allPools = (def: CampaignDefinition): readonly (readonly string[])[] => (Object.keys(POOL_FIELD) as SendChannel[]).map((c) => poolOf(def, c));
+/** The sender accounts this track may use (ADR 0004 13.5): its own chosen senders on a message-request channel, else its channel's pool. */
+export function trackPool(def: CampaignDefinition, track: Pick<TrackDefinition, "channel" | "senders">): readonly string[] {
+  return isMessageRequestChannel(track.channel) ? (track.senders ?? []) : poolOf(def, track.channel);
+}
+
+/** Every pool of the definition, campaign-wide and per track: the one list a validator or a comparison of pools walks. */
+export const allPools = (def: CampaignDefinition): readonly (readonly string[])[] => [
+  ...(Object.keys(POOL_FIELD) as (keyof typeof POOL_FIELD)[]).map((c) => poolOf(def, c)),
+  ...def.tracks.map((t) => t.senders ?? []),
+];
 
 /**
  * A LinkedIn step's kind, by its position among the track's live steps (ADR 0004 3.1): the first is the connection invite
@@ -276,6 +298,7 @@ export function definitionIssues(def: CampaignDefinition, previous: CampaignDefi
       if (liveSteps(track).some((st) => st.subject.trim() !== "")) add("linkedin_subject", `${name}'s invite and messages have no subject.`, { trackId: track.id });
     } else if (track.acceptWaitDays !== undefined) add("accept_wait_not_linkedin", "Only a LinkedIn track waits for an invite to be accepted.", { trackId: track.id });
     // A message-request track (ADR 0004 13.3): messages only, the first a message request, none with a subject.
+    if (!isMessageRequestChannel(track.channel) && track.senders !== undefined) add("senders_not_message_request", `Only ${MESSAGE_REQUEST_CHANNELS.map((c) => `${SOCIAL_CHANNELS[c].name} tracks`).join(" and ")} choose their own sender sessions.`, { trackId: track.id });
     if (isMessageRequestChannel(track.channel)) {
       if (liveSteps(track).length < 1) add("message_request_steps", `${name} needs at least one message.`, { trackId: track.id });
       if (liveSteps(track).some((st) => st.subject.trim() !== "")) add("message_request_subject", `${name}'s messages have no subject.`, { trackId: track.id });

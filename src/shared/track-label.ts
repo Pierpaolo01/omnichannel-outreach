@@ -5,12 +5,12 @@
  * of the win-back branch is counted within that branch and named for it: "Win-back email track" (ticket 16).
  */
 import type { SendChannelApi, TrackChannelApi } from "./api.ts";
-import { isMessageRequestChannel } from "../domain/social-channels.ts";
+import { isMessageRequestChannel, SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS } from "../domain/social-channels.ts";
 import type { CampaignDefinition, TrackDefinition } from "../domain/sequence/definition.ts";
 
-const WORD = { email: "Email", sms: "SMS", call: "Phone", linkedin: "LinkedIn", instagram: "Instagram" } as const satisfies { readonly [C in TrackChannelApi]: string };
+const WORD = (channel: TrackChannelApi): string => (channel === "email" ? "Email" : channel === "sms" ? "SMS" : channel === "call" ? "Phone" : SOCIAL_CHANNELS[channel].name);
 /** The channel words that keep their capital mid-sentence: product names and SMS. */
-const PROPER = new Set(["SMS", "LinkedIn", "Instagram"]);
+const PROPER = new Set(["SMS", ...SOCIAL_CHANNEL_LIST.map((c) => SOCIAL_CHANNELS[c].name)]);
 
 export interface TrackLabel {
   readonly label: string;
@@ -23,7 +23,7 @@ export interface TrackLabel {
 export function trackLabel(def: CampaignDefinition, track: Pick<TrackDefinition, "id" | "channel">): TrackLabel {
   const branch = def.tracks.find((t) => t.id === track.id)?.branch ?? "main";
   const same = def.tracks.filter((t) => t.channel === track.channel && t.branch === branch && (!t.removed || t.id === track.id));
-  const word = branch === "win_back" ? `Win-back ${PROPER.has(WORD[track.channel]) ? WORD[track.channel] : WORD[track.channel].toLowerCase()}` : WORD[track.channel];
+  const word = branch === "win_back" ? `Win-back ${PROPER.has(WORD(track.channel)) ? WORD(track.channel) : WORD(track.channel).toLowerCase()}` : WORD(track.channel);
   if (same.length <= 1) return { label: `${word} track`, several: false, branch };
   return { label: `${word} track ${same.findIndex((t) => t.id === track.id) + 1}`, several: true, branch };
 }
@@ -33,7 +33,7 @@ export function trackLabel(def: CampaignDefinition, track: Pick<TrackDefinition,
  * "Win-back email" or "Win-back text" in the win-back branch, so a step of the branch never reads as the main sequence's.
  */
 export function stepNoun(track: Pick<TrackLabel, "branch">, channel: SendChannelApi): string {
-  const noun = channel === "sms" ? "Text" : channel === "linkedin" ? "LinkedIn step" : channel === "email" ? "Email" : "Instagram message";
+  const noun = channel === "sms" ? "Text" : channel === "linkedin" ? "LinkedIn step" : channel === "email" ? "Email" : `${SOCIAL_CHANNELS[channel].name} message`;
   switch (track.branch) {
     case "main":
       return noun;

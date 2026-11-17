@@ -867,8 +867,11 @@ export interface BeforeLaunchView {
     readonly mobile: number;
     readonly phone: number;
     readonly linkedin: number;
-    /** Per message-request channel: leads with an account of their own, and leads that would use their company's (ADR 0004 13.4). */
-    readonly social: { readonly [C in MessageRequestChannel]: { readonly own: number; readonly company: number } };
+    /**
+     * Per message-request channel: leads with an account of their own, and leads that would use their company's (ADR 0004
+     * 13.4); and of those company accounts, the ones two or more leads would share, with how many leads share them (Q46).
+     */
+    readonly social: { readonly [C in MessageRequestChannel]: { readonly own: number; readonly company: number; readonly shared: { readonly accounts: number; readonly leads: number } } };
   };
   /** Every merge field the live copy uses, with how many leads lack it and the fallbacks written for it. */
   readonly mergeFields: readonly {
@@ -1841,6 +1844,8 @@ export interface TestRunRead {
   /** Its messages still with a provider, which may still be sent after it ended. */
   readonly mayStillSend: number;
   readonly steps: readonly TestStepRow[];
+  /** The channel of the reply that stopped the run, as stored when it stopped (ticket 25): a social one is the user's mark. */
+  readonly stopReply: SendChannelApi | null;
   /** The run's outreach status at the read, which a reply mark's confirmation sends back as its expectation (ticket 24b). */
   readonly status: OutreachStatus;
   /** Each LinkedIn track's own facts for this run, as a lead's read gives them (council on dee365d, items 2 and 3). */

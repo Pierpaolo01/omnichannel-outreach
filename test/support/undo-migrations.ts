@@ -26,14 +26,14 @@ export const UNDO_SINCE_18 = `
  * undoing: a later run of 22 rebuilds them from the columns it names. Run first by every undo that goes back past 22.
  */
 /**
- * Migrations 25 and 26 undone (ticket 25): the schema taken back to what migrations 1 to 24 make, computed from them, never
+ * Migration 25 undone (ticket 25): the schema taken back to what migrations 1 to 24 make, computed from them, never
  * written by hand. Every table whose text 26 changed is rebuilt from its text before 26 with the columns it had then; the
  * tables 26 added are dropped; every view and trigger is made again as it was. Run first by every undo that goes back past 26.
  */
-export const UNDO_26 = undoTo(24);
+export const UNDO_25 = undoTo(24);
 
 /** Migration 24 undone (ticket 24b): a LinkedIn skip's recorded cause, dropped. Run first by every undo that goes back past 24. */
-export const UNDO_24 = `${UNDO_26}
+export const UNDO_24 = `${UNDO_25}
   ALTER TABLE track_progress DROP COLUMN skip_cause;
   DELETE FROM schema_migrations WHERE version >= 24;
 `;

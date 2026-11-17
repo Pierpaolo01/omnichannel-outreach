@@ -1,3 +1,5 @@
+import { isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
+import { messageRequestWarnings } from "./message-request-wording.ts";
 import type { TrackChannelApi } from "../../shared/api.ts";
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
@@ -20,7 +22,7 @@ import { withheldExplanation } from "./withheld.ts";
 /** "email and SMS track", "email, SMS and LinkedIn track": the sending channels the definition has tracks on, for one sentence. */
 function senderTracksPhrase(def: CampaignDefinition): string {
   const has = (c: string) => def.tracks.some((t) => !t.removed && t.channel === c);
-  const words = ["email", "SMS", ...(has("linkedin") ? ["LinkedIn"] : []), ...(has("instagram") ? ["Instagram"] : [])];
+  const words = ["email", "SMS", ...SOCIAL_CHANNEL_LIST.filter(has).map((c) => SOCIAL_CHANNELS[c].name)];
   return `${words.slice(0, -1).join(", ")} and ${words.at(-1)} track`;
 }
 
@@ -32,8 +34,8 @@ export function BeforeLaunchTab({ campaignId, editor }: { campaignId: string; ed
   const facts = result.state === "ready" ? result.data : null;
   // LinkedIn is said only for a campaign with a LinkedIn track (re-check of a6c1700, item 12).
   const hasLinkedin = editor.view.definition.tracks.some((t) => !t.removed && t.channel === "linkedin");
-  // Instagram likewise (ticket 25): its tile counts leads with an account to message, their own or their company's.
-  const hasInstagram = editor.view.definition.tracks.some((t) => !t.removed && t.channel === "instagram");
+  // Each message-request channel likewise (ticket 25): its tile counts leads with an account to message, own or company's.
+  const requestChannels = MESSAGE_REQUEST_CHANNELS.filter((c) => editor.view.definition.tracks.some((t) => !t.removed && t.channel === c));
   return (
     <div className="flex flex-col gap-4">
       <LaunchBar editor={editor} facts={facts} />
@@ -60,7 +62,9 @@ export function BeforeLaunchTab({ campaignId, editor }: { campaignId: string; ed
                 <Coverage n={facts.coverage.phone} of={facts.coverage.leads} what="have a phone number" />
                 {/* Ticket 24b: a member profile from the import, by the engine's own rule, only for a campaign with a LinkedIn track. */}
                 {hasLinkedin && <Coverage n={facts.coverage.linkedin} of={facts.coverage.leads} what="have a LinkedIn profile" />}
-                {hasInstagram && <Coverage n={facts.coverage.social.instagram.own + facts.coverage.social.instagram.company} of={facts.coverage.leads} what={`have an Instagram account to message (${facts.coverage.social.instagram.company} through their company’s)`} />}
+                {requestChannels.map((c) => (
+                  <Coverage key={c} n={facts.coverage.social[c].own + facts.coverage.social[c].company} of={facts.coverage.leads} what={`have an ${SOCIAL_CHANNELS[c].name} account to message (${facts.coverage.social[c].company} through their company’s)`} />
+                ))}
               </div>
             </Card>
             <Card title="Missing merge fields">
@@ -234,9 +238,9 @@ function Warnings({ facts, editor }: { facts: BeforeLaunchView; editor: Sequence
   if (live.some((t) => t.channel === "call") && noPhone > 0) {
     items.push({ title: `${noPhone} ${noPhone === 1 ? "lead has" : "leads have"} no phone number`, detail: `They skip ${tracksOn("call")}${after("call") ? ", and the tracks after it start sooner" : ""}. A company’s main line counts for everyone at the company.` });
   }
-  const noAccount = facts.coverage.leads - facts.coverage.social.instagram.own - facts.coverage.social.instagram.company;
-  if (live.some((t) => t.channel === "instagram") && noAccount > 0) {
-    items.push({ title: `${noAccount} ${noAccount === 1 ? "lead has" : "leads have"} no Instagram account to message`, detail: `They skip ${tracksOn("instagram")}${after("instagram") ? ", and the tracks after it start sooner" : ""}. A decision maker’s own account from the import counts, else their company’s.` });
+  for (const c of MESSAGE_REQUEST_CHANNELS) {
+    if (!live.some((t) => t.channel === c)) continue;
+    items.push(...messageRequestWarnings(SOCIAL_CHANNELS[c].name, facts.coverage.leads, facts.coverage.social[c], tracksOn(c), after(c), Math.max(0, ...live.filter((t) => t.channel === c).map((t) => (t.senders ?? []).length))));
   }
   if (live.some((t) => t.channel === "linkedin") && noProfile > 0) {
     items.push({ title: `${noProfile} ${noProfile === 1 ? "lead has" : "leads have"} no LinkedIn profile`, detail: `They skip ${tracksOn("linkedin")}${after("linkedin") ? ", and the tracks after it start sooner" : ""}. Only a decision maker’s member profile from the import counts: company leads and company pages are never invited.` });
@@ -367,10 +371,10 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
                   <span className="flex items-start gap-1.5 [overflow-wrap:anywhere]">
                     <Icon name={a.channel} className="mt-0.5 size-4 text-muted" />
                     <span>
-                      <span className="sr-only">{a.channel === "sms" ? "SMS number " : a.channel === "linkedin" ? "LinkedIn session " : a.channel === "instagram" ? "Instagram session " : "Email inbox "}</span>
+                      <span className="sr-only">{a.channel === "sms" ? "SMS number " : isSocialChannel(a.channel) ? `${SOCIAL_CHANNELS[a.channel].name} session ` : "Email inbox "}</span>
                       {a.label}
                       <span className="block text-[12.5px] text-muted">
-                        At most one {a.channel === "sms" ? "text" : a.channel === "linkedin" ? "invite or message" : a.channel === "instagram" ? "message" : "email"} every {gap(a.gapSeconds)}
+                        At most one {a.channel === "sms" ? "text" : a.channel === "linkedin" ? "invite or message" : isMessageRequestChannel(a.channel) ? "message" : "email"} every {gap(a.gapSeconds)}
                       </span>
                     </span>
                   </span>
@@ -379,7 +383,7 @@ function DailyLoad({ facts, editor }: { facts: BeforeLaunchView; editor: Sequenc
                 <td className="py-2.5 max-[560px]:p-0">
                   {/* A LinkedIn session's two allowances, each with its use (council on dee365d, item 4); never their sum. */}
                   {/* A message-request session has one allowance, messages (ADR 0004 13.7): no invites row. */}
-                  {(a.kinds ? [...(a.channel === "instagram" ? [] : [{ what: "invites", ...a.kinds.invite }]), { what: "messages", ...a.kinds.message }] : [{ what: "", capacity: a.capacity, usedToday: a.usedToday }]).map((r) => (
+                  {(a.kinds ? [...(isMessageRequestChannel(a.channel) ? [] : [{ what: "invites", ...a.kinds.invite }]), { what: "messages", ...a.kinds.message }] : [{ what: "", capacity: a.capacity, usedToday: a.usedToday }]).map((r) => (
                     <span key={r.what} className="block [&+&]:mt-1.5">
                       <span className={r.usedToday >= r.capacity ? "font-medium text-pause" : ""}>
                         {r.usedToday} of {r.capacity}
@@ -462,7 +466,7 @@ export function usedTodayWarnings(a: LoadProjectionView["accounts"][number]): { 
     const { invite, message } = a.kinds;
     return [
       ...(invite.usedToday > 0 ? [{ title: `${a.label} has ${invite.usedToday} of its ${invite.capacity} invites a day used today`, detail: `${why}, so fewer invites can go today.` }] : []),
-      ...(message.usedToday > 0 ? [{ title: `${a.label} has ${message.usedToday} of its ${message.capacity} messages a day used today`, detail: `${why}, so fewer ${a.channel === "instagram" ? "Instagram" : "LinkedIn"} messages can go today.` }] : []),
+      ...(message.usedToday > 0 ? [{ title: `${a.label} has ${message.usedToday} of its ${message.capacity} messages a day used today`, detail: `${why}, so fewer ${isSocialChannel(a.channel) ? SOCIAL_CHANNELS[a.channel].name : "LinkedIn"} messages can go today.` }] : []),
     ];
   }
   return a.usedToday > 0 ? [{ title: `${a.label} has ${a.usedToday} of its ${a.capacity} sends a day used today`, detail: `${why}, so fewer first ${a.channel === "sms" ? "texts" : "emails"} can go today.` }] : [];
@@ -508,7 +512,11 @@ function Preview({ campaignId, editor, leads, horizonDays }: { campaignId: strin
     if (live.some((t) => t.channel === "email")) parts.push(l.email ? `Email to ${l.email}.` : "No email, so the email track is skipped for them.");
     if (live.some((t) => t.channel === "sms")) parts.push(l.mobile ? "Texts to their own mobile." : l.kind === "company" ? "A company lead is never texted, so the SMS track is skipped." : "No mobile of their own, so the SMS track is skipped for them.");
     if (live.some((t) => t.channel === "linkedin")) parts.push(l.linkedin ? "A connection invite to their LinkedIn profile, then messages once they accept." : l.kind === "company" ? "A company lead has no member profile, so the LinkedIn track is skipped." : "No LinkedIn profile, so the LinkedIn track is skipped for them.");
-    if (live.some((t) => t.channel === "instagram")) parts.push(l.social.instagram === "own" ? "Instagram messages to their own account." : l.social.instagram === "company" ? `Instagram messages to ${l.kind === "company" ? "the company’s" : "their company’s"} account: ${l.kind === "company" ? "it has" : "they have"} none of their own.` : "No Instagram account, theirs or their company’s, so the Instagram track is skipped for them.");
+    for (const c of MESSAGE_REQUEST_CHANNELS) {
+      if (!live.some((t) => t.channel === c)) continue;
+      const name = SOCIAL_CHANNELS[c].name;
+      parts.push(l.social[c] === "own" ? `${name} messages to their own account.` : l.social[c] === "company" ? `${name} messages to ${l.kind === "company" ? "the company’s" : "their company’s"} account: ${l.kind === "company" ? "it has" : "they have"} none of their own.` : `No ${name} account, theirs or their company’s, so the ${name} track is skipped for them.`);
+    }
     if (live.some((t) => t.channel === "call")) parts.push(l.phone ? "Calls on your list, to a number of theirs or their company’s main line." : `No phone number, so ${live.filter((t) => t.channel === "call").length > 1 ? "the phone tracks are" : "the phone track is"} skipped for them.`);
     return parts.join(" ");
   };
@@ -629,7 +637,7 @@ function PreviewMessage({ s, def, named, horizonDays, entry }: { s: CopyPreview[
   const track = def.tracks.find((t) => t.id === s.trackId);
   // A LinkedIn message reads like a text: no subject, a message bubble (ticket 24b).
   // An Instagram message too (ticket 25): no subject, a message bubble.
-  const sms = s.channel === "sms" || s.channel === "linkedin" || s.channel === "instagram";
+  const sms = s.channel === "sms" || isSocialChannel(s.channel);
   const linkedin = s.channel === "linkedin";
   const invite = linkedin && s.number === 1;
   // A step of the win-back branch is named for it, as the shared label says (ticket 16c): "Win-back email 1".
@@ -648,7 +656,7 @@ function PreviewMessage({ s, def, named, horizonDays, entry }: { s: CopyPreview[
       </div>
       <div className="px-3.5 py-3 text-[14px] leading-[1.55]">
         {s.skipped ? (
-          <p className="text-muted">{linkedin ? "Skipped: this lead has no LinkedIn member profile." : s.channel === "instagram" ? "Skipped: neither this lead nor their company has an Instagram account." : sms ? "Skipped: this lead has no mobile of their own to text." : "Skipped: this lead has no email."}</p>
+          <p className="text-muted">{linkedin ? "Skipped: this lead has no LinkedIn member profile." : isMessageRequestChannel(s.channel) ? `Skipped: neither this lead nor their company has an ${SOCIAL_CHANNELS[s.channel].name} account.` : sms ? "Skipped: this lead has no mobile of their own to text." : "Skipped: this lead has no email."}</p>
         ) : (
           <>
             {!sms && (

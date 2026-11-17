@@ -41,7 +41,7 @@ describe("migration 24 on the integration tip's own database", () => {
       linkedin: { sessions: [{ id: "li-session-1", gapMs: 60_000, k: 1, healthy: true, resetZone: "Europe/London" }] },
     });
     const db = (h.store.engine as unknown as { db: DatabaseSync }).db;
-    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: 26 });
+    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: 25 });
     expect(db.prepare("SELECT track_id, finish_reason, skip_cause FROM track_progress WHERE track_id = 'li'").all()).toEqual([{ track_id: "li", finish_reason: "skipped_missing_channel", skip_cause: null }]);
     await h.tick();
     const id = (db.prepare("SELECT id FROM enrollments").get() as { id: string }).id;

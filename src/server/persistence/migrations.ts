@@ -1175,13 +1175,6 @@ export const MIGRATIONS: readonly Migration[] = [
   },
   {
     version: 25,
-    name: "reserved for ticket 27 (the LinkedIn InMail fallback), whose migration takes this number when its branch merges",
-    // Ticket 25 takes 26 by the coordinator's assignment. Versions are 1 to N with no gap, so this branch holds the number
-    // with no change; at the merge of ticket 27 its migration replaces this entry (delivery workflow, "Standing checks").
-    sql: "",
-  },
-  {
-    version: 26,
     name: "message-request channels (ticket 25, ADR 0004 section 13): Instagram, its accounts, test accounts, sessions' kinds and fixed senders",
     // The CHECKs that list the social channels gain 'instagram' through `addChannel`, the one rebuild Facebook's migration
     // repeats; test_runs' contact CHECK gains its social contacts in the same rebuild. A message-request channel is a row of

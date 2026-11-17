@@ -94,7 +94,7 @@ export function withProvider(state: SubjectState, stepId: string): boolean {
   return state.work.some((w) => w.stepId === stepId && isUncertain(w));
 }
 
-const PROVIDER_NAME = { email: "email provider", sms: "SMS provider", call: "call list", linkedin: "LinkedIn session", instagram: "Instagram session" } as const satisfies { readonly [C in TrackChannel]: string };
+const PROVIDER_NAME = (channel: TrackChannel): string => (channel === "email" ? "email provider" : channel === "sms" ? "SMS provider" : channel === "call" ? "call list" : `${SOCIAL_CHANNELS[channel].name} session`);
 
 /** Skip the current step (ADR 0003 "Ticket 17a", "Skip step"): exactly one step, never sent. */
 function skip(state: SubjectState, now: number): ControlResult {
@@ -107,7 +107,7 @@ function skip(state: SubjectState, now: number): ControlResult {
   // the work uncertain; a new claim may inherit it). A skip never sends the skipped step (P4), so it waits for the
   // provider's final word (review bot on ca8baee, item 2).
   if (withProvider(state, stepId)) {
-    return refuse(`This step is already with the ${PROVIDER_NAME[track.channel]} and may still be sent, so it cannot be skipped until the provider says whether it was sent.`);
+    return refuse(`This step is already with the ${PROVIDER_NAME(track.channel)} and may still be sent, so it cannot be skipped until the provider says whether it was sent.`);
   }
   let s = state;
   // On a callback, the hold is released first, as an outcome's is (2.4 "Calls"): the result sits on a running clock.

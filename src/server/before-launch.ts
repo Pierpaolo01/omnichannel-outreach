@@ -4,7 +4,7 @@
  * projected daily load per sender inbox. Built from the engine's stored facts, the same lead data
  * the handover renders with; nothing here writes.
  */
-import { isSocialChannel, messageRequestRecord, SOCIAL_CHANNEL_LIST } from "../domain/social-channels.ts";
+import { isSocialChannel, messageRequestRecord, SOCIAL_CHANNEL_LIST, type MessageRequestChannel } from "../domain/social-channels.ts";
 import { missingFields, renderSegments, type Segment } from "../domain/copy-preview.ts";
 import { isLive, isUncertain } from "../domain/sequence/attempt.ts";
 import { localDayNumber } from "../domain/sequence/clock.ts";
@@ -30,6 +30,8 @@ export const PROJECTION_HORIZON_DAYS = 120;
 
 interface CampaignLead {
   readonly lead: PreviewLead;
+  /** Per message-request channel, the company account the lead's track would message, by key; null when not the company's. */
+  readonly companyAccounts: { readonly [C in MessageRequestChannel]: string | null };
   readonly state: SubjectState;
   readonly details: readonly ContactDetailView[];
 }
@@ -62,7 +64,11 @@ async function campaignLeads(store: OutreachStore, campaignId: string, definitio
       }),
       lacks: [...fields.keys()].filter((f) => !state.lead.mergeData[f]?.trim()),
     };
-    out.push({ lead: previewLead(row, enrollment.id, channels), state, details });
+    const companyAccounts = messageRequestRecord((ch) => {
+      const account = goodAccount(state.lead.details, ch);
+      return account?.belongsTo === "company" ? account.key : null;
+    });
+    out.push({ lead: previewLead(row, enrollment.id, channels), companyAccounts, state, details });
   }
   return out;
 }
@@ -117,7 +123,19 @@ export async function beforeLaunchView(store: OutreachStore, campaignId: string,
       mobile: leads.filter((l) => l.lead.mobile).length,
       phone: leads.filter((l) => l.lead.phone).length,
       linkedin: leads.filter((l) => l.lead.linkedin).length,
-      social: messageRequestRecord((ch) => ({ own: leads.filter((l) => l.lead.social[ch] === "own").length, company: leads.filter((l) => l.lead.social[ch] === "company").length })),
+      social: messageRequestRecord((ch) => {
+        const byAccount = new Map<string, number>();
+        for (const l of leads) {
+          const key = l.companyAccounts[ch];
+          if (key !== null) byAccount.set(key, (byAccount.get(key) ?? 0) + 1);
+        }
+        const shared = [...byAccount.values()].filter((n) => n > 1);
+        return {
+          own: leads.filter((l) => l.lead.social[ch] === "own").length,
+          company: leads.filter((l) => l.lead.social[ch] === "company").length,
+          shared: { accounts: shared.length, leads: shared.reduce((a, b) => a + b, 0) },
+        };
+      }),
     },
     mergeFields,
     load: launched ? null : await loadProjection(store, campaignId, definition, leads, now),

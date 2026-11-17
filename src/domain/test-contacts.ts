@@ -1,7 +1,7 @@
 import { emailKey } from "./contact-details.ts";
 import { parsePhoneNumberFromString } from "libphonenumber-js/min";
 import { displayPhone } from "./phone.ts";
-import { SOCIAL_CHANNELS, SOCIAL_CHANNEL_LIST, type SocialChannel } from "./social-channels.ts";
+import { SOCIAL_CHANNELS, SOCIAL_CHANNEL_LIST, type MessageRequestChannel, type SocialChannel } from "./social-channels.ts";
 
 /**
  * The user's own test contacts (CONTEXT.md "Test contact"; ADR 0003 "Ticket 21"): an email and a mobile, each optional.
@@ -14,13 +14,14 @@ export interface TestContact {
   readonly key: string;
 }
 
-export interface TestContacts {
+export type TestContacts = {
   readonly email: TestContact | null;
   readonly mobile: TestContact | null;
   /** The user's own test LinkedIn profile (ADR 0004 section 8), keyed by `linkedinProfileKey`. Absent: none. */
   readonly linkedin?: TestContact | null;
-  /** The user's own test Instagram account (ADR 0004 13.8), keyed by `instagramAccountKey`. Absent: none. */
-  readonly instagram?: TestContact | null;
+} & {
+  /** The user's own test account on each message-request channel (ADR 0004 13.8), keyed by its normaliser. Absent: none. */
+  readonly [C in MessageRequestChannel]?: TestContact | null;
 }
 
 /** What the user typed; a social field is absent where the page does not offer it. */

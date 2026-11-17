@@ -167,9 +167,9 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
       callSkipLimitDays: 2,
       emailPool: ["inbox-a"],
       smsPool: sms ? [SMS_NUMBER] : [],
-      instagramPool: pool.map(accountOf),
       ...(li ? { linkedinPool: [`linkedin:${LI_SESSION}`] } : {}),
-      tracks: [ig, ...(email ? [email] : []), ...(sms ? [sms] : []), ...(li ? [li] : [])],
+      // The user's chosen senders, on the Instagram track (ADR 0004 13.5).
+      tracks: [{ ...ig, senders: pool.map(accountOf) }, ...(email ? [email] : []), ...(sms ? [sms] : []), ...(li ? [li] : [])],
     };
     campaigns.push({ id: "", definition, ig, email, sms, li });
     const people = 2 + Math.floor(rnd() * 4);
@@ -219,7 +219,7 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
   /** Accepted marks and stops, each with the handover log's length at its instant: nothing of the subject after it. */
   const ended = new Map<string, { at: number; handovers: number; kind: "mark" | "stop" }>();
   const restarts = new Map<string, number>();
-  const pools = new Map<number, { at: number; pool: readonly string[] }[]>(campaigns.map((c, i) => [i, [{ at: -Infinity, pool: (c.definition.instagramPool ?? []).map(sessionOf) }]]));
+  const pools = new Map<number, { at: number; pool: readonly string[] }[]>(campaigns.map((c, i) => [i, [{ at: -Infinity, pool: (c.definition.tracks.find((t) => t.id === c.ig.id)?.senders ?? []).map(sessionOf) }]]));
   const poolAt = (ci: number, at: number) => (pools.get(ci) ?? []).filter((x) => x.at <= at).at(-1)?.pool ?? [];
   const crashedAttempts: string[] = [];
   const crashed: { subjectId: string; stepId: string; at: number }[] = [];
@@ -421,13 +421,13 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
         features.add(`a-running-edit:${kind}`);
       }
     } else if (roll < 0.21 && sessions.length > 1) {
-      // A pool edit: a session added to or removed from the campaign's Instagram pool.
+      // A sender edit: a session added to or removed from the Instagram track's chosen senders.
       const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
       const now = poolAt(lead.campaign, h.clock);
       const s = pickOf(rnd2, sessions).id;
       const next = now.includes(s) ? (now.length > 1 ? now.filter((x) => x !== s) : now) : [...now, s];
       if (next === now) return;
-      const r = await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, instagramPool: next.map(accountOf) });
+      const r = await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, tracks: stored.tracks.map((t) => (t.id === c.ig.id ? { ...t, senders: next.map(accountOf) } : t)) });
       if (r.status === 200) {
         pools.set(lead.campaign, [...(pools.get(lead.campaign) ?? []), { at: h.clock, pool: next }]);
         features.add(next.length > now.length ? "a-session-added-to-a-pool" : "a-session-removed-from-a-pool");

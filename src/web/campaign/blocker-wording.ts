@@ -4,6 +4,7 @@
  * (`trackId`, or for a merge field every message that uses it with no fallback), and by that track's
  * own channel and order ("the SMS track", "email track 2"), never by its position or a default channel.
  */
+import { isMessageRequestChannel, isSocialChannel, SOCIAL_CHANNELS } from "../../domain/social-channels.ts";
 import type { CampaignDefinition, LaunchBlocker, LinkedinProviderStatus, SmsProviderStatus, TrackDefinition } from "../../shared/api.ts";
 import { stepTitle } from "../../shared/track-label.ts";
 import { fieldLabel, STEP_NOUN, trackName } from "./model.ts";
@@ -48,25 +49,26 @@ export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition, sms: 
   }
 
   const track = trackOf(b.trackId);
-  const channel = track ? channelOf(track) : b.kind === "no_sender" && (b.channel === "sms" || b.channel === "linkedin" || b.channel === "instagram") ? b.channel : "email";
+  const channel = track ? channelOf(track) : b.kind === "no_sender" && (b.channel === "sms" || isSocialChannel(b.channel)) ? b.channel : "email";
   const name = capitalise(named(track));
   if (b.kind === "empty_copy") {
     const noun = stepName(track, b.stepNumber);
     const what = b.part === "subject" ? `${noun} has no subject` : `${noun} has no ${channel === "email" ? "copy" : "message"}`;
     return {
       title: `${name}: ${what}`,
-      detail: b.part === "subject" ? "Give it a subject, or let it continue the thread." : `Write it, or remove the ${channel === "sms" ? "text" : channel === "linkedin" || channel === "instagram" ? "message" : "email"}.`,
+      detail: b.part === "subject" ? "Give it a subject, or let it continue the thread." : `Write it, or remove the ${channel === "sms" ? "text" : isSocialChannel(channel) ? "message" : "email"}.`,
       actions: [{ label: "Write it", trackId: b.trackId, stepId: b.stepId }],
     };
   }
   // LinkedIn (ADR 0004 1.1): the domain's own words, and the provider read's; nothing says a session can be connected here.
   // Instagram (ADR 0004 13.1): as LinkedIn's, in the server's own sentence; nothing says a session can be connected here.
-  if (channel === "instagram")
-    return {
-      title: `${name} has no connected Instagram session`,
-      detail: "No Instagram session is connected, so Instagram tracks cannot launch. Remove the track to launch without it.",
-      actions: [{ label: "Open track", trackId: b.trackId }],
-    };
+  if (isMessageRequestChannel(channel)) {
+    const platform = SOCIAL_CHANNELS[channel].name;
+    // ADR 0004 13.5: no session chosen for the track is said as that; no chosen session connected, as LinkedIn's is.
+    return b.kind === "no_sender" && b.noneChosen === true
+      ? { title: `${name} has no sender session chosen`, detail: `Choose the ${platform} sessions it sends from in the track’s Timing and sender. Remove the track to launch without it.`, actions: [{ label: "Open track", trackId: b.trackId }] }
+      : { title: `${name} has no connected ${platform} session`, detail: `No ${platform} session is connected, so ${platform} tracks cannot launch. Remove the track to launch without it.`, actions: [{ label: "Open track", trackId: b.trackId }] };
+  }
   if (channel === "linkedin")
     return {
       title: `${name} has no connected LinkedIn session`,

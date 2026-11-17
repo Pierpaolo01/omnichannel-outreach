@@ -7,7 +7,7 @@ import { statusGroup } from "../../domain/outreach-status.ts";
 import type { Controls } from "./useControls.ts";
 import type { ControlTarget, RecordControl } from "./requests.ts";
 import { WITHDRAWAL_ANSWERS } from "../campaign/linkedin-wording.ts";
-import { channelOfMark, MARK_REPLIED_WORDS, markRepliedControl, type MarkRepliedControl } from "../campaign/reply-mark-wording.ts";
+import { channelOfMark, markRepliedWords, markRepliedControl, type MarkRepliedControl } from "../campaign/reply-mark-wording.ts";
 import { SOCIAL_CHANNEL_LIST, type SocialChannel } from "../../domain/social-channels.ts";
 import { campaignConfirmationChanged, confirmationChanged, openCampaignConfirmation, openLeadConfirmation, type CampaignConfirmation, type LeadConfirmation } from "./confirmation.ts";
 import {
@@ -185,7 +185,7 @@ type LinkedinConfirmation = { readonly action: MarkRepliedControl; readonly chan
 
 /** What each LinkedIn press says in its confirmation. */
 function linkedinConfirmText(c: LinkedinConfirmation): string {
-  if ("channel" in c) return MARK_REPLIED_WORDS[c.channel].preview;
+  if ("channel" in c) return markRepliedWords(c.channel).preview;
   switch (c.action) {
     case "invite_withdrawn":
       return "Mark the invite withdrawn? Do this only once LinkedIn no longer shows it as pending. The app stops asking LinkedIn about it, and another campaign may then invite this person from the same session.";
@@ -318,7 +318,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
         pendingText={(a) => `${CONTROL_PENDING[a]}…`}
         effectText={(body, action) => {
           const marked = channelOfMark(action);
-          if (marked !== null) return MARK_REPLIED_WORDS[marked].done;
+          if (marked !== null) return markRepliedWords(marked).done;
           if (action === "invite_withdrawn") return WITHDRAWAL_ANSWERS[0].done;
           if (action === "invite_kept") return WITHDRAWAL_ANSWERS[1].done;
           const answer = body as ControlAnswer | null;
@@ -375,7 +375,7 @@ export function LeadControls({ lead, userZone, controls, who, campaignName }: { 
               }}
             >
               <Icon name={channel} className="size-4" />
-              {MARK_REPLIED_WORDS[channel].label}
+              {markRepliedWords(channel).label}
             </button>
           ))}
         </div>

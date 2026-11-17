@@ -36,7 +36,7 @@ import type {
 } from "../../domain/sequence/state.ts";
 import { isOutreachStatus } from "../../domain/outreach-status.ts";
 import type { RunTestFacts } from "../../domain/sequence/test-runs.ts";
-import { CONTACT_IS_A_LEAD } from "../../domain/sequence/test-runs.ts";
+import { accountIsALead, CONTACT_IS_A_LEAD } from "../../domain/sequence/test-runs.ts";
 import type { TestContact, TestContacts } from "../../domain/test-contacts.ts";
 import type { StoredTestContacts, TestRunRecord, TestStop } from "../engine/engine-store.ts";
 import type { SocialAllowances, BounceEvent, CallNoteRecord, MeasureFacts, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, RunningSave, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
@@ -456,7 +456,7 @@ export class SqliteEngineStore implements EngineStore {
       if (linkedin !== null && this.leadHasProfile(linkedin.key)) return { ok: false as const, field: "linkedin" as const, message: CONTACT_IS_A_LEAD.linkedin };
       for (const channel of MESSAGE_REQUEST_CHANNELS) {
         const account = contacts[channel] ?? null;
-        if (account !== null && this.leadHasAccount(channel, account.key)) return { ok: false as const, field: channel, message: CONTACT_IS_A_LEAD[channel] };
+        if (account !== null && this.leadHasAccount(channel, account.key)) return { ok: false as const, field: channel, message: accountIsALead(channel) };
       }
       const social = Object.fromEntries(MESSAGE_REQUEST_CHANNELS.flatMap((ch) => (contacts[ch] ? [[ch, contacts[ch]]] : [])));
       this.run("UPDATE campaigns SET test_email = ?, test_mobile = ?, test_linkedin = ?, test_social = ? WHERE id = ?", [
@@ -2107,7 +2107,7 @@ interface Reach {
   readonly importedAccounts?: LeadFacts["importedAccounts"];
 }
 
-/** A stored sending channel (the CHECKs of migrations 22 and 26 allow exactly these). */
+/** A stored sending channel (the CHECKs of migrations 22 and 25 allow exactly these). */
 function sendChannelOf(raw: string): SendChannel {
   return raw === "sms" ? "sms" : isSocialChannel(raw) ? raw : "email";
 }
@@ -2165,7 +2165,7 @@ export function monthStartOf(now: number, zone: string): number {
   return startOfLocalDay(localDayNumber(now, zone) - (dayOfMonth - 1), zone);
 }
 
-/** A stored reply channel (the CHECKs of migrations 22 and 26 allow exactly these). */
+/** A stored reply channel (the CHECKs of migrations 22 and 25 allow exactly these). */
 function replyChannelOf(raw: string): "email" | "sms" | SocialChannel {
   return sendChannelOf(raw);
 }
