@@ -160,8 +160,10 @@ test.describe("Instagram's states", () => {
     await page.keyboard.press("Space");
     await expect(page.getByText("No session chosen. Choose at least one: launch is blocked until you do.")).toBeVisible();
     await expect(page.getByRole("status").filter({ hasText: "Saved" }).first()).toBeVisible();
+    await shot(page, "15-inspector-no-sender-chosen");
     await at(page, f, `/campaigns/${f.campaign}/before-launch`);
     await expect(page.getByText(/has no sender session chosen$/).first()).toBeVisible();
+    await shot(page, "16-blocked-no-sender-chosen");
   });
 
   test("a session with no allowance sends nothing, and Today says why with no time", async ({ page }) => {

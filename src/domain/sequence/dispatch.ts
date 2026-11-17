@@ -6,7 +6,7 @@
  */
 import { ENGINE_PARAMS, isLive, isUncertain } from "./attempt.ts";
 import { leadNow, localDayNumber, windowOpen } from "./clock.ts";
-import { holdsConversations, poolOf, socialActionOf, socialStepKind, type SendChannel, type SocialAction } from "./definition.ts";
+import { holdsConversations, socialActionOf, socialStepKind, type SendChannel, type SocialAction } from "./definition.ts";
 import { isSocialChannel } from "../social-channels.ts";
 import {
   rules as gateRules,

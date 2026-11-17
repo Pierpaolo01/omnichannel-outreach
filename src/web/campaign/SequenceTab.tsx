@@ -15,7 +15,6 @@ import { campaignPath } from "../pages/CampaignPage.tsx";
 import { arrange, type ArrangeOperation } from "./arrangement.ts";
 import { whyNoSmsNumber } from "./sms-wording.ts";
 import {
-  STEP_NOUN,
   stepNounOf,
   WEEK,
   fallbackIn,
@@ -1494,7 +1493,7 @@ function TimingAndSender({ track, editor, onWindow, onSenders }: { track: TrackD
             // ADR 0004 13.1: the running app has no Instagram session; nothing here suggests one can be connected from the application.
             <>
               <span className="font-semibold text-crit">No connected {SOCIAL_CHANNELS[track.channel as MessageRequestChannel].name} session.</span>
-              <SocialProviderReason channel={track.channel as MessageRequestChannel} />
+              <SocialProviderReason channel={track.channel} />
               <div className="text-[12.5px] text-muted">Launch is blocked while this track has no session.</div>
             </>
           ) : accounts.length === 0 ? (

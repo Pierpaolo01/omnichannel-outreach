@@ -7,7 +7,7 @@ import type { OutreachStatus } from "../outreach-status.ts";
 import { applyAttemptEvent, applyLookup, ENGINE_PARAMS, isLive, isUncertain, markable, maySend, withRef, type AttemptEffect, type AttemptEvent, type WorkEvent } from "./attempt.ts";
 import { leadNow, localDayNumber, nextWindowOpen, sendPoint, span, startOfLocalDay, syncClock, waitSpan, wallOfLead, windowOpensAt, type Freeze, type LeadClock } from "./clock.ts";
 import { render } from "./copy.ts";
-import { holdsConversations, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, poolOf, trackPool, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
+import { holdsConversations, type ConversationChannel, linkedinStepKind, liveSteps, ownSubject, trackPool, type DeclinedPath, type TrackChannel, type TrackDefinition } from "./definition.ts";
 import { isMessageRequestChannel, type MessageRequestChannel, type SocialChannel } from "../social-channels.ts";
 import type { StoredReplyId } from "./reply-identity.ts";
 import type { Attempt, ConnectionCheck, ConversationCause, EndReason, FinishReason, LeadDetail, LinkedinSkipCause, SocialSkipCause, ProviderWork, RenderedCopy, ReplyChannelName, SmsBinding, SmsBindingRecord, StepResult, SubjectState, TrackProgress } from "./state.ts";

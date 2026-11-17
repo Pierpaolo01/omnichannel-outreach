@@ -65,7 +65,7 @@ export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition, sms: 
   if (isMessageRequestChannel(channel)) {
     const platform = SOCIAL_CHANNELS[channel].name;
     // ADR 0004 13.5: no session chosen for the track is said as that; no chosen session connected, as LinkedIn's is.
-    return b.kind === "no_sender" && b.noneChosen === true
+    return b.noneChosen === true
       ? { title: `${name} has no sender session chosen`, detail: `Choose the ${platform} sessions it sends from in the track’s Timing and sender. Remove the track to launch without it.`, actions: [{ label: "Open track", trackId: b.trackId }] }
       : { title: `${name} has no connected ${platform} session`, detail: `No ${platform} session is connected, so ${platform} tracks cannot launch. Remove the track to launch without it.`, actions: [{ label: "Open track", trackId: b.trackId }] };
   }
