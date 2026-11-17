@@ -715,7 +715,6 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       const went = li.deliveryLog.some((x) => x.subjectId === lead.id && x.action === "inmail");
       if (went && tp.finishReason === "invite_not_accepted") problem(`L25: ${lead.id}'s InMail went, and its track took the withdrawal path`);
       // L25, after the drain: a chosen InMail not yet handed over, with the fallback switched off since, takes the withdrawal path.
-      const handed = li.handoverLog.some((x) => x.subjectId === lead.id && x.action === "inmail");
       // Any switch-off after the choice and before a handover reaches the InMail then, whatever the switch does later.
       const handedAt = li.handoverLog.find((x) => x.subjectId === lead.id && x.action === "inmail")?.at ?? Infinity;
       const judged2 = outages.find((o) => o.from <= deadline && deadline < o.to)?.to ?? deadline;
