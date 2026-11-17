@@ -11,6 +11,7 @@ import { Icon } from "../icons.tsx";
 import { campaignPath } from "../pages/CampaignPage.tsx";
 import { arrange, type ArrangeOperation } from "./arrangement.ts";
 import { whyNoSmsNumber } from "./sms-wording.ts";
+import { ENDS_AND_ASKS_WITHDRAWAL } from "./linkedin-wording.ts";
 import {
   STEP_NOUN,
   WEEK,
@@ -1383,8 +1384,8 @@ function AcceptWaitControl({ track, locked, launched, onChange }: { track: Track
       <p id={hint} className="text-[12.5px] text-muted">
         Counted in calendar days from when the invite is sent; time a lead is paused doesn’t count.{" "}
         {inmailStepOf(track)
-          ? "If they haven’t accepted by then, the InMail below goes instead when your session can send one; otherwise this track ends for them and the app asks LinkedIn to withdraw the invite. Their other tracks carry on."
-          : "If they haven’t accepted by then, this track ends for them and the app asks LinkedIn to withdraw the invite; their other tracks carry on."}
+          ? `If they haven’t accepted by then, the InMail below goes instead when your session can send one; otherwise ${ENDS_AND_ASKS_WITHDRAWAL}. Their other tracks carry on.`
+          : `If they haven’t accepted by then, ${ENDS_AND_ASKS_WITHDRAWAL}; their other tracks carry on.`}
         {launched ? " A change reaches every lead still waiting, counted from when their invite was sent." : ""}
       </p>
     </div>
@@ -1418,8 +1419,8 @@ function InmailFallbackControl({ track, locked, launched, onChange }: { track: T
       </label>
       <p id={hint} className="text-[12.5px] text-muted">
         {step
-          ? "When the wait ends, one InMail goes from the session that sent the invite, if that session reports Premium or Sales Navigator with an InMail credit free; otherwise the invite is withdrawn and the track ends, as without it. The invite stays open on LinkedIn. The InMail takes the first message’s place: the follow-ups wait their days from it. It spends one of the session’s InMail credits and one of its messages for the day."
-          : "Off: when the wait ends, the invite is withdrawn and the track ends for them."}
+          ? `When the wait ends, one InMail goes from the session that sent the invite, if that session reports Premium or Sales Navigator with an InMail credit free; otherwise ${ENDS_AND_ASKS_WITHDRAWAL}, as without it. The invite stays open on LinkedIn. The InMail takes the first message’s place: the follow-ups wait their days from it. It spends one of the session’s InMail credits and one of its messages for the day.`
+          : `Off: when the wait ends, ${ENDS_AND_ASKS_WITHDRAWAL}.`}
         {launched ? " Switching it on or off reaches every lead whose InMail hasn’t gone yet." : ""}
       </p>
       {step && (

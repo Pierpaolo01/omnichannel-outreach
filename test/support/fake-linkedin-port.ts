@@ -89,9 +89,11 @@ interface Invite {
 
 export class FakeLinkedInPort implements SendPort {
   readonly channel = "linkedin";
-  readonly handoverLog: { at: number; key: string; attemptId: string; sender: string; destination: string; subjectId: string; trackId: string; stepId: string; action: "invite" | "message" | "inmail"; rendered: RenderedCopy }[] = [];
+  readonly handoverLog: { at: number; key: string; attemptId: string; sender: string; destination: string; subjectId: string; trackId: string; stepId: string; action: "invite" | "message" | "inmail"; rendered: RenderedCopy; seq: number }[] = [];
   /** Every InMail session report the port gave with a listing: what the record reads a session's standing from. */
-  readonly inmailReportLog: { at: number; session: string; plan: string; credits: number }[] = [];
+  readonly inmailReportLog: { at: number; session: string; plan: string; credits: number; seq: number }[] = [];
+  /** One order across the report and handover logs, for what happens at the same instant. */
+  private seqNo = 0;
   readonly deliveryLog: LinkedinDelivery[] = [];
   readonly acceptanceLog: { at: number; key: string; sender: string; profile: string }[] = [];
   readonly withdrawalLog: { at: number; key: string; answer: InviteWithdrawal["kind"] }[] = [];
@@ -124,7 +126,7 @@ export class FakeLinkedInPort implements SendPort {
         .filter((s) => s.listed !== false)
         // The port knows no allowance: the user's settings give the room (ADR 0004 1.2), so it reports none of its own.
         .map((s) => {
-          if (s.inmail) this.inmailReportLog.push({ at: this.now(), session: s.id, plan: s.inmail.plan, credits: s.inmail.credits });
+          if (s.inmail) this.inmailReportLog.push({ at: this.now(), session: s.id, plan: s.inmail.plan, credits: s.inmail.credits, seq: ++this.seqNo });
           return {
             id: s.id,
             channel: "linkedin" as const,
@@ -173,7 +175,7 @@ export class FakeLinkedInPort implements SendPort {
   handover(request: HandoverRequest): Promise<CallAnswer> {
     const now = this.now();
     const action = request.action ?? "message";
-    this.handoverLog.push({ at: now, key: request.idempotencyKey, attemptId: request.attemptId, sender: request.sender, destination: request.destination, subjectId: request.subjectId, trackId: request.trackId, stepId: request.stepId, action, rendered: request.rendered });
+    this.handoverLog.push({ at: now, key: request.idempotencyKey, attemptId: request.attemptId, sender: request.sender, destination: request.destination, subjectId: request.subjectId, trackId: request.trackId, stepId: request.stepId, action, rendered: request.rendered, seq: ++this.seqNo });
     const script = this.script(request.destination);
     const refuse = (reason: "invalid_destination" | "rate_limited" | "not_connected" | "inmail_refused" | "payment_required"): CallAnswer => {
       this.refusals.push({ at: now, key: request.idempotencyKey, destination: request.destination, reason });

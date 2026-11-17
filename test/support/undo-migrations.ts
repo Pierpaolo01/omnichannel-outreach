@@ -33,6 +33,10 @@ export const UNDO_25 = `
   DROP TRIGGER track_progress_inmail_forward;
   DROP TRIGGER track_progress_inmail_forward_replace;
   DROP INDEX track_progress_inmail_holdings;
+  DROP TRIGGER inmail_standing_progress_insert;
+  DROP TRIGGER inmail_standing_progress_update;
+  DROP TRIGGER inmail_standing_report;
+  DROP TRIGGER inmail_standing_work;
   ALTER TABLE track_progress DROP COLUMN inmail;
   ALTER TABLE track_progress DROP COLUMN inmail_session;
   ALTER TABLE track_progress DROP COLUMN inmail_hold_wall;

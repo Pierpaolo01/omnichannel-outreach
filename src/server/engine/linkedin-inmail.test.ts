@@ -333,6 +333,38 @@ describe("credits held by named work (council on 8b0c846, items 2, 7 and 8; ADR 
     expect(await waitOf(h, c.lead(first))).toMatchObject({ why: "inmail_unavailable" });
   });
 
+  test("a waiting InMail backed again by a report alone goes at once, as a fresh engine would send it", async () => {
+    const { h, campaign } = await world({ plan: "premium", credits: 2 });
+    await campaign([linkedin(FALLBACK, OFFICE)]);
+    await h.advanceTo(WEDNESDAY_0 + 2 * H);
+    await report(h, { plan: "premium", credits: 1 });
+    await h.advanceTo(WEDNESDAY_0 + 12 * H);
+    expect(inmailsTo(h)).toHaveLength(1);
+    // Nothing about the waiting lead changes but its session's report: one more credit.
+    await report(h, { plan: "premium", credits: 1 });
+    await h.tick();
+    expect(await h.freshEngineTick()).toEqual([]);
+    expect(inmailsTo(h)).toHaveLength(2);
+  });
+
+  test("a restarted lead waiting for a credit acquires one a new report gives, with no change to its own record (seed 24024)", async () => {
+    const { h, campaign } = await world({ plan: "premium", credits: 1 }, { invitesPerDay: 1 });
+    const c = await campaign([linkedin(FALLBACK, OFFICE)]);
+    await h.advanceTo(WEDNESDAY_0 + 2 * H);
+    const first = h.linkedin.deliveryLog.find((d) => d.action === "invite")!.destination === PAT ? "Pat Oneil" : "Nia Cole";
+    expect((await h.request("POST", `/api/enrollments/${c.lead(first)}/controls`, { requestId: "stop-a", action: "stop" })).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + DAY + 2 * H);
+    expect((await h.request("POST", `/api/enrollments/${c.lead(first)}/controls`, { requestId: "restart-a", action: "resume_from_next_step" })).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + DAY + 12 * H);
+    expect(inmailsTo(h)).toHaveLength(1);
+    // The session reports one credit again, after the other lead's InMail: nothing else changes.
+    await report(h, { plan: "premium", credits: 1 });
+    await h.tick();
+    expect(await h.freshEngineTick()).toEqual([]);
+    await h.advanceTo(WEDNESDAY_0 + 2 * DAY + 12 * H);
+    expect(inmailsTo(h)).toHaveLength(2);
+  });
+
   for (const [what, standing] of [["a report of zero credits", { plan: "premium", credits: 0 }], ["a plan lost", { plan: "none", credits: 0 }]] as const) {
     test(`${what} stored after the InMail's claim and before its handover: it is not handed over (item 8)`, async () => {
       const { h, campaign } = await world({ plan: "premium", credits: 1 });
@@ -362,6 +394,22 @@ describe("credits held by named work (council on 8b0c846, items 2, 7 and 8; ADR 
     await h.advanceTo(WEDNESDAY_0 + H);
     expect(await track(c.lead("Pat Oneil"))).toMatchObject({ inmail: "stale_report", finishReason: "invite_not_accepted" });
     expect((await track(c.lead("Pat Oneil")))?.inmailReportedWall).toBeLessThan(MONDAY_9 + 2 * H);
+  });
+});
+
+describe("the laptop off across the deadline (the generated runs, seed 24018)", () => {
+  test("a user action before the first sync does not judge the expiry on the old report of a signed-in session; the next tick does", async () => {
+    const { h, campaign, track } = await world();
+    const c = await campaign([linkedin(FALLBACK, OFFICE)]);
+    await h.advanceTo(MONDAY_9 + H);
+    // Off from Monday 10:00 to Thursday 10:00, and back with no tick yet: the last stored report is three days old.
+    h.clock = MONDAY_9 + H + 3 * DAY;
+    // The user's first action, before any tick: it judges the lead as of its instant (asOfAction).
+    expect((await h.request("POST", `/api/enrollments/${c.lead("Pat Oneil")}/controls`, { requestId: "pause-1", action: "pause" })).status).toBe(200);
+    expect((await track(c.lead("Pat Oneil")))?.inmail ?? null).toBeNull();
+    expect((await h.request("POST", `/api/enrollments/${c.lead("Pat Oneil")}/controls`, { requestId: "resume-1", action: "resume" })).status).toBe(200);
+    await h.advanceTo(h.clock + 2 * H);
+    expect((await track(c.lead("Pat Oneil")))?.inmail).toBe("sent");
   });
 });
 

@@ -1185,6 +1185,24 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE track_progress ADD COLUMN inmail_reported_wall INTEGER;
       ALTER TABLE track_progress ADD COLUMN inmail_replaces TEXT;
       CREATE INDEX track_progress_inmail_holdings ON track_progress (inmail_session, inmail_hold_wall) WHERE inmail_hold_wall IS NOT NULL;
+      -- A session's InMail standing has a version of its own, beside the conversations' (key 'inmail:' and the session), moved
+      -- by the database in the same write as every fact the standing reads (13.5; the generated runs, seed 24024): a holding
+      -- acquired or released, a report, an InMail's work sent or settled. A cached evaluation or readiness of a subject whose
+      -- InMail is chosen remembers it, so another lead's release or a new report reaches it.
+      CREATE TRIGGER inmail_standing_progress_insert AFTER INSERT ON track_progress WHEN NEW.inmail_session IS NOT NULL
+      BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES ('inmail:' || NEW.inmail_session, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER inmail_standing_progress_update AFTER UPDATE OF inmail, inmail_session, inmail_hold_wall, finished_at ON track_progress
+      WHEN (OLD.inmail_session IS NOT NULL OR NEW.inmail_session IS NOT NULL) AND (NEW.inmail IS NOT OLD.inmail OR NEW.inmail_session IS NOT OLD.inmail_session OR NEW.inmail_hold_wall IS NOT OLD.inmail_hold_wall OR NEW.finished_at IS NOT OLD.finished_at)
+      BEGIN
+        INSERT INTO conversation_versions (recipient_key, seq) SELECT 'inmail:' || OLD.inmail_session, 1 WHERE OLD.inmail_session IS NOT NULL ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1;
+        INSERT INTO conversation_versions (recipient_key, seq) SELECT 'inmail:' || NEW.inmail_session, 1 WHERE NEW.inmail_session IS NOT NULL ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1;
+      END;
+      CREATE TRIGGER inmail_standing_report AFTER UPDATE OF inmail_plan, inmail_credits, inmail_reported_wall, healthy ON sender_accounts
+      WHEN NEW.inmail_plan IS NOT OLD.inmail_plan OR NEW.inmail_credits IS NOT OLD.inmail_credits OR NEW.inmail_reported_wall IS NOT OLD.inmail_reported_wall OR NEW.healthy IS NOT OLD.healthy
+      BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES ('inmail:' || NEW.id, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER inmail_standing_work AFTER UPDATE OF settled, sent_wall, first_handed_wall ON provider_work
+      WHEN NEW.inmail = 1 AND (NEW.settled IS NOT OLD.settled OR NEW.sent_wall IS NOT OLD.sent_wall OR NEW.first_handed_wall IS NOT OLD.first_handed_wall)
+      BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES ('inmail:' || NEW.account_id, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
       CREATE TRIGGER track_progress_inmail_forward BEFORE UPDATE OF inmail ON track_progress
       WHEN OLD.inmail IS NOT NULL AND NEW.inmail IS NOT OLD.inmail AND NOT (OLD.inmail = 'chosen' AND NEW.inmail IS NOT NULL)
       BEGIN SELECT RAISE(ABORT, 'a track''s InMail state only moves forward'); END;

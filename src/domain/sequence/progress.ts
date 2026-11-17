@@ -1275,8 +1275,27 @@ export type ConversationVersions = (destinations: readonly string[]) => string;
  * where its attempts went. Another subject's write to a pair of one of these moves its version; nothing else does.
  */
 export function conversationKeysOf(state: SubjectState): string[] {
-  if (rules.conversationKeysOwnOnly) return [...new Set(state.smsBindings.filter((b) => b.owner === state.subject.id).map((b) => b.recipient))].sort();
-  return [...new Set([...state.lead.details.map((d) => d.key), ...state.attempts.map((a) => a.destination)])].sort();
+  const standing = inmailStandingKeys(state);
+  if (rules.conversationKeysOwnOnly) return [...new Set([...state.smsBindings.filter((b) => b.owner === state.subject.id).map((b) => b.recipient), ...standing])].sort();
+  return [...new Set([...state.lead.details.map((d) => d.key), ...state.attempts.map((a) => a.destination), ...standing])].sort();
+}
+
+/** The InMail standings a subject's chosen InMails read (13.5): each one's session, by its version key. */
+function inmailStandingKeys(state: SubjectState): string[] {
+  const keys = state.tracks.filter(waitsOnStanding).map((p) => `inmail:${p.inmailSession}`);
+  // An expiry waiting for its session's next report (an old one, the session signed in) reads that session's standing too.
+  const session = linkedinSessionOf(state);
+  if (session !== null && state.tracks.some((p) => awaitingAcceptance(state, p.trackId))) keys.push(`inmail:${session}`);
+  return keys;
+}
+const waitsOnStanding = (p: TrackProgress): boolean => p.inmail === "chosen" && p.finishedAt === null && (p.inmailSession ?? null) !== null;
+
+/** When a chosen InMail's session report grows too old to back it (13.5): its standing changes with time alone. */
+function inmailStandingHorizons(state: SubjectState): number[] {
+  return state.tracks.filter(waitsOnStanding).flatMap((p) => {
+    const reported = state.accounts[p.inmailSession ?? ""]?.inmail?.reportedWall ?? null;
+    return reported === null ? [] : [reported + INMAIL_REPORT_MAX_AGE + 1];
+  });
 }
 
 function remembered(state: SubjectState, matters: boolean, conversations: ConversationVersions): Pick<SettledEvaluation, "conversations" | "conversationKeys"> {
@@ -1293,7 +1312,9 @@ export function settledEvaluation(state: SubjectState, now: number, nextUserDay:
   if (state.callTasks.some((t) => t.open)) at.push(nextUserDay);
   const recheck = conversationRecheck(state, now);
   if (recheck.at !== null) at.push(recheck.at);
-  return { until: Math.min(Infinity, ...at.filter((t) => t > now)), ...remembered(state, recheck.onNewBinding, conversations) };
+  at.push(...inmailStandingHorizons(state));
+  const standing = state.tracks.some(waitsOnStanding) || state.tracks.some((p) => awaitingAcceptance(state, p.trackId));
+  return { until: Math.min(Infinity, ...at.filter((t) => t > now)), ...remembered(state, recheck.onNewBinding || standing, conversations) };
 }
 /**
  * How long a readiness check that found nothing to claim holds (the worker's `nothingReady`, the projection's `ready`):
@@ -1310,8 +1331,9 @@ export function settledReadiness(state: SubjectState, now: number, conversations
     ...state.tracks.flatMap((p) => Object.values(p.connectionChecks ?? {}).map((c) => c.checkedWall + ENGINE_PARAMS.SETTLING)),
     ...state.tracks.filter((p) => p.finishedAt === null && p.dueAt !== null).map((p) => now + ((p.dueAt ?? 0) - lead)),
     ...state.tracks.filter((p) => p.startedAt === null && p.startAt !== null).map((p) => now + ((p.startAt ?? 0) - lead)),
+    ...inmailStandingHorizons(state),
   ];
-  return { until: Math.min(Infinity, ...at.filter((t) => t > now)), ...remembered(state, conversationRecheck(state, now).onNewBinding, conversations) };
+  return { until: Math.min(Infinity, ...at.filter((t) => t > now)), ...remembered(state, conversationRecheck(state, now).onNewBinding || state.tracks.some(waitsOnStanding), conversations) };
 }
 
 /** Whether a settled evaluation still holds at `now`, with its own destinations' conversations as they are now. */
@@ -1457,6 +1479,9 @@ export function inviteExpired(state: SubjectState, trackId: string, now: number)
     const account = session === null ? undefined : state.accounts[session];
     const reportedWall = account?.inmail?.reportedWall ?? null;
     const availability = rules.inmailJudgesStanding ? inmailAvailability(account, now) : "free";
+    // An old report from a session still signed in is the laptop's absence, not the session's: the next sync reads it again,
+    // so the expiry waits for that report rather than judge on the old one (seed 24018). Signed out, it is judged stale.
+    if (availability === "stale_report" && account?.healthy === true) return state;
     if (availability !== "free") return withTrack(inmailNotSent(state, trackId, availability, at, atWall), trackId, (t) => ({ ...t, inmailReportedWall: reportedWall }));
     // The step it replaces is named now, by its place among every step, removed ones included (council on 8b0c846, item 1).
     const replaces = track.steps.filter((s) => s.role !== "inmail")[1]?.id ?? null;

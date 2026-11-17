@@ -368,7 +368,7 @@ So a follow-up after an InMail goes without a connection, and nothing else does:
 - **The handover re-reads.** The handover transaction loads the session's latest report and holdings and checks the backing again (predicate 20). A claim whose credit is no longer backed, because of a report of zero, a lost plan or a later report, is withdrawn and waits. Never more InMails are handed over than the credits reported at the handover.
 
 **The report's age** (council on `8b0c846`, item 5). A report is fresh for `INMAIL_REPORT_MAX_AGE`, 24 hours (question Q58), from the instant it was read. A session not read for longer, because it was signed out, is not judged eligible on its old report:
-- at the expiry, the track takes the withdrawal path with the cause `stale_report`;
+- at the expiry, if the session is signed out, the track takes the withdrawal path with the cause `stale_report`; if it is signed in (the report is old only because the application was not running), the expiry waits for the next sync's report (seed 24018);
 - after the choice, the InMail waits (`stale_report`).
 
 The instant of the report a judgment used is stored with it (`track_progress.inmail_reported_wall`). Every sentence that says eligibility or its lack says it as of that report: "as your session last reported on {day}".
@@ -464,7 +464,7 @@ Numbered on from Q50 (ticket 25 uses Q43 to Q49). Each names what is built meanw
 - **Q55. A refused InMail.** *Built:* the track takes the withdrawal path; the profile is not marked bad.
 - **Q56. An acceptance after the wait ended, before the InMail went.** *Built:* the InMail is not sent and the first message follows the connection. The alternative sends the InMail anyway.
 - **Q57. A test run reaching the InMail spends a real credit.** *Built:* included, as the ticket asks, and said on the Test run tab while the fallback is on.
-- **Q58. How old a session's report may be before eligibility is not judged on it.** A session reports with every listing while it is signed in; signed out, it reports nothing, and its last report stands. *Built:* 24 hours (`INMAIL_REPORT_MAX_AGE`). An expiry on an older report takes the withdrawal path (`stale_report`); a chosen InMail waits until a fresh report backs it. Every sentence of eligibility says the report's day. A shorter or longer age is one constant.
+- **Q58. How old a session's report may be before eligibility is not judged on it.** A session reports with every listing while it is signed in; signed out, it reports nothing, and its last report stands. *Built:* 24 hours (`INMAIL_REPORT_MAX_AGE`). An expiry on an older report of a signed-out session takes the withdrawal path (`stale_report`); of a signed-in session, it waits for the next sync. A chosen InMail waits until a fresh report backs it. Every sentence of eligibility says the report's day. A shorter or longer age is one constant.
 
 ### 13.13 Unverified
 
@@ -522,6 +522,15 @@ Each item was reproduced first through HTTP, in `linkedin-inmail.test.ts` ("cred
 5. **The report's age** (13.5, question Q58).
 6. **Wording.** A chosen InMail is said as chosen and not gone; the next step's line says why it waits. Copy for a lead mentions the InMail path while the fallback is on.
 7. **The open invite is said only while the read says it is open** (`inviteOpen`). An acceptance after the InMail is said on its own line.
+
+8. **The record fixes the replaced message from its own model** (item 10). The record keeps its own copy of each LinkedIn track's steps through the edits it sends, and names the replaced message from that copy as it stood when the expiry chose the InMail. So the engine and the record each fix the step once, independently. A reorder after the send, `[inv, im, m1, m2, m3]` to `[inv, im, m2, m1, m3]`, then reads `m2` as kept, not as the first message.
+9. **The inspector says the app asks LinkedIn to withdraw the invite** (item 11): one phrase, `ENDS_AND_ASKS_WITHDRAWAL`, in each of the four sentences. It never says the invite is withdrawn.
+10. **Evidence capture waits for animations to settle either way** (item 12): `Promise.allSettled`, since a cancelled animation rejects its `finished` promise.
+
+**What the new draws found, fixed here, each with a regression test through HTTP that fails without its fix:**
+- **Seed 24024 (invariant 29):** a restarted lead waiting for a credit was cached as settled, so a new report giving a credit did not reach it, where a fresh engine acquired and sent at once. *Changed:* a session's InMail standing now has a version, moved by the database in the same write as every fact the standing reads: a holding acquired or released, a track finishing, a report or the session's health, an InMail's work handed, sent or settled (key `inmail:` plus the session, in `conversation_versions`; four triggers in migration 25). A cached evaluation or readiness of a subject with a chosen InMail, or waiting at its expiry, remembers it. A report's aging is a horizon. Test: "a restarted lead waiting for a credit acquires one a new report gives, with no change to its own record".
+- **Seed 24018 (L22):** after the laptop was off over a deadline, a user's action ran the expiry before the first sync, on a report old only because the app had not run, and judged it stale. *Changed:* an old report from a session still signed in defers the judgment to the next sync, which reads a new report. Only a signed-out session is judged `stale_report` (13.5, Q58). Test: "a user action before the first sync does not judge the expiry on the old report of a signed-in session; the next tick does".
+- **The record's own error (seed 24024 again, L22 at the handover):** a report and a handover at the same instant. The simulated provider now orders its report and handover logs with one sequence, and the record judges a handover by the last report before it.
 
 **The generated runs** draw, from a fourth stream:
 - a running edit of the messages while an InMail is chosen (the first message removed, a message added, two reordered);

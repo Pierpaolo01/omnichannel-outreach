@@ -156,6 +156,12 @@ export function inmailLine(view: Pick<LinkedinTrackView, "inmail" | "inviteOpen"
   }
 }
 
+/**
+ * What the end of the wait does on the withdrawal path, as every editor sentence says it (council on 8b0c846, item 11): the
+ * app asks LinkedIn to withdraw the invite; it is never said as withdrawn before LinkedIn or the user says so.
+ */
+export const ENDS_AND_ASKS_WITHDRAWAL = "this track ends for them and the app asks LinkedIn to withdraw the invite";
+
 /** While a lead waits for acceptance on a track with the fallback on: what the end of the wait does (ADR 0004 13.7). */
 export const INMAIL_AT_THE_END = "If they haven’t accepted by the end of the wait, an InMail goes instead, if your session can send one then.";
 

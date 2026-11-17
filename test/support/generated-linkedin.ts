@@ -323,9 +323,18 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const fallbackAt = (ci: number, at: number) => (switches.get(ci) ?? []).filter((x) => x.at <= at).at(-1)?.on ?? false;
   /** The switch as the expiry judged it: an edit at the deadline's own instant comes after that instant's tick (seed 24006). */
   const fallbackJudgedAt = (ci: number, at: number) => (switches.get(ci) ?? []).filter((x) => x.at < at).at(-1)?.on ?? false;
+  /**
+   * The record's own model of each LinkedIn track's steps through the run's edits (council on 8b0c846, item 10): taken from
+   * the definitions the run itself sends, never read back from the application.
+   */
+  const stepsModel = new Map<number, { at: number; steps: readonly StepDefinition[] }[]>(campaigns.map((c, i) => [i, [{ at: -Infinity, steps: c.li.steps }]]));
+  /** The steps as an expiry judged at `at` saw them: an edit at that very instant comes after its tick. */
+  const stepsJudgedAt = (ci: number, at: number) => (stepsModel.get(ci) ?? []).filter((x) => x.at < at).at(-1)?.steps ?? [];
   const noteSwitch = (ci: number, d: CampaignDefinition) => {
     const on = fallbackOn(d, ci);
     if (on !== fallbackAt(ci, h.clock)) switches.get(ci)!.push({ at: h.clock, on });
+    const steps = d.tracks.find((tr) => tr.id === campaigns[ci]!.li.id)?.steps;
+    if (steps) stepsModel.get(ci)!.push({ at: h.clock, steps });
   };
   /**
    * The fallback switched off early, before most leads' deadlines, in a share of the campaigns that start with it on (L19:
@@ -616,7 +625,12 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       const acceptance = li.acceptanceLog.find((a) => a.key === invite.key);
       if (acceptance && acceptance.at <= x.at && !lead.script?.connectionRemoved) problem(`L21: ${x.subjectId}'s InMail was handed over at ${iso(x.at)}, after they accepted at ${iso(acceptance.at)}`);
       // L22 at the handover (council on 8b0c846, item 8): handed over only on a report, read by then, with a plan and a credit.
-      if (refusal?.reason !== "rate_limited" && (!planned(x.sender, x.at) || creditsAt(x.sender, x.at) < 1)) problem(`L22: ${x.subjectId}'s InMail was handed over at ${iso(x.at)} with ${x.sender} reporting ${planned(x.sender, x.at) ? `${creditsAt(x.sender, x.at)} credits free` : "no plan"}`);
+      // The last report before the handover, by the provider's own order (seed 24024: a report and a handover at one instant).
+      const last = li.inmailReportLog.filter((r) => r.session === x.sender && r.seq < x.seq).at(-1);
+      const handedSince = last ? li.handoverLog.filter((y) => y.action === "inmail" && y.sender === x.sender && y.seq > last.seq && y.seq < x.seq && li.deliveryLog.some((d) => d.key === y.key)).length : 0;
+      const free = last ? last.credits - handedSince : 0;
+      const planOk = last?.plan === "premium" || last?.plan === "sales_navigator";
+      if (refusal?.reason !== "rate_limited" && (!planOk || free < 1)) problem(`L22: ${x.subjectId}'s InMail was handed over at ${iso(x.at)} with ${x.sender} reporting ${planOk ? `${free} credits free` : "no plan"}`);
       if (refusal?.reason === "inmail_refused") features.add("an-inmail-refused");
       else if (!refusal) features.add("an-inmail-sent");
     }
@@ -640,12 +654,16 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       }
       // L22 (b, c): the choice by the session's own standing at the expiry, by the record's plan and credits.
       const choseIt = state !== null && state !== "no_plan" && state !== "no_credit" && state !== "stale_report";
-      if (state === "no_plan" && planned(sender, deadline)) problem(`L22: ${lead.id}'s InMail was refused as no plan, though ${sender} reported a plan at ${iso(deadline)}`);
-      if (choseIt && state !== "accepted" && !planned(sender, deadline)) problem(`L22: ${lead.id}'s InMail was ${state} from ${sender}, which reported no Premium or Sales Navigator`);
-      if (choseIt && !freshAt(sender, deadline)) problem(`L22: ${lead.id}'s InMail was chosen on a report older than a day`);
-      if (state === "stale_report" && freshAt(sender, deadline)) problem(`L22: ${lead.id}'s InMail was refused for an old report, though ${sender} reported within a day of ${iso(deadline)}`);
+      // The expiry is judged at the first tick at or after the deadline: the deadline, or the end of a laptop outage over it
+      // (seed 24018), with the report that tick read.
+      const judgedAt = outages.find((o) => o.from <= deadline && deadline < o.to)?.to ?? deadline;
+      if (state === "no_plan" && planned(sender, judgedAt)) problem(`L22: ${lead.id}'s InMail was refused as no plan, though ${sender} reported a plan at ${iso(judgedAt)}`);
+      if (choseIt && state !== "accepted" && !planned(sender, judgedAt)) problem(`L22: ${lead.id}'s InMail was ${state} from ${sender}, which reported no Premium or Sales Navigator`);
+      if (choseIt && !freshAt(sender, judgedAt)) problem(`L22: ${lead.id}'s InMail was chosen on a report older than a day`);
+      // Stale only when signed out then: an old report from a signed-in session waits for its next sync (seed 24018).
+      if (state === "stale_report" && (freshAt(sender, judgedAt) || healthyAt(sender, judgedAt))) problem(`L22: ${lead.id}'s InMail was refused for an old report, though ${sender} ${freshAt(sender, judgedAt) ? `reported within a day of ${iso(judgedAt)}` : "was signed in"}`);
       if (state === "stale_report") features.add("an-inmail-on-a-stale-report");
-      if (choseIt && state !== "accepted" && creditsAt(sender, deadline) < 1) problem(`L22: ${lead.id}'s InMail was chosen at ${iso(deadline)} with ${sender} out of credits by the record`);
+      if (choseIt && state !== "accepted" && creditsAt(sender, judgedAt) < 1) problem(`L22: ${lead.id}'s InMail was chosen at ${iso(deadline)} with ${sender} out of credits by the record`);
       if (state === "no_credit") {
         // The credits other tracks had chosen before and not yet spent: a credit is free only beyond them.
         let committed = 0;
@@ -678,14 +696,15 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       if (drained && went) {
         const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
         const track = stored.tracks.find((x) => x.id === c.li.id);
-        // The first message by its place among every step ever in the track, removed ones included: an edit that removes it
-        // after the InMail promotes a follow-up, which may then go (review bot on b49a71b).
-        const first = track?.steps.filter((s) => s.role !== "inmail")[1]?.id;
+        // The message the InMail replaced, as the record's own model had the steps when the expiry chose it, by its place among
+        // every step, removed ones included (council on 8b0c846, item 10): a later reorder or removal never moves it.
+        const modelled = stepsJudgedAt(lead.campaign, judgedAt);
+        const first = modelled.filter((s) => s.role !== "inmail")[1]?.id;
         const at = li.deliveryLog.find((x) => x.subjectId === lead.id && x.action === "inmail")?.at ?? Infinity;
         if (first && li.deliveryLog.some((x) => x.subjectId === lead.id && x.stepId === first && x.at > at)) problem(`L23: ${lead.id}'s first message went after its InMail`);
         // L23, the other side (council on 8b0c846, item 1): a follow-up the user kept is never skipped for the InMail. Every
         // message of the record's own definition after the first, live now, went by the drain on a completed track.
-        const kept = c.li.steps.filter((s) => s.role !== "inmail").slice(2).map((s) => s.id).filter((id) => track?.steps.some((s) => s.id === id && !s.removed));
+        const kept = modelled.filter((s) => s.role !== "inmail" && !s.removed).slice(1).map((s) => s.id).filter((id) => id !== first && track?.steps.some((s) => s.id === id && !s.removed));
         const untouched = st.subject.ended === null && !stopped.has(lead.id) && !marked.has(lead.id) && !(skipped.get(lead.id)?.length) && tp.finishReason === "completed";
         for (const id of untouched ? kept : []) if (!li.deliveryLog.some((x) => x.subjectId === lead.id && x.stepId === id)) problem(`L23: ${lead.id}'s follow-up ${id} never went after its InMail, its track completed`);
       }

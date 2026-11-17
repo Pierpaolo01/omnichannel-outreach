@@ -26,7 +26,8 @@ async function shot(page: Page, name: string): Promise<void> {
   if (!dir) return;
   for (const theme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: theme });
-    await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished)));
+    // A cancelled animation rejects its `finished` promise: wait for each to settle, either way (council on 8b0c846, item 12).
+    await page.evaluate(() => Promise.allSettled(document.getAnimations().map((a) => a.finished)));
     await page.screenshot({ path: `${dir}/inmail-${name}-${theme}.png`, fullPage: true });
   }
   await page.emulateMedia({ colorScheme: null });
@@ -57,7 +58,8 @@ test("the InMail fallback in the inspector, Before launch and the Test run tab: 
   await at(page, f, `/campaigns/${f.campaign}?track=li`);
   await fallback.uncheck();
   await expect(page.getByLabel("InMail", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("Off: when the wait ends, the invite is withdrawn and the track ends for them.")).toBeVisible();
+  await expect(page.getByText("Off: when the wait ends, this track ends for them and the app asks LinkedIn to withdraw the invite.")).toBeVisible();
+  await expect(page.getByText(/invite is withdrawn/)).toHaveCount(0);
   await expect(page.getByText("Invite, then 2 messages").first()).toBeVisible();
   await fallback.scrollIntoViewIfNeeded();
   await shot(page, "03-inspector-off");
