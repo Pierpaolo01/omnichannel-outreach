@@ -248,7 +248,10 @@ export interface EnrollmentRead extends EnrollmentProgress {
 }
 
 /** The LinkedIn reply mark as a read allows it: allowed, or refused with the engine's reason (ticket 24b). */
-export type LinkedinReplyMark = { readonly allowed: true } | { readonly allowed: false; readonly reason: string };
+export type LinkedinReplyMark =
+  /** `work`: the LinkedIn work that lets the mark be made (review bot on c20c8f0), its kind and whether it is recorded sent. */
+  | { readonly allowed: true; readonly work: { readonly kind: "invite" | "message"; readonly state: "sent" | "handed" } }
+  | { readonly allowed: false; readonly reason: string };
 
 /** One enrollment's read on a person's or company lead's record (ticket 17b), with its campaign's launch and pause as read at the same instant. */
 export interface RecordLead extends EnrollmentRead {

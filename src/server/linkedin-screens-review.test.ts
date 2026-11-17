@@ -405,7 +405,7 @@ describe("the review bot on 82cf16d: a test run's invitation handed over and not
     await h.advanceTo(MONDAY_9 + 2 * MIN);
     const run = (await h.request<TestRunTab>("GET", `/api/campaigns/${id}/test-runs`)).body.run;
     expect(run?.linkedinTracks[0]?.view.invite).toBe("handed");
-    expect(run?.linkedinReply).toEqual({ allowed: true });
+    expect(run?.linkedinReply).toEqual({ allowed: true, work: { kind: "invite", state: "handed" } });
   });
 });
 
@@ -430,5 +430,29 @@ describe("the re-check of 82cf16d: a skip's cause is recorded when the track fin
     const db = (h.store.engine as unknown as { db: import("node:sqlite").DatabaseSync }).db;
     db.prepare("INSERT OR IGNORE INTO linkedin_profile_marks (key, marked_wall) VALUES (?, ?)").run(KIM, h.clock);
     expect(await cause()).toBe("not_a_member_profile");
+  });
+});
+
+describe("the review bot on c20c8f0: the read names the work that allows the reply mark", () => {
+  const connectedTest = async (script: Record<string, unknown>) => {
+    const { h, campaign, lead } = await world();
+    h.linkedin.profiles.set(TEST, { connected: true, ...script });
+    const id = await campaign("Connected test");
+    await h.defineSequence(id, definition([linkedin()]));
+    expect((await h.request("PUT", `/api/campaigns/${id}/test-contacts`, { email: "", mobile: "", linkedin: TEST })).status).toBe(200);
+    const tab = (await h.request<TestRunTab>("GET", `/api/campaigns/${id}/test-runs`)).body;
+    h.clock = MONDAY_9;
+    expect((await h.request("POST", `/api/campaigns/${id}/test-runs`, { requestId: "run-c", renderAs: await lead(id), expect: { definitionVersion: tab.definitionVersion } })).status).toBe(200);
+    await h.advanceTo(MONDAY_9 + 10 * MIN);
+    return (await h.request<TestRunTab>("GET", `/api/campaigns/${id}/test-runs`)).body.run;
+  };
+  test("an already-connected test profile, the first message's answer unknown: the invitation was skipped, the message is handed", async () => {
+    const run = await connectedTest({ loseAnswer: 50 });
+    expect(run?.linkedinTracks[0]?.view.invite).toBeNull();
+    expect(run?.linkedinReply).toEqual({ allowed: true, work: { kind: "message", state: "handed" } });
+  });
+  test("an already-connected test profile, the first message sent", async () => {
+    const run = await connectedTest({});
+    expect(run?.linkedinReply).toEqual({ allowed: true, work: { kind: "message", state: "sent" } });
   });
 });

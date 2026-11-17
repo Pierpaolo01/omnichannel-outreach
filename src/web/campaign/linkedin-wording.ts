@@ -5,7 +5,7 @@
  * ticket 27) fails typecheck until it has its words. Days are said in the user's zone, as the read gives them. History is
  * said in the past tense; a present state only as the read says it at its instant. Provisional wording, for the principal.
  */
-import type { LinkedinTrackView, NeedsAttention, OutreachStatus, TrackProgressView } from "../../shared/api.ts";
+import type { LinkedinReplyMark, LinkedinTrackView, NeedsAttention, OutreachStatus, TrackProgressView } from "../../shared/api.ts";
 import { statusGroup } from "../../domain/outreach-status.ts";
 import type { AttentionItem } from "../calls/wording.ts";
 import { dateIn } from "../calls/wording.ts";
@@ -162,15 +162,24 @@ export const MARK_REPLIED = {
 } as const;
 
 /**
- * What a test run's LinkedIn reply mark is for, by what the run's read records as gone (review bot on 82cf16d): a message
- * recorded sent; else the invitation recorded sent (`LinkedinTrackView.invite`, the field the record's sentences read);
- * else work handed over and not yet known to have gone, said as that. Never "gone" without the stored fact.
+ * What a test run's LinkedIn reply mark is for, said from the work that allows it (review bot on c20c8f0): the read's own
+ * `linkedinReply.work`, the work the engine's rule found, by its kind and whether it is recorded sent. Four sentences, one
+ * per case, through an exhaustive mapping; nothing is inferred from which other fields are empty.
  */
-export function testReplyHelper(run: { readonly steps: readonly { readonly trackId: string; readonly channel: string; readonly state: string }[]; readonly linkedinTracks: readonly { readonly view: Pick<LinkedinTrackView, "invite"> }[] }): string {
-  // A LinkedIn message recorded sent: a sent row of a LinkedIn track other than its first, the invitation.
-  const message = run.steps.some((r, i, all) => r.channel === "linkedin" && r.state === "sent" && all.findIndex((x) => x.trackId === r.trackId) !== i);
-  if (message) return "Once you have answered a test message on your test profile.";
-  const invites = run.linkedinTracks.map((t) => t.view.invite);
-  if (invites.includes("sent")) return "Only the test invite has gone so far: mark it once you have written back on LinkedIn from your test profile.";
-  return "The test invite is with the LinkedIn session, which hasn’t confirmed whether it went: mark it once you have written back on LinkedIn from your test profile.";
+export function testReplyHelper(work: Extract<LinkedinReplyMark, { allowed: true }>["work"]): string {
+  const after = "mark it once you have written back on LinkedIn from your test profile.";
+  switch (`${work.kind}:${work.state}` as const) {
+    case "message:sent":
+      return "Once you have answered a test message on your test profile.";
+    case "invite:sent":
+      return `Only the test invite has gone so far: ${after}`;
+    case "message:handed":
+      return `A test message is with the LinkedIn session, which hasn’t confirmed whether it went: ${after}`;
+    case "invite:handed":
+      return `The test invite is with the LinkedIn session, which hasn’t confirmed whether it went: ${after}`;
+    default: {
+      const unhandled: never = `${work.kind}:${work.state}` as never;
+      throw new Error(`A reply mark's work with no words: ${String(unhandled)}`);
+    }
+  }
 }

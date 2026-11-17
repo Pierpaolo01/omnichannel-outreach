@@ -79,7 +79,7 @@ describe("marking a LinkedIn reply, as the read allows it (ADR 0004 section 7)",
     expect(before.linkedinReply).toEqual({ allowed: false, reason: NOTHING_SENT_ON_LINKEDIN });
     await h.advanceTo(MONDAY_9 + 2 * 24 * H);
     const after = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body;
-    expect(after.linkedinReply).toEqual({ allowed: true });
+    expect(after.linkedinReply).toEqual({ allowed: true, work: { kind: "invite", state: "sent" } });
     // Marked: the read refuses a second mark with the engine's reason.
     expect((await h.request("POST", `/api/enrollments/${pat}/replies`, { requestId: "r-1", channel: "linkedin", expect: { status: after.status } })).status).toBe(200);
     const marked = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${pat}`)).body;
@@ -114,7 +114,7 @@ describe("the Test run tab's LinkedIn read (ADR 0004 section 8)", () => {
     expect(m1).toMatchObject({ state: "due", waits: "awaiting_acceptance" });
     // Q40: the wait is not cut short; it ends three calendar days after the invite went, in the campaign's zone.
     expect(m1?.until).toBe("2026-11-05T00:00:00.000Z");
-    expect(run?.linkedinReply).toEqual({ allowed: true });
+    expect(run?.linkedinReply).toEqual({ allowed: true, work: { kind: "invite", state: "sent" } });
     // The mark, confirmed on the status the read showed, ends only the test (council on 194fc44, item 13).
     const marked = await h.request<TestRunTab>("POST", `/api/test-runs/${run?.id ?? ""}/replies`, { requestId: "mark-1", channel: "linkedin", expect: { status: run?.status } });
     expect(marked.status).toBe(200);

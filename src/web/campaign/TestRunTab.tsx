@@ -637,7 +637,7 @@ function TestLinkedinControls({ run, presses }: { run: TestRunRead | null; press
                 Mark replied on LinkedIn
               </button>
               {/* Worded for what has gone (council on a6c1700, item 7): a message, or only the invite. */}
-              <span className="text-[13px] text-muted">{testReplyHelper(run)}</span>
+              <span className="text-[13px] text-muted">{testReplyHelper(mark.work)}</span>
             </div>
           )}
         </>

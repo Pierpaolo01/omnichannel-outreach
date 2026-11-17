@@ -7,7 +7,7 @@
 import { stepNumber } from "../../domain/sequence/definition.ts";
 import { releasedBy, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
 import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
-import { currentStep, judgeCampaignControl, previewDigest, LEAD_CONTROLS, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
+import { currentStep, judgeCampaignControl, previewDigest, LEAD_CONTROLS, NOTHING_SENT_ON_LINKEDIN, replyMarkWork, skipTarget, type LeadControl } from "../../domain/sequence/controls.ts";
 import { isLive } from "../../domain/sequence/attempt.ts";
 import { deriveStatus } from "../../domain/sequence/progress.ts";
 import type { SubjectState } from "../../domain/sequence/state.ts";
@@ -92,8 +92,11 @@ export function controlsView(stored: SubjectState, now: number, rules: Rules, en
  */
 export function linkedinReplyView(stored: SubjectState, now: number, rules: Pick<Rules, "markReplied" | "asOfAction" | "evaluate"> = DEFAULT_RULES): LinkedinReplyMark | null {
   if (!stored.campaign.definition.tracks.some((t) => t.channel === "linkedin")) return null;
-  const marked = rules.markReplied(rules.asOfAction(stored, now, rules.evaluate), "read", now);
-  return marked.ok ? { allowed: true } : { allowed: false, reason: marked.reason };
+  const s = rules.asOfAction(stored, now, rules.evaluate);
+  const marked = rules.markReplied(s, "read", now);
+  const work = replyMarkWork(s);
+  // Allowed only with the work that allows it, said by its kind and state (review bot on c20c8f0).
+  return marked.ok && work !== null ? { allowed: true, work } : { allowed: false, reason: marked.ok ? NOTHING_SENT_ON_LINKEDIN : marked.reason };
 }
 
 /** The campaign's pause and resume, judged on its row exactly as `Engine.setCampaignPause` judges them. */
