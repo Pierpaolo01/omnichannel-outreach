@@ -1,5 +1,5 @@
 import { MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel } from "../domain/social-channels.ts";
-import type { SendChannel } from "../domain/sequence/definition.ts";
+import type { SendChannel, TrackChannel } from "../domain/sequence/definition.ts";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -75,7 +75,7 @@ const stepBody = requestObject({
 });
 const trackBody = requestObject({
   id: z.string().trim().min(1).max(100),
-  channel: z.enum(["email", "sms", "call", "linkedin"]),
+  channel: z.enum(["email", "sms", "call", ...SOCIAL_CHANNEL_LIST] as unknown as readonly ["email", ...TrackChannel[]]),
   branch: z.enum(["main", "win_back"]).default("main"),
   window: z.array(windowRule).max(14),
   steps: z.array(stepBody).max(50),
@@ -94,6 +94,8 @@ const definitionBody = requestObject({
   smsPool: z.array(z.string().min(1).max(200)).max(100).default([]),
   /** LinkedIn sender sessions (ADR 0004 1.1); absent from a definition saved without LinkedIn tracks. */
   linkedinPool: z.array(z.string().min(1).max(200)).max(100).optional(),
+  /** Instagram sender sessions (ADR 0004 13.5); absent from a definition saved without Instagram tracks. */
+  instagramPool: z.array(z.string().min(1).max(200)).max(100).optional(),
   callScript: z.string().max(20_000).default(""),
   tracks: z.array(trackBody).max(20),
   /** Who wrote the save (ADR 0003 1.1.1): its editing session, its number there, and the revision it last saw. */
@@ -106,10 +108,11 @@ const impactBody = requestObject({ definition: definitionBody.omit({ save: true,
 
 /** A definition as stored: a declined path only when the canvas set one; the phone track's fields travel in the same save (ADR 0003 1.1.1). */
 function definitionFromBody(fields: Omit<z.infer<typeof definitionBody>, "save" | "impact">): CampaignDefinition {
-  const { linkedinPool, ...rest } = fields;
+  const { linkedinPool, instagramPool, ...rest } = fields;
   return {
     ...rest,
     ...(linkedinPool !== undefined ? { linkedinPool } : {}),
+    ...(instagramPool !== undefined ? { instagramPool } : {}),
     tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, acceptWaitDays, ...t }) => ({
       ...t,
       ...(declinedPath ? { declinedPath } : {}),

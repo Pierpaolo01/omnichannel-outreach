@@ -23,7 +23,7 @@ import { LEAD_CONTROLS } from "../domain/sequence/controls.ts";
 import { displayPhone } from "../domain/phone.ts";
 import { callbackPending, goodNumbers, skipLimitOf, userDayOf } from "../domain/sequence/calls.ts";
 import { localDayNumber } from "../domain/sequence/clock.ts";
-import { goodEmail, goodMobile, goodProfile, wallAtLead } from "../domain/sequence/progress.ts";
+import { goodAccount, goodEmail, goodMobile, goodProfile, wallAtLead } from "../domain/sequence/progress.ts";
 import type { SubjectState } from "../domain/sequence/state.ts";
 import { trackLabel } from "../shared/track-label.ts";
 import { callRecordView, dateOfDay, firstListedDay, type CallViewRules } from "./engine/call-views.ts";
@@ -54,7 +54,7 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
       const track = progress.tracks.find((t) => t.trackId === b.trackId);
       const step = track?.steps.find((st) => st.stepId === b.stepId);
       const of = channelOfTrack(b.trackId);
-      const channel = of === "sms" || of === "linkedin" ? of : "email";
+      const channel = of === "call" ? "email" : of;
       entries.push({ campaign, at: new Date(b.atWall).toISOString(), kind: "bounced", channel, track: labelOf(b.trackId), stepNumber: step?.number ?? null, to: shown(channel, b.destination) });
     }
     // Ended for want of a usable channel before any track started: the only case Activity says more
@@ -62,17 +62,18 @@ export async function activityOf(store: OutreachStore, enrollments: readonly Enr
     // At launch the lead is in the main sequence, so only its tracks can say so; a branch's never can.
     const endedAtLaunch = progress.status === "finished_no_usable_channel" && progress.branch === "main" && !progress.tracks.some((t) => t.started);
     for (const track of progress.tracks) {
-      if (track.channel === "call") {
+      const trackChannel = channelOfTrack(track.trackId);
+      if (trackChannel === "call") {
         callEntries(track, state, rules.asOfAction(state, now, rules.evaluate), progress, campaign, labelOf, endedAtLaunch, now, rules, entries);
         continue;
       }
-      // LinkedIn tracks too (ticket 24b: part a left them out, so no invite or message showed in Activity).
-      if (track.channel !== "email" && track.channel !== "sms" && track.channel !== "linkedin") continue;
-      const channel = track.channel;
+      // LinkedIn and Instagram tracks too (ticket 24b: part a left LinkedIn out, so no invite or message showed in Activity).
+      const channel = trackChannel;
       const label = labelOf(track.trackId);
       // A LinkedIn track needs a member profile, which a company lead never has (Q35): its skip says so, never "no mobile".
-      const missing = channel === "email" ? "no_email" : channel === "linkedin" ? "no_profile" : companyLead ? "company_lead" : "no_mobile";
-      const hasChannel = channel === "email" ? goodEmail(state.lead.details) !== null : channel === "linkedin" ? goodProfile(state.lead.details) !== null : goodMobile(state.lead.details) !== null;
+      // A message-request track needs an account, the decision maker's own or the company's (ADR 0004 13.4).
+      const missing = channel === "email" ? "no_email" : channel === "linkedin" ? "no_profile" : channel === "sms" ? (companyLead ? "company_lead" : "no_mobile") : "no_account";
+      const hasChannel = channel === "email" || channel === "sms" || channel === "linkedin" ? (channel === "email" ? goodEmail(state.lead.details) : channel === "linkedin" ? goodProfile(state.lead.details) : goodMobile(state.lead.details)) !== null : goodAccount(state.lead.details, channel) !== null;
       let lastTo: string | null = null;
       for (const step of track.steps) {
         for (const send of step.sends) {
