@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { MessageRequestTrackView, TrackProgressView } from "../../shared/api.ts";
-import { messageRequestTrackLines } from "./message-request-wording.ts";
+import { messageRequestLimits, messageRequestTrackLines, messageRequestWarnings } from "./message-request-wording.ts";
 import { markRepliedWords, channelOfMark, markRepliedControl } from "./reply-mark-wording.ts";
 import { MESSAGE_REQUEST_STEP_KIND_AT, stepTitle, trackLabel } from "../../shared/track-label.ts";
 import { messageRequestStepKind, type CampaignDefinition, type TrackDefinition } from "../../domain/sequence/definition.ts";
@@ -67,5 +67,28 @@ describe("Before launch says an Instagram session in Instagram's words (found in
     const { usedTodayWarnings } = await import("./BeforeLaunchTab.tsx");
     const warnings = usedTodayWarnings({ id: "instagram:s", label: "Session", channel: "instagram", healthy: true, capacity: 20, gapSeconds: 60, usedToday: 2, waiting: null, kinds: { invite: { capacity: 0, usedToday: 0 }, message: { capacity: 20, usedToday: 2 } } } as never);
     expect(warnings.map((w) => w.detail)).toEqual(["Other campaigns or test runs sent or reserved them, so fewer Instagram messages can go today."]);
+  });
+});
+
+describe("leads sharing a company's account, on Before launch and in the inspector (verifier on f2824d4, item 4)", () => {
+  const counts = (accounts: number, leads: number) => ({ own: 1, company: leads, shared: { accounts, leads } });
+  test("how many leads share how many accounts, and that each account may hear from up to as many of the track's sessions as are chosen", () => {
+    expect(messageRequestWarnings("Instagram", 8, counts(2, 7), "the Instagram track", false, 3)).toEqual([
+      {
+        title: "7 leads share 2 company Instagram accounts",
+        detail: "They have no account of their own, so their messages go to their company’s. Each such account can get up to 3 first messages from each track, one from each session chosen there, each about a different lead.",
+      },
+    ]);
+    expect(messageRequestWarnings("Instagram", 6, counts(1, 5), "the Instagram track", false, 1)[0]).toEqual({
+      title: "5 leads share 1 company Instagram account",
+      detail: "They have no account of their own, so their messages go to their company’s. Each such account can get one first message from each track: the first lead to reach it keeps it, and the others are skipped.",
+    });
+    expect(messageRequestWarnings("Instagram", 2, counts(0, 0), "the Instagram track", false, 2)).toEqual([{ title: "1 lead has no Instagram account to message", detail: expect.any(String) as string }]);
+  });
+
+  test("the inspector says the same limit for the same number of chosen sessions", () => {
+    expect(messageRequestLimits("Instagram", 3)[2]).toContain("up to 3 first messages from this track, one from each session you chose, each about a different lead");
+    expect(messageRequestLimits("Instagram", 1)[2]).toContain("one first message from this track: the first lead to reach it keeps it, and the others are skipped here");
+    expect(messageRequestLimits("Instagram", 0)[2]).toContain("one first message from this track");
   });
 });

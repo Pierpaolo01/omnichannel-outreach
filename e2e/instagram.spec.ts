@@ -45,8 +45,10 @@ test("an Instagram track from the canvas through a test run, a launch, a marked 
     await expect(page.getByText("Text only. To someone who doesn’t follow your session it arrives as a message request.")).toBeVisible();
     await page.getByRole("button", { name: "Add follow-up" }).click();
     await page.getByLabel("Follow-up 1 message").fill("{{first_name|Hi}}, shall I send the video over? A yes is enough.");
-    await expect(page.getByText(/^Simulated Instagram \(not a session\)/).first()).toBeVisible();
-    await expect(page.getByText(/a business account/).first()).toBeVisible();
+    // The track sends only from the sessions the user ticks (ADR 0004 13.5): none is ticked by itself.
+    await expect(page.getByText("No session chosen. Choose at least one: launch is blocked until you do.")).toBeVisible();
+    await page.getByRole("checkbox", { name: /^Simulated Instagram \(not a session\).*a business account/ }).check();
+    await expect(page.getByText(/^Only the sessions you tick start this track’s conversations\./)).toBeVisible();
     await expect(page.getByRole("status").filter({ hasText: "Saved" }).first()).toBeVisible();
     await shot(page, "01-canvas");
     await linger(page);
@@ -134,6 +136,32 @@ test.describe("Instagram's states", () => {
     // The provider read's own words: here the simulated provider's; the running application's say none is connected.
     await expect(page.getByText("Simulated Instagram (not a session): tests only.")).toBeVisible();
     await shot(page, "11-inspector-no-session");
+  });
+
+  test("the sender choice by keyboard: Space ticks a session, the save keeps it across a reload, and unticking the last blocks launch by name", async ({ page }) => {
+    const f = await fakeInstagramApp("fresh", "sender-keyboard");
+    await at(page, f, `/campaigns/${f.campaign}`);
+    await page.getByRole("button", { name: "Instagram track" }).click();
+    await page.getByLabel("Message request message").fill("Hello {{first_name|there}}.");
+    const session = page.getByRole("checkbox", { name: /^Simulated Instagram \(not a session\)/ });
+    // Reached from the field before it by Tab, never only by pointer.
+    await session.focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    await expect(session).toBeFocused();
+    await expect(session).not.toBeChecked();
+    await page.keyboard.press("Space");
+    await expect(session).toBeChecked();
+    await expect(page.getByRole("status").filter({ hasText: "Saved" }).first()).toBeVisible();
+    await page.reload();
+    await page.getByRole("button", { name: /^Instagram track:/ }).click();
+    await expect(page.getByRole("checkbox", { name: /^Simulated Instagram \(not a session\)/ })).toBeChecked();
+    await page.getByRole("checkbox", { name: /^Simulated Instagram \(not a session\)/ }).focus();
+    await page.keyboard.press("Space");
+    await expect(page.getByText("No session chosen. Choose at least one: launch is blocked until you do.")).toBeVisible();
+    await expect(page.getByRole("status").filter({ hasText: "Saved" }).first()).toBeVisible();
+    await at(page, f, `/campaigns/${f.campaign}/before-launch`);
+    await expect(page.getByText(/has no sender session chosen$/).first()).toBeVisible();
   });
 
   test("a session with no allowance sends nothing, and Today says why with no time", async ({ page }) => {

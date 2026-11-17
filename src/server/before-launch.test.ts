@@ -60,7 +60,7 @@ describe("Before launch: the leads, channel coverage and missing merge fields", 
       ["Sam Lee", "person", "Practice manager", "Harbour Lane Physio", null],
     ]);
     // Pat: email, mobile, phone. Sam: direct line, and the company main line. Northgate: shared inbox only.
-    expect(view.coverage).toEqual({ leads: 3, email: 2, mobile: 1, phone: 2, linkedin: 0, social: { instagram: { own: 0, company: 0 } } });
+    expect(view.coverage).toEqual({ leads: 3, email: 2, mobile: 1, phone: 2, linkedin: 0, social: { instagram: { own: 0, company: 0, shared: { accounts: 0, leads: 0 } } } });
   });
 
   test("counts, for each merge field the copy uses, the leads that lack it and the fallbacks written", async () => {

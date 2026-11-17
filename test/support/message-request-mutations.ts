@@ -3,7 +3,10 @@ import { DEFAULT_RULES } from "../../src/server/engine/rules.ts";
 import { SqliteEngineStore } from "../../src/server/persistence/sqlite-engine-store.ts";
 import { viewRules } from "../../src/server/engine/step-when-view.ts";
 import { comparePriority } from "../../src/domain/sequence/dispatch.ts";
-import { end } from "../../src/domain/sequence/progress.ts";
+import { end, goodAccount } from "../../src/domain/sequence/progress.ts";
+
+/** Found by searching offsets 0 to 29 (17 November 2026). */
+const RETARGET_SEED = 0;
 import { markedReplyId } from "../../src/domain/sequence/reply-identity.ts";
 import { isMessageRequestChannel } from "../../src/domain/social-channels.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
@@ -36,6 +39,24 @@ function ownPairsOnly(s: SubjectState): SubjectState {
 /** The subject with no fixed message-request sender: neither its stored one nor its own pairs (M8's mutation). */
 function unfixed(s: SubjectState): SubjectState {
   return { ...s, subject: { ...s.subject, socialSenders: {} }, smsBindings: s.smsBindings.filter((b) => !(b.owner === s.subject.id && isMessageRequestChannel(b.channel))) };
+}
+
+/**
+ * The subject with each started message-request track whose account a re-import replaced pointed at the lead's account now
+ * (M2's second mutation, the review of f2824d4 item 8): retargeted, where the engine skips it.
+ */
+function retargeted(s: SubjectState): SubjectState {
+  const tracks = s.tracks.map((p) => {
+    const channel = s.campaign.definition.tracks.find((t) => t.id === p.trackId)?.channel;
+    if (!isMessageRequestChannel(channel) || p.startedAt === null || p.finishedAt !== null || p.destinationDetailId === null) return p;
+    const dest = s.lead.resolved[p.destinationDetailId];
+    if (!dest || dest.bad || dest.owned) return p;
+    const now = goodAccount(s.lead.details, channel);
+    return now ? { ...p, destinationDetailId: now.id } : p;
+  });
+  const resolved = { ...s.lead.resolved };
+  for (const p of tracks) if (p.destinationDetailId !== null && resolved[p.destinationDetailId] === undefined) resolved[p.destinationDetailId] = { liveId: p.destinationDetailId, bad: false, owned: true };
+  return { ...s, tracks, lead: { ...s.lead, resolved } };
 }
 
 /** Every message-request session with room for anything (M4's mutation): its allowance not read. */
@@ -76,6 +97,12 @@ export const MESSAGE_REQUEST_MUTATIONS: Readonly<Record<string, MessageRequestMu
     invariant: "M4",
     seed: 1,
     rules: { chooseAccount: (state, now, stepId) => DEFAULT_RULES.chooseAccount(unlimited(state), now, stepId) },
+  },
+  // M2: a started track whose account a re-import replaced is retargeted to the new account, not skipped (review of f2824d4, item 8).
+  "a started track retargeted by a re-import": {
+    invariant: "M2",
+    seed: RETARGET_SEED,
+    rules: { evaluate: (state, now, options) => DEFAULT_RULES.evaluate(retargeted(state), now, options) },
   },
   // M5: a pair another subject owns is ignored, in the account choice and the handover.
   "a taken pair ignored": {

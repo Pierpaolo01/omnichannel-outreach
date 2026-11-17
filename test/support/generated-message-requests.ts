@@ -496,8 +496,11 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
       const position = ig.handoverLog.indexOf(x);
       const bad = markedBadAt.get(x.destination);
       if (bad !== undefined && bad.index < position) problem(`M2: ${x.subjectId}'s Instagram message at ${iso(x.at)} went to ${x.destination}, marked bad at ${iso(bad.at)}`);
-      const instants = [launchedAt, ...[...markedBadAt.values()].map((m) => m.at), ...leads.flatMap((o) => o.cellChanges.map((ch) => ch.at)), x.at].filter((t) => t >= launchedAt && t <= x.at);
-      if (!instants.some((t) => destinationAt(l, t, position) === x.destination)) problem(`M2: ${x.subjectId}'s Instagram message at ${iso(x.at)} went to ${x.destination}; the record's destination was ${destinationAt(l, x.at, position) ?? "none"}`);
+      // The destination is fixed at the track's start, which the record models as the launch (the Instagram track starts at
+      // entry), and every message of the track goes there: a re-import that replaces it skips the track, never retargets it
+      // (ADR 0004 13.4; the review of f2824d4, item 8). No mark can precede the launch, so none is counted at it.
+      const pinned = destinationAt(l, launchedAt, 0);
+      if (x.destination !== pinned) problem(`M2: ${x.subjectId}'s Instagram message at ${iso(x.at)} went to ${x.destination}; its track started at ${iso(launchedAt)} on ${pinned ?? "no account"}`);
       // M3: nothing after an accepted mark or a stop, until a restart after it.
       const stop = ended.get(x.subjectId);
       if (stop && ig.handoverLog.indexOf(x) >= stop.handovers) problem(`M3: ${x.subjectId} was handed an Instagram message at ${iso(x.at)}, after its ${stop.kind} at ${iso(stop.at)}`);

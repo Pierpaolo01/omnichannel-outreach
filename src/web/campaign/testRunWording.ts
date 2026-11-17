@@ -1,4 +1,4 @@
-import { isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type SocialChannel } from "../../domain/social-channels.ts";
+import { isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS, type SocialChannel } from "../../domain/social-channels.ts";
 import type { TestRunEnding, TestRunRead, TestStepRow } from "../../shared/api.ts";
 import { clockTime } from "../time.ts";
 import { stepWaitWords } from "../controls/wording.ts";
@@ -61,7 +61,7 @@ export function endingDetail(ending: TestRunEnding, run: RunFacts): string {
         ? `The reply you marked on ${SOCIAL_CHANNELS[run.stopReply].name} stopped it, as a prospect’s reply stops their outreach.`
         : run.stopReply === "email" || run.stopReply === "sms"
           ? `A reply from your test ${run.stopReply === "email" ? "email" : "mobile"} stopped it, as a prospect’s reply stops their outreach.`
-          : "A reply from your test email or mobile, or one you marked on LinkedIn, stopped it, as a prospect’s reply stops their outreach.";
+          : `A reply from your test email or mobile, or one you marked on ${SOCIAL_CHANNEL_LIST.map((c) => SOCIAL_CHANNELS[c].name).join(" or ")}, stopped it, as a prospect’s reply stops their outreach.`;
     case "finished":
       return finishedDetail(run);
     case "no_contact_left":

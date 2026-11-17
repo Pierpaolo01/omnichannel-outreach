@@ -4,7 +4,7 @@ import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { FakeSocialSession } from "../../../test/support/fake-social-port.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
-import type { ActivityView, CampaignMeasures, EnrollmentProgress, EnrollmentRead, LeadSearchResult, NeedsAttention, RecordControls, SocialProvidersStatus } from "../../shared/api.ts";
+import type { ActivityView, BeforeLaunchView, CampaignMeasures, EnrollmentProgress, EnrollmentRead, LeadSearchResult, NeedsAttention, RecordControls, SocialProvidersStatus } from "../../shared/api.ts";
 import { noUsableChannelItem } from "../../web/calls/interruption.ts";
 import { nextStepSentence, outgoingSoFar } from "../../web/controls/wording.ts";
 
@@ -245,6 +245,17 @@ describe("ownership of a conversation (ADR 0004 13.6)", () => {
     const today = (await h.request<NeedsAttention>("GET", "/api/needs-attention")).body.noUsableChannel.find((x) => x.enrollmentId === c.lead(skippedName));
     expect(today?.channels).toEqual([{ channel: "instagram", why: "conversation_taken", owners: [{ name: "Instagram", test: false, lead: ownerName }] }]);
     expect(noUsableChannelItem(today ? [today] : [], "2026-11-02", "Europe/London")?.body).toContain(`Now their Instagram account is in an Instagram conversation (a message request or a follow-up) with ${ownerName}, a lead of this campaign, on every Instagram session this campaign can use.`);
+  });
+
+  test("Before launch counts the leads that share a company's account, from the read: five colleagues at one company, two at another, and a person with their own (verifier on f2824d4, item 4)", async () => {
+    const colleagues = ["Nia Cole", "Ola Berg", "Uma Reid", "Ivo Marsh", "Eli Grant"].map((n, i) => person({ person_id: `n${i}`, business_id: "b2", full_name: n, email: `n${i}@northgate.example`, instagram: "" }));
+    const harbour = ["Ana Holt", "Ben Fry"].map((n, i) => person({ person_id: `h${i}`, business_id: "b1", full_name: n, email: `h${i}@harbour.example`, instagram: "" }));
+    const { h } = await world({ people: [PEOPLE[0]!, ...colleagues, ...harbour] });
+    const { campaign: c } = await h.createCampaign("Shared", { businesses: BUSINESSES, people: [PEOPLE[0]!, ...colleagues, ...harbour] });
+    await h.defineSequence(c.id, definition([instagram("ig", three())]));
+    const view = (await h.request<BeforeLaunchView>("GET", `/api/campaigns/${c.id}/before-launch`)).body;
+    // Pat goes to their own account; seven go to a company's: five share Northgate's, two Harbour's.
+    expect(view.coverage.social.instagram).toEqual({ own: 1, company: 7, shared: { accounts: 2, leads: 7 } });
   });
 
   test("a second campaign on the same session is skipped for an account the first reached; a person's own account and their company's are two", async () => {

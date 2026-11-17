@@ -58,6 +58,11 @@ export const MESSAGE_REQUEST_FEATURES: readonly string[] = [
 const FRESH_EVERY = 10;
 const freshFor = (mutation: { readonly invariant: string }): number => (mutation.invariant === "29" ? 1 : 0);
 const SEARCH_SEEDS = 100;
+/**
+ * Each seed's own bound: about twenty times the slowest seed's time on CI's unit shard (17 November 2026: the LinkedIn
+ * family's nine fixed seeds took 222 s together, the slowest about 40 s; the message-request family's four took 14 s).
+ */
+const SEED_LIMIT_MS = 900_000;
 const MAX_SEEDS = 30;
 const RUN_WRITES = 3_000;
 const RUN_TICKS = 2_000;
@@ -74,21 +79,20 @@ export function messageRequestChunks(): void {
   const offsets = FULL_SEARCH ? Array.from({ length: SEARCH_SEEDS }, (_, i) => i).filter(inShard) : [...MESSAGE_REQUEST_FIXED_SEEDS];
   describe(`generated message-request runs keep M1 to M10 and 29 (${FULL_SEARCH ? "full search" : "fixed seeds"})`, () => {
     if (offsets.length === 0) test.skip("no seed of this run in this shard", () => undefined);
-    for (let i = 0; i < offsets.length; i += 10) {
-      const chunk = offsets.slice(i, i + 10);
-      test(`seeds ${chunk.map((o) => MESSAGE_REQUEST_SEED + o).join(", ")}`, async () => {
+    // One case per seed, each with its own bound (verifier on f2824d4, item 11): a slow machine can fail one seed's case,
+    // never starve the others of the time a shared case had left. The coverage below is still asserted over all of them.
+    for (const offset of offsets) {
+      test(`seed ${MESSAGE_REQUEST_SEED + offset}`, async () => {
         const failures: string[] = [];
-        for (const offset of chunk) {
-          const { problems, stats } = await runMessageRequests(MESSAGE_REQUEST_SEED + offset, { freshEvery: FULL_SEARCH ? 1 : FRESH_EVERY });
-          for (const f of stats.features) {
-            reached.add(f);
-            if (!MESSAGE_REQUEST_FEATURES.includes(f)) failures.push(`seed ${MESSAGE_REQUEST_SEED + offset} reached "${f}", which is not in MESSAGE_REQUEST_FEATURES`);
-          }
-          if (problems.length > 0) failures.push(`seed ${MESSAGE_REQUEST_SEED + offset}: ${problems.join("; ")}`);
+        const { problems, stats } = await runMessageRequests(MESSAGE_REQUEST_SEED + offset, { freshEvery: FULL_SEARCH ? 1 : FRESH_EVERY });
+        for (const f of stats.features) {
+          reached.add(f);
+          if (!MESSAGE_REQUEST_FEATURES.includes(f)) failures.push(`seed ${MESSAGE_REQUEST_SEED + offset} reached "${f}", which is not in MESSAGE_REQUEST_FEATURES`);
         }
+        if (problems.length > 0) failures.push(`seed ${MESSAGE_REQUEST_SEED + offset}: ${problems.join("; ")}`);
         for (const failure of failures) console.error(failure);
         expect(failures).toEqual([]);
-      }, 1_800_000);
+      }, SEED_LIMIT_MS);
     }
     if (!FULL_SEARCH) {
       test("the fixed seeds reach every message-request behaviour", () => {

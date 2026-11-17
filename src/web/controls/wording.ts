@@ -149,7 +149,9 @@ export function stepWaitWords(why: StepWaitApi, channel: TrackChannelApi): strin
       // In the step's own channel's name (ticket 25): never another channel's.
       return isMessageRequestChannel(channel)
         ? `waiting: no ${SOCIAL_CHANNELS[channel].name} session it may use has an allowance for messages`
-        : "waiting: no LinkedIn session it may use has an allowance for this kind of step";
+        : isSocialChannel(channel)
+          ? `waiting: no ${SOCIAL_CHANNELS[channel].name} session it may use has an allowance for this kind of step`
+          : "waiting: no sender it may use has an allowance for this kind of step";
     case "call_capacity":
       return "waiting for room on your call list, on a day with calling hours";
     case "on_call_list":
