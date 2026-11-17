@@ -79,7 +79,7 @@ describe("migrations 22 and 23 on the integration tip's own database", () => {
       linkedin: { sessions: [{ id: NUMBER, gapMs: 60_000, k: 1, healthy: true, resetZone: "Europe/London" }] },
     });
     const db = (h.store.engine as unknown as { db: DatabaseSync }).db;
-    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: 23 });
+    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: MIGRATIONS.at(-1)?.version });
     expect(db.prepare("SELECT sender_number, recipient_key, channel FROM sms_bindings").all()).toEqual([{ sender_number: NUMBER, recipient_key: MOBILE, channel: "sms" }]);
     // A pair's channel never changes: not by an update, nor by an INSERT OR REPLACE on its key (the re-check of dd3969c, item 3).
     expect(() => db.exec("UPDATE sms_bindings SET channel = 'linkedin'")).toThrow(/never changes/);
