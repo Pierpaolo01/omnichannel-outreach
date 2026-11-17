@@ -299,4 +299,11 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     seed: 11,
     rules: { evaluate: (state, now, options) => DEFAULT_RULES.evaluate(state, now, { ...options, skipTakenConversations: false }) },
   },
+  // L13 (the review bot on 0922582): a LinkedIn track a lead started, removed by a running edit before its first claim, finds
+  // no sender, so its invite waits for ever.
+  "a removed track a lead started finds no sender": {
+    invariant: "L13",
+    seed: 0,
+    rules: { chooseAccount: (state, now, stepId) => (state.campaign.definition.tracks.find((t) => t.steps.some((x) => x.id === stepId))?.removed ? null : DEFAULT_RULES.chooseAccount(state, now, stepId)) },
+  },
 };

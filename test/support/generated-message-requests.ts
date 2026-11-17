@@ -91,6 +91,11 @@ interface Campaign {
   id: string;
   readonly definition: CampaignDefinition;
   readonly ig: TrackDefinition;
+  /**
+   * A second Instagram track beside the first, in half the runs, choosing other sessions (the review bot on 0922582): each
+   * track sends from its own choice, fixed at its own first handover. Its choice is never edited.
+   */
+  readonly ig2: TrackDefinition | null;
   readonly email: TrackDefinition | null;
   readonly sms: TrackDefinition | null;
   readonly li: TrackDefinition | null;
@@ -145,6 +150,8 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
 
   const campaigns: Campaign[] = [];
   const leads: Lead[] = [];
+  // From a stream of its own, so the draws above and below are unchanged.
+  const twoRnd = random(seed ^ 0x1912);
   const campaignCount = rnd() < 0.5 ? 1 : 2;
   let personNo = 0;
   for (let ci = 0; ci < campaignCount; ci++) {
@@ -162,16 +169,25 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
     if (li) features.add("linkedin-beside-instagram");
     const pool = sessions.filter(() => rnd() < 0.7).map((s) => s.id);
     if (pool.length === 0) pool.push(sessions[0]!.id);
+    // A second Instagram track beside it, whose choice differs from the first's: the sessions the first left out, else
+    // another one than the first's first.
+    const others = sessions.filter((x) => !pool.includes(x.id)).map((x) => x.id);
+    const pool2 = others.length > 0 ? others : sessions.filter((x) => x.id !== pool[0]).slice(0, 1).map((x) => x.id);
+    const ig2: TrackDefinition | null =
+      twoRnd() < 0.5 && pool2.length > 0
+        ? { id: `c${ci}-ig2`, channel: "instagram", branch: "main", window: ig.window, steps: [{ id: `c${ci}-n1`, waitDays: 0, subject: "", body: "Another track, {{first_name|there}}.", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false, senders: pool2.map(accountOf) }
+        : null;
+    if (ig2) features.add("two-instagram-tracks-choosing-other-sessions");
     const definition: CampaignDefinition = {
       timezone: "Europe/London",
       callSkipLimitDays: 2,
       emailPool: ["inbox-a"],
       smsPool: sms ? [SMS_NUMBER] : [],
       ...(li ? { linkedinPool: [`linkedin:${LI_SESSION}`] } : {}),
-      // The user's chosen senders, on the Instagram track (ADR 0004 13.5).
-      tracks: [{ ...ig, senders: pool.map(accountOf) }, ...(email ? [email] : []), ...(sms ? [sms] : []), ...(li ? [li] : [])],
+      // The user's chosen senders, on each Instagram track (ADR 0004 13.5).
+      tracks: [{ ...ig, senders: pool.map(accountOf) }, ...(ig2 ? [ig2] : []), ...(email ? [email] : []), ...(sms ? [sms] : []), ...(li ? [li] : [])],
     };
-    campaigns.push({ id: "", definition, ig, email, sms, li });
+    campaigns.push({ id: "", definition, ig, ig2, email, sms, li });
     const people = 2 + Math.floor(rnd() * 4);
     for (let p = 0; p < people; p++) {
       personNo++;
@@ -221,8 +237,16 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
   const restarts = new Map<string, number>();
   const pools = new Map<number, { at: number; pool: readonly string[] }[]>(campaigns.map((c, i) => [i, [{ at: -Infinity, pool: (c.definition.tracks.find((t) => t.id === c.ig.id)?.senders ?? []).map(sessionOf) }]]));
   const poolAt = (ci: number, at: number) => (pools.get(ci) ?? []).filter((x) => x.at <= at).at(-1)?.pool ?? [];
+  /** The sessions an Instagram track of the campaign had chosen at an instant: the first's through its edits, the second's as set. */
+  const trackPoolAt = (ci: number, trackId: string, at: number): readonly string[] => {
+    const c = campaigns[ci]!;
+    return trackId === c.ig.id ? poolAt(ci, at) : trackId === c.ig2?.id ? (c.ig2.senders ?? []).map(sessionOf) : [];
+  };
   const crashedAttempts: string[] = [];
-  const crashed: { subjectId: string; stepId: string; at: number }[] = [];
+  /** Each crash between a handover's commit and its call, with the pair its attempt was for. */
+  const crashed: { subjectId: string; stepId: string; at: number; attemptId: string; sender: string; destination: string }[] = [];
+  /** When the user marked a crashed or lost attempt not sent, by attempt id: from then it holds no pair. */
+  const markedNotSentAt = new Map<string, number>();
   const signedOut: { id: string; from: number; until: number; restored: number | null }[] = [];
   let edited = false;
   let requestNo = 0;
@@ -253,6 +277,22 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
   };
 
   // --- Events.
+  // The review bot on 0922582, from a stream of its own: right after the launch, in half the runs, the user removes the
+  // second Instagram track, which every lead has started and at least one has had nothing of handed over (its window is
+  // closed). Each lead that started it runs it to its end (ADR 0003's running edits): M7 and M8 hold it to that.
+  if (random(seed ^ 0x7e3e)() < 0.5) {
+    for (const c of campaigns) {
+      if (!c.ig2) continue;
+      const mine = leads.filter((l) => campaigns[l.campaign] === c);
+      const reads = await Promise.all(mine.map(async (l) => (await h.request<EnrollmentRead>("GET", `/api/enrollments/${l.id}`)).body.tracks.find((t) => t.trackId === c.ig2!.id)));
+      const waiting = mine.some((l, i) => reads[i]?.finishedAt === null && !h.instagram.handoverLog.some((x) => x.subjectId === l.id && x.trackId === c.ig2!.id));
+      if (!reads.every((t) => t?.started === true || t?.finishedAt != null) || !waiting) continue;
+      const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
+      const r = await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, tracks: stored.tracks.map((t) => (t.id === c.ig2!.id ? { ...t, removed: true } : t)) });
+      if (r.status !== 200) problem(`setup: removing ${c.ig2.id}, which every lead had started, was refused: ${JSON.stringify(r.body).slice(0, 200)}`);
+      else features.add("a-started-instagram-track-removed-before-its-first-claim");
+    }
+  }
   const end = START + 10 * DAY;
   while (h.clock < end && !bounded()) {
     await h.advanceTo(Math.min(end, h.clock + pickOf(rnd, [10 * MIN, 45 * MIN, 3 * H, 9 * H, DAY])));
@@ -336,7 +376,10 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
         const a = st?.attempts.filter((x) => x.idempotencyKey === w.key).at(-1);
         if (!a) continue;
         const went = [h.instagram.deliveryLog, h.fake.deliveryLog, h.smsProvider?.deliveryLog ?? [], h.linkedinProvider?.deliveryLog ?? []].some((log) => log.some((d) => d.key === w.key));
-        if (await h.engine.markAttempt(a.id, went ? "sent" : "not_sent")) features.add("unresolved-marked");
+        if (await h.engine.markAttempt(a.id, went ? "sent" : "not_sent")) {
+          features.add("unresolved-marked");
+          if (!went) markedNotSentAt.set(a.id, h.clock);
+        }
       }
     }
   }
@@ -344,7 +387,8 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
   /** Whether the record knows something of this lead reached the person on Instagram: a delivery, or a call whose outcome is untold. */
   function reachedOnInstagram(lead: Lead): boolean {
     const refused = new Set(h.instagram.refusals.map((r) => r.key));
-    return h.instagram.handoverLog.some((x) => x.subjectId === lead.id && !refused.has(x.key)) || crashed.some((x) => x.subjectId === lead.id && campaigns[lead.campaign]!.ig.steps.some((s) => s.id === x.stepId));
+    const c = campaigns[lead.campaign]!;
+    return h.instagram.handoverLog.some((x) => x.subjectId === lead.id && !refused.has(x.key)) || crashed.some((x) => x.subjectId === lead.id && [...c.ig.steps, ...(c.ig2?.steps ?? [])].some((s) => s.id === x.stepId));
   }
 
   async function extraEvent(roll: number): Promise<void> {
@@ -457,12 +501,14 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
     const ig = h.instagram;
     while (crashed.length < crashedAttempts.length) {
       const a = await h.store.engine.attempt(crashedAttempts[crashed.length]!);
-      crashed.push({ subjectId: a?.subjectId ?? "", stepId: a?.stepId ?? "", at: h.clock });
+      crashed.push({ subjectId: a?.subjectId ?? "", stepId: a?.stepId ?? "", at: h.clock, attemptId: a?.id ?? "", sender: sessionOf(a?.accountId ?? ""), destination: a?.destination ?? "" });
     }
     const refusedKeys = new Map(ig.refusals.map((r) => [r.key, r.reason]));
     const lostKeys = new Set(ig.deliveryLog.filter((d) => d.visibleAt === Infinity).map((d) => d.key));
     const leadOf = (id: string) => leads.find((l) => l.id === id);
     const igTrackOf = (l: Lead) => campaigns[l.campaign]!.ig;
+    /** Every Instagram track of the lead's campaign. */
+    const igTracksOf = (l: Lead) => [campaigns[l.campaign]!.ig, ...(campaigns[l.campaign]!.ig2 ? [campaigns[l.campaign]!.ig2!] : [])];
 
     // The bad marks, by the record: an account the session refused as unreachable, from that refusal on, by the position of
     // the refused handover in the provider's log (two calls can share an instant; the mark comes after its own call).
@@ -490,14 +536,16 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
     for (const x of ig.handoverLog) {
       const l = leadOf(x.subjectId);
       if (!l) continue;
-      const track = igTrackOf(l);
-      // M8: its own channel, its own track; the first from a session the track chose at that instant; every later one from that
-      // same session, chosen still or not (a fixed sender is never reassigned, ADR 0003 1.3, as on LinkedIn).
-      if (x.trackId !== track.id || x.action !== "message") problem(`M8: an Instagram handover for ${x.subjectId} at ${iso(x.at)} is not a message of its Instagram track (${x.trackId}, ${x.action})`);
-      const mine = ig.handoverLog.filter((y) => y.subjectId === x.subjectId);
+      // M8: its own channel, one of its campaign's Instagram tracks; each track's first from a session that track chose at that
+      // instant, never another track's; every later one of the track from that same session, chosen still or not (a fixed
+      // sender is never reassigned, ADR 0003 1.3, as on LinkedIn; per track, the review bot on 0922582).
+      const own = igTracksOf(l).find((t) => t.id === x.trackId);
+      if (!own || x.action !== "message") problem(`M8: an Instagram handover for ${x.subjectId} at ${iso(x.at)} is not a message of one of its Instagram tracks (${x.trackId}, ${x.action})`);
+      const mine = ig.handoverLog.filter((y) => y.subjectId === x.subjectId && y.trackId === x.trackId);
       const first = mine[0]!;
-      if (x === first && !poolAt(l.campaign, x.at).includes(x.sender)) problem(`M8: ${x.subjectId}'s first Instagram message at ${iso(x.at)} went from ${x.sender}, not in its campaign's pool ${poolAt(l.campaign, x.at).join(",")}`);
-      if (x !== first && x.sender !== first.sender) problem(`M8: ${x.subjectId}'s Instagram message at ${iso(x.at)} went from ${x.sender}, after its first from ${first.sender}`);
+      const chosen = trackPoolAt(l.campaign, x.trackId, x.at);
+      if (x === first && !chosen.includes(x.sender)) problem(`M8: ${x.subjectId}'s first message of ${x.trackId} at ${iso(x.at)} went from ${x.sender}, which that track had not chosen (${chosen.join(",")})`);
+      if (x !== first && x.sender !== first.sender) problem(`M8: ${x.subjectId}'s message of ${x.trackId} at ${iso(x.at)} went from ${x.sender}, after that track's first from ${first.sender}`);
       // M2: the destination the record derives, at an instant between launch and the handover; never one marked bad before it.
       const position = ig.handoverLog.indexOf(x);
       const bad = markedBadAt.get(x.destination);
@@ -543,7 +591,9 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
       const was = owner.get(pair);
       if (was !== undefined && was !== x.subjectId) {
         const wasAll = ig.handoverLog.filter((y) => y.subjectId === was && `${y.sender}|${y.destination}` === pair && y.at <= x.at);
-        const released = wasAll.length > 0 && wasAll.every((y) => refusedKeys.has(y.key)) && !crashed.some((c) => c.subjectId === was);
+        // A crash holds the pair it was for until the user marks it not sent (two tracks of one lead use two pairs).
+        const holding = crashed.some((c) => c.subjectId === was && c.sender === x.sender && c.destination === x.destination && !((markedNotSentAt.get(c.attemptId) ?? Infinity) <= x.at));
+        const released = wasAll.length > 0 && wasAll.every((y) => refusedKeys.has(y.key)) && !holding;
         if (!released) problem(`M5: ${x.subjectId} was handed a message to ${x.destination} from ${x.sender} at ${iso(x.at)}, a pair ${was} owns`);
         else owner.set(pair, x.subjectId);
       } else if (was === undefined) owner.set(pair, x.subjectId);
@@ -559,12 +609,15 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
         const [sender, dayText] = k.split("|");
         const day = Number(dayText);
         if (n < (allowance.get(sender!) ?? 0)) continue;
-        const firsts = ig.deliveryLog.filter((d) => d.sender === sender && local(d.at, "Europe/London").day === day && stepIndex(d.subjectId, d.stepId) === 0);
+        // A first contact: the first step of a track to a lead nothing has reached yet, on any channel. A second Instagram
+        // track's first message to a lead its first track reached is a touched lead's, ranked as a follow-up's.
+        const reachedBefore = (subjectId: string, at: number) => [ig.deliveryLog, h.fake.deliveryLog, h.smsProvider?.deliveryLog ?? [], h.linkedinProvider?.deliveryLog ?? []].some((log) => log.some((d) => d.subjectId === subjectId && d.at < at));
+        const firsts = ig.deliveryLog.filter((d) => d.sender === sender && local(d.at, "Europe/London").day === day && stepIndex(d.subjectId, d.stepId) === 0 && !reachedBefore(d.subjectId, d.at));
         for (const f of firsts) {
           for (const g of ig.deliveryLog.filter((d) => d.sender === sender && local(d.at, "Europe/London").day > day && stepIndex(d.subjectId, d.stepId) > 0)) {
             const l = leadOf(g.subjectId);
             if (!l || holdsOf(l).length > 0 || restarts.has(l.id)) continue;
-            const prev = ig.deliveryLog.filter((d) => d.subjectId === g.subjectId && d.at < g.at).at(-1);
+            const prev = ig.deliveryLog.filter((d) => d.subjectId === g.subjectId && d.at < g.at && igTrackOf(l).steps.some((st) => st.id === d.stepId)).at(-1);
             if (!prev || prev.visibleAt === Infinity) continue;
             const step = igTrackOf(l).steps.find((s) => s.id === g.stepId);
             if (!step) continue;
@@ -595,17 +648,20 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
         if (due && !h.fake.deliveryLog.some((d) => d.subjectId === l.id)) problem(`M9: ${l.id}'s email track (${em.start.kind}) sent nothing after the drain, its Instagram track ${track?.finishReason ?? "unfinished"}, status ${read.status}`);
       }
       if (ENDED.has(read.status)) continue;
-      if (track && track.finishedAt === null && track.started) {
-        // The sessions dispatch may use, by the record (ADR 0004 6, 13.6): the fixed one, else the pool less every session
-        // whose pair with the lead's destination another subject owns.
-        const sender = ig.handoverLog.find((x) => x.subjectId === l.id)?.sender;
-        const destination = destinationAt(l, h.clock, ig.handoverLog.length);
-        const eligible = sender ? [sender] : poolAt(l.campaign, h.clock).filter((s) => { const o = owner.get(`${s}|${destination}`); return o === undefined || o === l.id; });
+      for (const t of igTracksOf(l)) {
+        const track = read.tracks.find((x) => x.trackId === t.id);
+        if (!track || track.finishedAt !== null || !track.started) continue;
+        // The sessions dispatch may use, by the record (ADR 0004 6, 13.6): the track's fixed one, else the sessions that track
+        // chose less every session whose pair with the lead's destination another subject owns.
+        const sender = ig.handoverLog.find((x) => x.subjectId === l.id && x.trackId === t.id)?.sender;
+        // The destination fixed at the track's start (M2), not the rule's answer now: a re-import since does not move it.
+        const destination = destinationAt(l, launchedAt, 0);
+        const eligible = sender ? [sender] : trackPoolAt(l.campaign, t.id, h.clock).filter((s) => { const o = owner.get(`${s}|${destination}`); return o === undefined || o === l.id; });
         const zero = eligible.every((s) => (allowance.get(s) ?? 0) === 0);
         const why = track.nextStep?.when.kind === "waits" ? track.nextStep.when.why : track.nextStep?.when.kind ?? "none";
         if (zero && why === "no_allowance") features.add("a-step-waiting-on-a-zero-allowance");
         else if (!(zero && why === "no_allowance") && why !== "lead_paused" && why !== "callback") {
-          problem(`M7: after the drain ${l.id}'s Instagram track is still pending (${why}, status ${read.status}); the record's eligible sessions ${eligible.join(",")} ${zero ? "allow none, so it must read no_allowance" : "have room"}`);
+          problem(`M7: after the drain ${l.id}'s Instagram track ${t.id} is still pending (${why}, status ${read.status}); the record's eligible sessions ${eligible.join(",")} ${zero ? "allow none, so it must read no_allowance" : "have room"}`);
         }
       }
     }
@@ -613,7 +669,10 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
 
   function stepIndex(subjectId: string, stepId: string): number {
     const l = leads.find((x) => x.id === subjectId);
-    return l ? campaigns[l.campaign]!.ig.steps.findIndex((s) => s.id === stepId) : -1;
+    if (!l) return -1;
+    const c = campaigns[l.campaign]!;
+    const at = c.ig.steps.findIndex((s) => s.id === stepId);
+    return at >= 0 ? at : (c.ig2?.steps.findIndex((s) => s.id === stepId) ?? -1);
   }
 }
 

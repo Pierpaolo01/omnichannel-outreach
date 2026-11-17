@@ -244,6 +244,11 @@ const RULES: Record<string, Partial<Rules>> = {
   "a binding lookup ignores the channel": {},
   // The re-check of 8c85b2f, item 1: a cache remembers only its own pairs' destinations (`PATCHES` below).
   "a change to another subject's pair on the same destination does not invalidate a waiting subject": {},
+  // The review bot on 0922582: a track a lead started, removed by a running edit before its first claim, finds no sender,
+  // as an Instagram track's chosen sessions were left unloaded.
+  "a removed track a lead started finds no sender": {
+    chooseAccount: (s, now, stepId) => (s.campaign.definition.tracks.find((t) => t.steps.some((x) => x.id === stepId))?.removed ? null : R.chooseAccount(s, now, stepId)),
+  },
 };
 
 /** Swaps outside the engine's rules (a module seam), applied for a replay and undone after it. */
@@ -297,6 +302,7 @@ const EXPECTED: Record<string, { invariant: string; seed: number }> = {
   "newest due first": { invariant: "12", seed: 3 },
   "a binding lookup ignores the channel": { invariant: "L16", seed: 3 },
   "a change to another subject's pair on the same destination does not invalidate a waiting subject": { invariant: "29", seed: 50 },
+  "a removed track a lead started finds no sender": { invariant: "18", seed: 0 },
 };
 
 export const TRACK_MUTATIONS: Record<string, { readonly rules: Partial<Rules>; readonly invariant: string; readonly seed: number; readonly patch?: () => () => void }> = Object.fromEntries(

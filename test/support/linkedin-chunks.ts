@@ -54,6 +54,7 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "a-skip-of-a-taken-pair",
   "a-skip-of-the-invite",
   "a-skip-while-waiting-for-acceptance",
+  "a-started-linkedin-track-removed-before-its-first-claim",
   "a-step-waiting-on-a-zero-allowance",
   "a-stopped-lead-restarted",
   "a-stuck-withdrawal-marked-by-the-user",

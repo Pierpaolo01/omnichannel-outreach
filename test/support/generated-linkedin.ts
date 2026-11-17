@@ -7,7 +7,7 @@ import { random } from "./generated-sequences.ts";
 import { dueAfter, firstOpen, local, type Hours } from "./sequence-model.ts";
 import type { Rules } from "../../src/server/engine/rules.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../src/domain/sequence/definition.ts";
-import type { LeadSearchResult } from "../../src/shared/api.ts";
+import type { EnrollmentRead, LeadSearchResult } from "../../src/shared/api.ts";
 
 /**
  * The generated LinkedIn runs (ticket 24, ADR 0004 section 10). The real HTTP app, SQLite store and engine run one or two
@@ -365,6 +365,24 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   };
 
   // --- Events.
+  // The review bot on 0922582, from a stream of its own so every other draw is unchanged: right after the launch, in half
+  // the runs, the user removes the LinkedIn track where every lead has started it, at least one has had nothing of it handed
+  // over (its window is closed) and another live track remains with none after it. Each lead that started it runs it to its
+  // end (ADR 0003's running edits), so the record's predictions stand, and a track stranded by the removal fails them.
+  if (random(seed ^ 0x7e3f)() < 0.5) {
+    for (const [ci, c] of campaigns.entries()) {
+      const others = [c.email, c.sms].filter((t): t is TrackDefinition => t !== null);
+      if (others.length === 0 || others.some((t) => t.start.kind === "after")) continue;
+      const mine = leads.filter((l) => l.campaign === ci);
+      const reads = await Promise.all(mine.map(async (l) => (await h.request<EnrollmentRead>("GET", `/api/enrollments/${l.id}`)).body.tracks.find((t) => t.trackId === c.li.id)));
+      const waiting = mine.some((l, i) => reads[i]?.finishedAt === null && !h.linkedin.handoverLog.some((x) => x.subjectId === l.id));
+      if (!reads.every((t) => t?.started === true || t?.finishedAt != null) || !waiting) continue;
+      const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
+      const r = await h.request<{ error?: { code?: string } }>("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, tracks: stored.tracks.map((t) => (t.id === c.li.id ? { ...t, removed: true } : t)) });
+      if (r.status === 200) features.add("a-started-linkedin-track-removed-before-its-first-claim");
+      else if (r.body.error?.code !== "blocked") problem(`setup: removing ${c.li.id}, which every lead had started, was refused: ${JSON.stringify(r.body).slice(0, 200)}`);
+    }
+  }
   const end = START + 12 * DAY;
   let requestNo = 0;
   while (h.clock < end && !bounded()) {

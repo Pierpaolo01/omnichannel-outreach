@@ -256,6 +256,15 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   const removalAt = lateRand() < 0.3 ? { event: lateRand(), campaign: lateRand(), which: lateRand() } : null;
   const mobileChangeAt = lateRand() < 0.35 ? { event: lateRand(), person: lateRand() } : null;
   const interimUntil = lateRand() < 0.25 ? { event: lateRand() } : null;
+  // The review bot on 0922582, from a stream of its own so every earlier draw is unchanged: from this event on, the user
+  // removes a track every lead of its campaign has started and some lead has had nothing of handed over yet. A lead that
+  // started a track runs it to its end whatever the edit (ADR 0003's running edits), so the record's predictions stand
+  // unchanged, and a track stranded by the removal fails them.
+  const removeStartedRand = random(seed ^ 0x7e3d);
+  const removeStartedFrom = removeStartedRand() < 0.5 ? removeStartedRand() : null;
+  /** The tracks the user removed while running, by campaign index: every later save of that campaign keeps them removed. */
+  const removedTracks = new Map<number, Set<string>>();
+  const withRemoved = (ci: number, tracks: readonly TrackDefinition[]) => tracks.map((t) => (removedTracks.get(ci)?.has(t.id) ? { ...t, removed: true } : t));
   // After the reviews of faac357, from the same stream after its earlier draws: the next text to a mobile two campaigns
   // share is never known sent (point 10): accepted then refused by the provider, or never answered. Its binding is
   // unsettled meanwhile, then released as unsent, and the other campaign's lead held on it becomes ready again.
@@ -725,6 +734,34 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
   // made, the mobiles it changed, the claims it saw made and its own upgrade from the interim engine.
 
   /** The SMS pool in force for a campaign at instant `t`: its definition's, as the edits the record made left it by then. */
+  /** Removes, by a running edit, one track every lead of its campaign has started and one lead has had nothing of handed over. */
+  async function removeAStartedTrack(): Promise<void> {
+    for (const [ci, c] of campaigns.entries()) {
+      if (!c.id || c.launchedAt === null) continue;
+      const leads = [...subjects.values()].filter((s) => s.campaign === ci);
+      const live = c.definition.tracks.filter((t) => !removedTracks.get(ci)?.has(t.id));
+      if (leads.length === 0 || live.length < 2) continue;
+      for (const t of live) {
+        if (live.some((o) => o.start.kind === "after" && o.start.trackId === t.id)) continue;
+        const steps = new Set(t.steps.map((st) => st.id));
+        const handed = (id: string) => [...email.handoverLog, ...sms.handoverLog].some((x) => x.subjectId === id && steps.has(x.stepId));
+        const reads = await Promise.all(leads.map(async (l) => (await h.request<EnrollmentProgress>("GET", `/api/enrollments/${l.id}`)).body.tracks.find((p) => p.trackId === t.id)));
+        if (!reads.every((p) => p?.started === true) || leads.every((l) => handed(l.id))) continue;
+        const saved = await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...c.definition, smsPool: poolAt(ci, h.clock), tracks: withRemoved(ci, [...c.definition.tracks, ...c.branch]).map((x) => (x.id === t.id ? { ...x, removed: true } : x)) });
+        if (saved.status !== 200) {
+          // Refused by the running edit's launch check when no sender of the campaign can send now (ticket 19): nothing changed.
+          const code = (saved.body as { error?: { code?: string } }).error?.code;
+          if (code !== "blocked") problem(`setup: removing ${t.id}, which every lead of ${c.id} started, was refused: ${JSON.stringify(saved.body)}`);
+          else features.add("a-started-track-removal-refused-as-blocked");
+          return;
+        }
+        removedTracks.set(ci, new Set([...(removedTracks.get(ci) ?? []), t.id]));
+        features.add(`a-started-${t.channel}-track-removed-before-its-first-claim`);
+        return;
+      }
+    }
+  }
+
   function poolAt(ci: number, t: number): string[] {
     const c = campaigns[ci]!;
     return [...(c.poolEdits.filter((e) => e.at <= t).at(-1)?.pool ?? c.definition.smsPool ?? [])];
@@ -903,13 +940,14 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       if (pool.length >= 2) {
         const next = pool.filter((_, i) => i !== Math.floor(removalAt.which * pool.length));
         // Refused (409) when no number left in the pool can send now: a launch blocker of the running edit (ticket 19).
-        const saved = await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...c.definition, smsPool: next, tracks: [...c.definition.tracks, ...c.branch] });
+        const saved = await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...c.definition, smsPool: next, tracks: withRemoved(ci, [...c.definition.tracks, ...c.branch]) });
         if (saved.status === 200) {
           c.poolEdits.push({ at: h.clock, pool: next });
           features.add("a-number-left-a-pool");
         } else features.add("a-number-removal-refused");
       }
     }
+    if (removeStartedFrom !== null && removedTracks.size === 0 && e >= at(removeStartedFrom) && (!interimUntil || upgradeAt !== null)) await removeAStartedTrack();
     if (mobileChangeAt && e === at(mobileChangeAt.event)) {
       // A later export gives a person a new mobile (newer than the old one, which stays theirs); later SMS tracks text it.
       const candidates = people.filter((p) => p.mobile && !sms.invalid.has(p.mobile) && !sms.invalidAfterSend.has(p.mobile) && campaigns.some((c) => c.id && c.companies.includes(p.company)));
@@ -926,7 +964,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       // The user adds the fourth number to one running campaign's SMS senders (a pool edit stores nothing, ticket 19).
       const c = campaigns[lateCampaign]!;
       const pool = [...poolAt(lateCampaign, h.clock), lateNumber.id];
-      await h.defineSequence(c.id, { ...c.definition, smsPool: pool, tracks: [...c.definition.tracks, ...c.branch] });
+      await h.defineSequence(c.id, { ...c.definition, smsPool: pool, tracks: withRemoved(lateCampaign, [...c.definition.tracks, ...c.branch]) });
       c.joined = { number: lateNumber.id, at: h.clock };
       c.poolEdits.push({ at: h.clock, pool });
       features.add("a-number-joined-a-pool");
@@ -1152,6 +1190,9 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
     const now = h.clock;
     for (const rec of subjects.values()) {
       const def = campaigns[rec.campaign]!.definition;
+      // Tracks are named as the app names them (shared/track-label.ts): a removed one by its place among the live tracks and
+      // itself, the live ones among themselves.
+      const named: CampaignDefinition = { ...def, tracks: withRemoved(rec.campaign, def.tracks) };
       const campaignId = campaigns[rec.campaign]!.id;
       const state = await h.store.engine.subject(rec.id, now);
       if (!state || !campaignId) continue;
@@ -1190,7 +1231,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       };
       const entriesOf = (t: TrackDefinition, start: number): string[] => {
         const out: string[] = [];
-        const label = trackLabel(def, t).label;
+        const label = trackLabel(named, t).label;
         const rule = t.start;
         const before = rule.kind === "after" ? def.tracks.find((x) => x.id === rule.trackId) : undefined;
         if (before) {
@@ -1237,7 +1278,7 @@ async function runTracksUnguarded(seed: number, options: TrackRunOptions): Promi
       for (const t of def.tracks) {
         if (t.channel === "call") continue;
         if (atLaunch) {
-          expected.push(`skipped|${t.channel}|${trackLabel(def, t).label}|-`);
+          expected.push(`skipped|${t.channel}|${trackLabel(named, t).label}|-`);
           continue;
         }
         const start = started(t);

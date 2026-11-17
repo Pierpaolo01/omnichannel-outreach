@@ -13,10 +13,10 @@ import { FULL_SEARCH, inShard } from "./sequence-chunks.ts";
 export const MESSAGE_REQUEST_SEED = 25000;
 /**
  * Offsets from MESSAGE_REQUEST_SEED: a cover of every behaviour below over offsets 0 to 99, all of which passed unmutated
- * on 17 November 2026 after the record pinned each track's destination at its start (the review of f2824d4, item 8; one
- * worker). The first four were the cover before it; 1 adds what the generator's changed draws took from them.
+ * on 17 November 2026 after the second Instagram track and the removal of a started one (the review bot on 0922582; one
+ * worker). 1, 17, 63, 79 and 91 were the cover before; 4 adds what the changed runs took from them.
  */
-export const MESSAGE_REQUEST_FIXED_SEEDS: readonly number[] = [1, 17, 63, 79, 91];
+export const MESSAGE_REQUEST_FIXED_SEEDS: readonly number[] = [1, 4, 17, 63, 79, 91];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const MESSAGE_REQUEST_FEATURES: readonly string[] = [
   "a-campaign-paused",
@@ -41,6 +41,7 @@ export const MESSAGE_REQUEST_FEATURES: readonly string[] = [
   "a-session-with-no-allowance",
   "a-skip",
   "a-step-waiting-on-a-zero-allowance",
+  "a-started-instagram-track-removed-before-its-first-claim",
   "a-started-track-whose-account-a-reimport-replaced",
   "a-stopped-lead-restarted",
   "an-account-changed-by-a-reimport",
@@ -54,6 +55,7 @@ export const MESSAGE_REQUEST_FEATURES: readonly string[] = [
   "sms-beside-instagram",
   "the-laptop-was-off",
   "two-campaigns",
+  "two-instagram-tracks-choosing-other-sessions",
   "two-leads-of-one-company",
   "unresolved-marked",
 ];

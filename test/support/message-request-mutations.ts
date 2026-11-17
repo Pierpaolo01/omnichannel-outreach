@@ -7,6 +7,8 @@ import { end, goodAccount } from "../../src/domain/sequence/progress.ts";
 
 /** The first of offsets 0 to 29 that killed it (17 November 2026). */
 const RETARGET_SEED = 20;
+/** The first of offsets 0 to 29 that killed it (17 November 2026). */
+const BORROWED_SEED = 0;
 import { markedReplyId } from "../../src/domain/sequence/reply-identity.ts";
 import { isMessageRequestChannel } from "../../src/domain/social-channels.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
@@ -59,6 +61,22 @@ function retargeted(s: SubjectState): SubjectState {
   return { ...s, tracks, lead: { ...s.lead, resolved } };
 }
 
+/**
+ * The subject with each message-request track that has no sender yet given another track's of the same channel (M8's
+ * second mutation, the review bot on 0922582): the sender fixed per subject and channel, not per track.
+ */
+function borrowed(s: SubjectState): SubjectState {
+  const stored = s.subject.socialSenders ?? {};
+  const tracks = s.campaign.definition.tracks.filter((t) => isMessageRequestChannel(t.channel));
+  const socialSenders = { ...stored };
+  for (const t of tracks) {
+    if (socialSenders[t.id] !== undefined) continue;
+    const other = tracks.find((o) => o.id !== t.id && o.channel === t.channel && stored[o.id] !== undefined);
+    if (other) socialSenders[t.id] = stored[other.id]!;
+  }
+  return { ...s, subject: { ...s.subject, socialSenders } };
+}
+
 /** Every message-request session with room for anything (M4's mutation): its allowance not read. */
 function unlimited(s: SubjectState): SubjectState {
   const accounts = Object.fromEntries(
@@ -107,7 +125,8 @@ export const MESSAGE_REQUEST_MUTATIONS: Readonly<Record<string, MessageRequestMu
   // M5: a pair another subject owns is ignored, in the account choice and the handover.
   "a taken pair ignored": {
     invariant: "M5",
-    seed: 0,
+    // 3 since M5 holds a pair by a crash on that pair only (the review bot on 0922582); 0 before.
+    seed: 3,
     rules: {
       evaluate: (state, now, options) => DEFAULT_RULES.evaluate(ownPairsOnly(state), now, options),
       chooseAccount: (state, now, stepId) => DEFAULT_RULES.chooseAccount(ownPairsOnly(state), now, stepId),
@@ -147,6 +166,22 @@ export const MESSAGE_REQUEST_MUTATIONS: Readonly<Record<string, MessageRequestMu
       chooseAccount: (state, now, stepId) => DEFAULT_RULES.chooseAccount(unfixed(state), now, stepId),
       handoverFailures: (state, attempt, account, now) => DEFAULT_RULES.handoverFailures(unfixed(state), attempt, account, now),
     },
+  },
+  // M8: a track's sender taken from another track of the same channel, as when it was fixed per subject (review bot on 0922582).
+  "a track's sender taken from another track of the same channel": {
+    invariant: "M8",
+    seed: BORROWED_SEED,
+    rules: {
+      chooseAccount: (state, now, stepId) => DEFAULT_RULES.chooseAccount(borrowed(state), now, stepId),
+      handoverFailures: (state, attempt, account, now) => DEFAULT_RULES.handoverFailures(borrowed(state), attempt, account, now),
+    },
+  },
+  // M7: a track a lead started, removed by a running edit before its first claim, finds no sender, as the chosen sessions of a
+  // removed track were left unloaded (the review bot on 0922582): it waits for ever.
+  "a removed track a lead started finds no sender": {
+    invariant: "M7",
+    seed: 4,
+    rules: { chooseAccount: (state, now, stepId) => (state.campaign.definition.tracks.find((t) => t.steps.some((x) => x.id === stepId))?.removed ? null : DEFAULT_RULES.chooseAccount(state, now, stepId)) },
   },
   // M9: an Instagram track that finishes ends the lead, so the tracks beside and after it stop.
   "a finished Instagram track ends the lead": {
