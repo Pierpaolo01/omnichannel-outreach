@@ -1,5 +1,5 @@
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../src/domain/sequence/definition.ts";
-import { MESSAGE_REQUEST_CHANNELS, type MessageRequestChannel } from "../src/domain/social-channels.ts";
+import { MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type MessageRequestChannel } from "../src/domain/social-channels.ts";
 import type { LeadSearchResult } from "../src/shared/api.ts";
 import { socialAccountId } from "../src/server/engine/ports.ts";
 import { EngineHarness } from "../test/support/engine-harness.ts";
@@ -120,7 +120,7 @@ async function start(on: ScenarioChannels, scenario: MessageRequestScenario): Pr
       if (set.status !== 200) throw new Error(`allowance refused: ${JSON.stringify(set.body)}`);
     }
   }
-  const { campaign } = await h.createCampaign(on === "together" ? "Clinics on Instagram and Facebook" : `Clinics, ${on}`, rows(channels));
+  const { campaign } = await h.createCampaign(on === "together" ? "Clinics on Instagram and Facebook" : `Clinics on ${SOCIAL_CHANNELS[on].name}`, rows(channels));
   await h.tick();
   const leads = async () => (await h.request<LeadSearchResult>("GET", "/api/leads?limit=500")).body.rows;
   const person = async (name: string) => (await leads()).find((r) => r.name === name)?.id ?? "";
