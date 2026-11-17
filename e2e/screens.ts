@@ -2549,14 +2549,14 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
     focused: (page) => page.getByRole("menuitem", { name: "Email track" }),
   },
   {
-    name: "Up on Add track opens its menu on the last item, Phone track",
+    name: "Up on Add track opens its menu on the last item, LinkedIn track",
     open: async (page) => {
       const id = await campaignWith(page, "Focus: menu opens on last");
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
     },
     act: (page) => page.keyboard.press("ArrowUp"),
-    focused: (page) => page.getByRole("menuitem", { name: "Phone track" }),
+    focused: (page) => page.getByRole("menuitem", { name: "LinkedIn track" }),
   },
   // Ticket 14c: phone tracks.
   {
@@ -2565,6 +2565,8 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       const id = await campaignWith(page, "Focus: add a phone track");
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
+      // Up opens the menu on its last item, LinkedIn track (ticket 24b); Phone track is the one above it.
+      await page.keyboard.press("ArrowUp");
       await page.keyboard.press("ArrowUp");
     },
     act: (page) => page.keyboard.press("Enter"),
@@ -2660,11 +2662,13 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
     focused: (page) => page.getByLabel("Email 1 subject"),
   },
   {
-    name: "the win-back branch's Add menu offers email and SMS tracks only, and adding an SMS track moves focus to its text",
+    name: "the win-back branch's Add menu offers no phone track, and adding an SMS track moves focus to its text",
     open: async (page) => {
       const id = await campaignWith(page, "Focus: add a win-back SMS track", WITH_A_BRANCH);
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add win-back track" }).focus();
+      // Email, SMS, then LinkedIn (ticket 24b): Up opens on LinkedIn, and SMS is above it.
+      await page.keyboard.press("ArrowUp");
       await page.keyboard.press("ArrowUp");
     },
     act: (page) => page.keyboard.press("Enter"),

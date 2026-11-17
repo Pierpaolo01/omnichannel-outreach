@@ -207,7 +207,7 @@ test.describe("calls in Before launch", () => {
     const id = await f.freshTwoChannelCampaign("Nothing blocks");
     await page.request.put(`${f.url}/api/campaigns/${id}/sequence`, { data: { ...TWO_CHANNELS, callScript: "Ask who books.", tracks: [...TWO_CHANNELS.tracks, phoneTrack("call", { kind: "entry" })] } });
     await page.goto(`${f.url}/campaigns/${id}/before-launch`);
-    await expect(page.getByText("every email and SMS track has a sender.", { exact: false })).toBeVisible();
+    await expect(page.getByText("every email, SMS and LinkedIn track has a sender.", { exact: false })).toBeVisible();
   });
 
   test("with a win-back branch, a finished estimate says the branch's emails and texts are not counted; never without a live branch, nor with no figure (ticket 16a)", async ({ page }) => {
