@@ -174,3 +174,18 @@ describe("a running edit of the switch (ADR 0004 13.8)", () => {
     expect(await track(c.lead("Pat Oneil"))).toMatchObject({ inmail: "switched_off", finishReason: "invite_not_accepted" });
   });
 });
+
+describe("a first message skipped while waiting for acceptance (the generated runs, seed 24018)", () => {
+  test("the InMail chosen at the expiry stays the pending step, goes, and the follow-ups follow it", async () => {
+    const { h, campaign, delivered, track } = await world();
+    const c = await campaign([linkedin(FALLBACK)]);
+    await h.advanceTo(MONDAY_9 + H);
+    // The user skips the step waiting for acceptance: the first message.
+    expect((await h.request("POST", `/api/enrollments/${c.lead("Pat Oneil")}/controls`, { requestId: "skip-1", action: "skip" })).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + H);
+    expect((await track(c.lead("Pat Oneil")))?.inmail).toBe("sent");
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "im"]);
+    await h.advanceTo(WEDNESDAY_0 + 6 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "im", "m2", "m3"]);
+  });
+});

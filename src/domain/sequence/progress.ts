@@ -268,7 +268,8 @@ export function remainingSteps(state: SubjectState, track: TrackDefinition): str
   const p = progressOf(state, track.id);
   const chosen = p?.inmail === "chosen" || (!rules.inmailWaitsForExpiry && (p?.inmail ?? null) === null);
   const live = (s: TrackDefinition["steps"][number]) => !s.removed || (!rules.inmailOffWhenRemoved && s.role === "inmail" && chosen);
-  return track.steps.filter((s, i) => i > lastResolved && live(s) && !resolved.has(s.id) && (s.role !== "inmail" || chosen)).map((s) => s.id);
+  // A chosen InMail stays ahead whatever was resolved after its place (a first message skipped while waiting: seed 24018).
+  return track.steps.filter((s, i) => (i > lastResolved || (s.role === "inmail" && chosen)) && live(s) && !resolved.has(s.id) && (s.role !== "inmail" || chosen)).map((s) => s.id);
 }
 
 /**
