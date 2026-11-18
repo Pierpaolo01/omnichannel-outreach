@@ -72,7 +72,7 @@ const stepBody = requestObject({
   body: z.string().max(STEP_BODY_MAX),
   threading: z.enum(["new_subject", "continue_thread"]),
   removed: z.boolean().default(false),
-  /** A LinkedIn track's InMail fallback step (ADR 0004 14.2); the validator checks where it may be. */
+  /** A LinkedIn track's InMail fallback step (ADR 0004 15.2); the validator checks where it may be. */
   role: z.literal("inmail").optional(),
 });
 const trackBody = requestObject({
@@ -116,7 +116,7 @@ function definitionFromBody(fields: Omit<z.infer<typeof definitionBody>, "save" 
     ...(linkedinPool !== undefined ? { linkedinPool } : {}),
     tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, acceptWaitDays, senders, steps, ...t }) => ({
       ...t,
-      // A step's role only when it has one, so a definition with none stores exactly as before (ADR 0004 14.2).
+      // A step's role only when it has one, so a definition with none stores exactly as before (ADR 0004 15.2).
       steps: steps.map(({ role, ...st }) => ({ ...st, ...(role !== undefined ? { role } : {}) })),
       ...(declinedPath ? { declinedPath } : {}),
       ...(callSkipLimitDays !== undefined ? { callSkipLimitDays } : {}),

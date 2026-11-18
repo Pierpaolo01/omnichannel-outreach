@@ -106,7 +106,7 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
   // acceptance expiry asks for a withdrawal, so a stop, a reply on any channel, a move to win-back, an ending with no
   // channel left or an edit that removes the track leaves a sent invite open. Said once the track has ended or the lead no
   // longer runs, and only while no withdrawal was asked for: an expiry's withdrawal is said by its own line.
-  // With the InMail fallback chosen, the InMail's own line says the invite stays open (ADR 0004 14.7).
+  // With the InMail fallback chosen, the InMail's own line says the invite stays open (ADR 0004 15.7).
   const fallbackTaken = view.inmail.state === "chosen" || view.inmail.state === "sent";
   if (view.inviteOpen && view.withdrawal === null && !fallbackTaken && (track.finishReason !== null || statusGroup(status) === "handed_to_you" || statusGroup(status) === "ended")) lines.push(INVITE_STILL_OPEN);
   if (view.pendingElsewhereSince) lines.push(`An invite to them was already pending on LinkedIn, not sent by this application (first seen ${dateIn(userZone, view.pendingElsewhereSince)}). This track waits until it is accepted or gone.`);
@@ -114,7 +114,7 @@ export function linkedinTrackLines(track: Pick<TrackProgressView, "channel" | "f
 }
 
 /**
- * The InMail fallback on the record (ticket 27; ADR 0004 14.7), one sentence by its stored facts and nothing more: the InMail
+ * The InMail fallback on the record (ticket 27; ADR 0004 15.7), one sentence by its stored facts and nothing more: the InMail
  * said as gone only once recorded sent, with the session while handed over, to go while chosen; why it did not go, by its
  * stored cause, before the expiry's own line; while still waiting for acceptance with the fallback on, what the end of the
  * wait does. Provisional sentences, for the principal.
@@ -172,12 +172,12 @@ export function inmailLine(view: Pick<LinkedinTrackView, "inmail" | "inviteOpen"
 export const ENDS_AND_ASKS_WITHDRAWAL = "this track ends for them and the app asks LinkedIn to withdraw the invite";
 
 /**
- * The step the InMail replaces, as the inspector and ADR 0004 14.3 both say it (the council on d6ad9f5, item 1): the track's
+ * The step the InMail replaces, as the inspector and ADR 0004 15.3 both say it (the council on d6ad9f5, item 1): the track's
  * first message as the sequence stands when the wait ends, fixed then.
  */
 export const INMAIL_REPLACES = "The InMail replaces the track’s first message as the sequence stands when the wait ends, and no later edit changes which";
 
-/** While a lead waits for acceptance on a track with the fallback on: what the end of the wait does (ADR 0004 14.7). */
+/** While a lead waits for acceptance on a track with the fallback on: what the end of the wait does (ADR 0004 15.7). */
 export const INMAIL_AT_THE_END = "If they haven’t accepted by the end of the wait, an InMail goes instead, if your session can send one then.";
 
 /** Q38's interim, on the record (ADR 0004 3.4), for every ending but the acceptance expiry (council on a6c1700, item 6). */

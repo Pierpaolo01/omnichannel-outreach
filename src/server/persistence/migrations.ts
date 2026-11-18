@@ -1266,19 +1266,30 @@ export const MIGRATIONS: readonly Migration[] = [
   },
   {
     version: 26,
-    name: "the LinkedIn InMail fallback (ticket 27, ADR 0004 section 14): a track's InMail state, which message work is an InMail, and a session's InMail report",
+    name: "Facebook as a message-request channel (ticket 26, ADR 0004 section 14): its row, and the social channel lists",
+    // The second message-request channel: a row the destination triggers and the bad marks read, and the one `addChannel`
+    // rebuild of every CHECK that lists the social channels. Nothing else in the schema names a message-request channel.
+    rebuildsTables: true,
     sql: `
-      -- A track's InMail fallback, judged at the acceptance expiry and moving only forward (ADR 0004 14.3, 14.10).
+      INSERT INTO message_request_channels (name) VALUES ('facebook');
+    `,
+    data: (db) => addChannel(db, "facebook"),
+  },
+  {
+    version: 27,
+    name: "the LinkedIn InMail fallback (ticket 27, ADR 0004 section 15): a track's InMail state, which message work is an InMail, and a session's InMail report",
+    sql: `
+      -- A track's InMail fallback, judged at the acceptance expiry and moving only forward (ADR 0004 15.3, 15.10).
       ALTER TABLE track_progress ADD COLUMN inmail TEXT CHECK (inmail IS NULL OR inmail IN ('chosen', 'sent', 'accepted', 'no_plan', 'no_credit', 'stale_report', 'refused', 'switched_off', 'skipped_by_user'));
       ALTER TABLE track_progress ADD COLUMN inmail_session TEXT;
-      -- The credit a track's InMail holds on its session, by when it was acquired (14.5); the report a judgment read; the
+      -- The credit a track's InMail holds on its session, by when it was acquired (15.5); the report a judgment read; the
       -- step the InMail replaces, named at the choice (council on 8b0c846, items 1, 2, 5, 7, 8).
       ALTER TABLE track_progress ADD COLUMN inmail_hold_wall INTEGER;
       ALTER TABLE track_progress ADD COLUMN inmail_reported_wall INTEGER;
       ALTER TABLE track_progress ADD COLUMN inmail_replaces TEXT;
       CREATE INDEX track_progress_inmail_holdings ON track_progress (inmail_session, inmail_hold_wall) WHERE inmail_hold_wall IS NOT NULL;
       -- A session's InMail standing has a version of its own, beside the conversations' (key 'inmail:' and the session), moved
-      -- by the database in the same write as every fact the standing reads (14.5; the generated runs, seed 24024): a holding
+      -- by the database in the same write as every fact the standing reads (15.5; the generated runs, seed 24024): a holding
       -- acquired or released, a report, an InMail's work sent or settled. A cached evaluation or readiness of a subject whose
       -- InMail is chosen remembers it, so another lead's release or a new report reaches it.
       CREATE TRIGGER inmail_standing_progress_insert AFTER INSERT ON track_progress WHEN NEW.inmail_session IS NOT NULL
@@ -1303,10 +1314,10 @@ export const MIGRATIONS: readonly Migration[] = [
       WHEN EXISTS (SELECT 1 FROM track_progress o WHERE o.subject_id = NEW.subject_id AND o.track_id = NEW.track_id
         AND o.inmail IS NOT NULL AND NEW.inmail IS NOT o.inmail AND NOT (o.inmail = 'chosen' AND NEW.inmail IS NOT NULL))
       BEGIN SELECT RAISE(ABORT, 'a track''s InMail state only moves forward'); END;
-      -- Which message work is an InMail: it spends a credit as well as one of the session's messages (ADR 0004 14.5).
+      -- Which message work is an InMail: it spends a credit as well as one of the session's messages (ADR 0004 15.5).
       ALTER TABLE provider_work ADD COLUMN inmail INTEGER NOT NULL DEFAULT 0 CHECK (inmail IN (0, 1) AND (inmail = 0 OR kind = 'message'));
       ALTER TABLE attempts ADD COLUMN inmail INTEGER NOT NULL DEFAULT 0 CHECK (inmail IN (0, 1) AND (inmail = 0 OR action = 'message'));
-      -- A LinkedIn session's InMail standing, as it last reported it (ADR 0004 14.5): never invented, never cleared by a
+      -- A LinkedIn session's InMail standing, as it last reported it (ADR 0004 15.5): never invented, never cleared by a
       -- listing that omits it.
       ALTER TABLE sender_accounts ADD COLUMN inmail_plan TEXT CHECK (inmail_plan IS NULL OR inmail_plan IN ('premium', 'sales_navigator', 'none'));
       ALTER TABLE sender_accounts ADD COLUMN inmail_credits INTEGER CHECK (inmail_credits IS NULL OR inmail_credits >= 0);

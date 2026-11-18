@@ -183,7 +183,7 @@ function impactOf(state: SubjectState, change: EditChange): LeadImpact {
     case "step_added":
     case "step_removed": {
       const stepId = change.stepId ?? "";
-      // The InMail fallback switched on or off (ADR 0004 14.8): an InMail is ahead of a lead only once the expiry chose it,
+      // The InMail fallback switched on or off (ADR 0004 15.8): an InMail is ahead of a lead only once the expiry chose it,
       // so a lead still waiting for acceptance, the expiry not judged, is one it may reach: said as that condition.
       const inmail = track.steps.find((s) => s.id === stepId)?.role === "inmail";
       if (inmail && (change.kind === "step_added" || change.kind === "step_removed") && (p?.inmail ?? null) === null && (p?.connection ?? null) === null) return change.kind === "step_added" ? "may_reach" : "may_skip";

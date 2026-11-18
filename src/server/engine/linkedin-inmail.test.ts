@@ -11,7 +11,7 @@ import type { OutreachStatus } from "../../domain/outreach-status.ts";
 import { linkedinTrackLines } from "../../web/campaign/linkedin-wording.ts";
 
 /**
- * The InMail fallback (ticket 27, ADR 0004 section 14) through the real HTTP app, SQLite store and engine, against the
+ * The InMail fallback (ticket 27, ADR 0004 section 15) through the real HTTP app, SQLite store and engine, against the
  * simulated LinkedIn provider. No LinkedIn session is connected: the simulated sessions script their own InMail standing
  * (plan and credits) as a session would report it. Every profile URL here is fictitious.
  */
@@ -63,7 +63,7 @@ async function world(inmailStanding: FakeSession["inmail"] | null = { plan: "pre
   return { h, campaign, delivered, track, results };
 }
 
-describe("the fallback on, a session that reports Premium with credits (ADR 0004 14.3)", () => {
+describe("the fallback on, a session that reports Premium with credits (ADR 0004 15.3)", () => {
   test("at the expiry one InMail goes, the invite stays open, the first message is not sent, and the follow-ups follow the InMail", async () => {
     const { h, campaign, delivered, track, results } = await world();
     const c = await campaign([linkedin(FALLBACK)]);
@@ -117,7 +117,7 @@ describe("the fallback on, a session that reports Premium with credits (ADR 0004
   });
 });
 
-describe("a session that cannot send an InMail at the expiry (ADR 0004 14.3, 14.5; question Q51)", () => {
+describe("a session that cannot send an InMail at the expiry (ADR 0004 15.3, 15.5; question Q51)", () => {
   test("a session that reports no Premium or Sales Navigator: the invite is withdrawn and the track ends, with why", async () => {
     const { h, campaign, delivered, track } = await world({ plan: "none", credits: 0 });
     const c = await campaign([linkedin(FALLBACK)]);
@@ -147,7 +147,7 @@ describe("a session that cannot send an InMail at the expiry (ADR 0004 14.3, 14.
   });
 });
 
-describe("the recipient refuses the InMail (ADR 0004 14.3; question Q55)", () => {
+describe("the recipient refuses the InMail (ADR 0004 15.3; question Q55)", () => {
   test("a failure with its own cause; the profile stays good; the track takes the withdrawal path", async () => {
     const { h, campaign, track, results } = await world();
     h.linkedin.profiles.set(PAT, { refusesInmail: true });
@@ -165,7 +165,7 @@ describe("the recipient refuses the InMail (ADR 0004 14.3; question Q55)", () =>
   });
 });
 
-describe("a running edit of the switch (ADR 0004 14.8)", () => {
+describe("a running edit of the switch (ADR 0004 15.8)", () => {
   test("switched off while the InMail is chosen and not yet handed over: it is not sent, and the track takes the withdrawal path", async () => {
     const { h, campaign, delivered, track } = await world();
     const c = await campaign([linkedin(FALLBACK, OFFICE)]);
@@ -194,7 +194,7 @@ describe("a first message skipped while waiting for acceptance (the generated ru
   });
 });
 
-describe("a chosen InMail that cannot go yet, and one the user skips (ADR 0004 14.3)", () => {
+describe("a chosen InMail that cannot go yet, and one the user skips (ADR 0004 15.3)", () => {
   test("its session's credits spent by hand after the expiry chose it: it waits, said with its reason and no time", async () => {
     const { h, campaign, delivered, track } = await world({ plan: "premium", credits: 1 });
     const c = await campaign([linkedin(FALLBACK, OFFICE)]);
@@ -271,7 +271,7 @@ describe("the review bot on b49a71b", () => {
   });
 });
 
-describe("credits held by named work (council on 8b0c846, items 2, 7 and 8; ADR 0004 14.5)", () => {
+describe("credits held by named work (council on 8b0c846, items 2, 7 and 8; ADR 0004 15.5)", () => {
   const SAM = "https://www.linkedin.com/in/fictional-sam-lee";
   const THREE = [...PEOPLE, person({ person_id: "p3", business_id: "b1", full_name: "Sam Lee", linkedin_url: SAM })];
   type Read = { tracks: { trackId: string; nextStep: { when: { kind: string; why?: string; inmail?: string } } | null }[] };

@@ -1,5 +1,5 @@
 import type { MessageRequestTrackView, TrackDefinition, TrackProgressView } from "../../shared/api.ts";
-import { capitalANameOf, isMessageRequestChannel, SOCIAL_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
+import { capitalANameOf, isMessageRequestChannel, MESSAGE_REQUEST_SENDER_KINDS, SOCIAL_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
 
 /**
  * A message-request track's facts on the record (ticket 25; ADR 0004 13.3, 13.4), one sentence each, from what the engine
@@ -14,7 +14,8 @@ export function messageRequestTrackLines(track: Pick<TrackProgressView, "channel
   const lines: string[] = [];
   if (track.finishReason === "skipped_missing_channel") return [skipLine(view.skipCause, track.channel)];
   const whose = view.destination === "company" ? `their company’s ${name} account` : `their own ${name} account`;
-  const from = view.sender === null ? "" : view.sender.kind === "business" ? " from your business session" : view.sender.kind === "personal" ? " from your personal session" : "";
+  // The session's kind in the channel's own words (a business account on one platform, a Page on another), from the registry.
+  const from = view.sender === null || view.sender.kind === null ? "" : ` from ${MESSAGE_REQUEST_SENDER_KINDS[track.channel][view.sender.kind].yours}`;
   if (view.firstMessage === "sent") lines.push(`The first message went to ${whose}${from}, as a message request if they don’t follow you. ${name} doesn’t tell the app whether it was accepted or read.`);
   else if (view.firstMessage === "handed") lines.push(`The first message to ${whose} is with the ${name} session, which hasn’t confirmed whether it went.`);
   else if (view.destination !== null) lines.push(`Messages go to ${whose}.`);
@@ -56,15 +57,19 @@ export function messageRequestNote(channel: MessageRequestChannel): string {
  * What limits a message-request track's messages, for the inspector (ADR 0004 13.4 to 13.7), with how many first messages one
  * company's account can get from this track: one per chosen session, each about a different lead (question Q46).
  */
-export function messageRequestLimits(name: string, sessionsChosen: number): string[] {
+export function messageRequestLimits(channel: MessageRequestChannel, sessionsChosen: number): string[] {
+  const name = SOCIAL_CHANNELS[channel].name;
+  const kinds = MESSAGE_REQUEST_SENDER_KINDS[channel];
   const upTo = sessionsChosen <= 1 ? "one first message from this track: the first lead to reach it keeps it, and the others are skipped here" : `up to ${sessionsChosen} first messages from this track, one from each session you chose, each about a different lead`;
   return [
     `Messages go to the decision maker’s own ${name} account from the import, else to their company’s. A lead with neither skips this track, and the tracks after it start.`,
     `Each session sends only within the messages a day you allow it; with none set, it sends nothing. Follow-ups go before first messages.`,
     `People at one company with no account of their own share their company’s account, which can get ${upTo}. An account another campaign already reached from the same session is skipped here, and who reached it is named on the record.`,
-    `A personal profile and a business account are used alike; if ${name} refuses a message, the track ends for that lead and says so.`,
+    `${capitalised(kinds.personal.aName)} and ${kinds.business.aName} are used alike; if ${name} refuses a message, the track ends for that lead and says so.`,
   ];
 }
+
+const capitalised = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 
 /**
  * Before launch's warnings for a message-request channel (ADR 0004 13.4; question Q46), from the read's counts: the leads with

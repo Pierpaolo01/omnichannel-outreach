@@ -71,7 +71,7 @@ function flag<K extends Flag>(name: K, value: (typeof progressRules)[K]): () => 
   };
 }
 
-/** The InMail mutations' killing seed offsets (ticket 27), searched again over offsets 0 to 50 after the council's draws; ADR 0004 14.16 records them. */
+/** The InMail mutations' killing seed offsets (ticket 27), searched again over offsets 0 to 50 after the council's draws; ADR 0004 15.16 records them. */
 const INMAIL_SEEDS = { L18: 40, L19: 16, L20: 0, L21: 18, L22: 3, L23: 5, L24: 42, L25: 16, replaced: 0, restart: 93, handover: 18, movedBefore: 40, settledUnsent: 7, byPlace: 27, settledAcceptance: 32 } as const;
 
 /** The seed offset that reaches a step no session has any allowance for (the search's 24015 on a6c1700). */
@@ -312,7 +312,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     rules: {},
     patch: flag("conversationKeysOwnOnly", true),
   },
-  // The InMail fallback (ticket 27, ADR 0004 14.11): one mutation per invariant L18 to L25. Their seeds are recorded in 14.11.
+  // The InMail fallback (ticket 27, ADR 0004 15.11): one mutation per invariant L18 to L25. Their seeds are recorded in 15.11.
   // L18: an InMail already sent is offered again as ready, claimed and handed over again.
   "an InMail sent is sent again": {
     invariant: "L18",
@@ -382,7 +382,7 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     rules: {},
     patch: flags({ switchOffReachesChosen: false }),
   },
-  // The council on 8b0c846 (items 1, 7 and 8; ADR 0004 14.5, 14.15).
+  // The council on 8b0c846 (items 1, 7 and 8; ADR 0004 15.5, 15.15).
   // L23: the step the InMail replaces is found among the live steps at its send, so a follow-up an edit promoted is skipped.
   "the replaced step is found among the live steps at the handover": {
     invariant: "L23",

@@ -174,7 +174,7 @@ export function whatItDoes(change: EditImpactChange, paused: boolean, draft?: Ca
   if (change.reaches > 0) parts.push(`${plural(change.reaches, "lead", "leads")} ${change.kind === "step_wait" && draft ? stepWaitReach(change, draft) : reachWording(change.kind, paused)}`);
   if (change.skips > 0) parts.push(`${plural(change.skips, "lead", "leads")} not there yet will skip it`);
   if (change.inFlight > 0) parts.push(`${plural(change.inFlight, "lead has", "leads have")} it with the provider now, so it goes as it was`);
-  // The InMail fallback switched on or off for leads still waiting for acceptance: a condition, never a promise (14.8).
+  // The InMail fallback switched on or off for leads still waiting for acceptance: a condition, never a promise (15.8).
   if (change.mayReach > 0) parts.push(`${plural(change.mayReach, "lead", "leads")} still waiting for acceptance will get the InMail if the invite is not accepted in time and your session can send one then`);
   if (change.maySkip > 0) parts.push(`${plural(change.maySkip, "lead", "leads")} still waiting for acceptance won’t get an InMail: if the invite is not accepted in time, ${ENDS_AND_ASKS_WITHDRAWAL}`);
   if (change.untouched > 0) {

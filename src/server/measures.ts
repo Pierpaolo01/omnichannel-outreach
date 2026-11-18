@@ -162,7 +162,7 @@ export const MEASURE_RULES: MeasureRules = {
     return {
       invitesSent: each(sent.filter((a) => a.action === "invite")),
       invitesAccepted: tally(facts.acceptances ?? [], (a) => `${a.subjectId}\u0000${a.trackId}`),
-      // InMails apart from messages (ADR 0004 14.6): an InMail is message work, counted by what it was sent as.
+      // InMails apart from messages (ADR 0004 15.6): an InMail is message work, counted by what it was sent as.
       inmailsSent: each(sent.filter((a) => a.action === "inmail")),
       messagesSent: each(sent.filter((a) => a.action === "message")),
       failed: tally(facts.failures.filter((f) => f.channel === "linkedin"), (m) => `${m.subjectId}\u0000${m.stepId}`),

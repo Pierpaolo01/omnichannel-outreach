@@ -55,10 +55,10 @@ export function launchCheck(def: CampaignDefinition, leads: readonly MergeData[]
   for (const track of tracks) {
     if (track.channel === "call") continue;
     liveSteps(track).forEach((step) => {
-      // A LinkedIn InMail is named by its role and numbers no other step (ADR 0004 14.9): the number reads give it.
+      // A LinkedIn InMail is named by its role and numbers no other step (ADR 0004 15.9): the number reads give it.
       const i = stepNumber(track, step.id) - 1;
       // A LinkedIn invite with no note is a plain invite, a choice, not empty copy (ADR 0004 3.1). An InMail with no text is
-      // empty copy (14.2): a switched-on fallback without text is a mistake to fix.
+      // empty copy (15.2): a switched-on fallback without text is a mistake to fix.
       if (linkedinStepKind(track, step.id) === "invite") return;
       if (track.channel === "email" && step.threading === "new_subject" && step.subject.trim() === "") {
         blockers.push({ kind: "empty_copy", trackId: track.id, stepId: step.id, stepNumber: i + 1, part: "subject", message: `Email ${i + 1} has no subject.` });

@@ -86,7 +86,7 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
         const unhandled: never = step.channel;
         throw new Error(`A step on a channel with no name: ${String(unhandled)}`);
       }
-      // The InMail fallback keeps its capitals: "the InMail" (ADR 0004 14.9).
+      // The InMail fallback keeps its capitals: "the InMail" (ADR 0004 15.9).
       if (step.channel === "linkedin" && step.role === "inmail") return `${step.track.branch === "win_back" ? "the win-back InMail" : "the InMail"}${on}`;
       const title = lower(stepTitle(step.track, step.channel, step.number));
       return `${title.startsWith("follow-up") ? title : `the ${title}`}${on}`;
@@ -162,7 +162,7 @@ export function stepWaitWords(why: StepWaitApi, channel: TrackChannelApi): strin
       return "waiting for them to accept the LinkedIn invite";
     case "invite_pending_elsewhere":
       return "on hold: an invite to them is already pending on LinkedIn that this application didn’t send";
-    // ADR 0004 14.3: the InMail the wait's end chose, whose session can't send it now by its own report. No time.
+    // ADR 0004 15.3: the InMail the wait's end chose, whose session can't send it now by its own report. No time.
     case "inmail_unavailable":
       return "waiting: your LinkedIn session can’t send an InMail now";
     default: {
@@ -172,7 +172,7 @@ export function stepWaitWords(why: StepWaitApi, channel: TrackChannelApi): strin
   }
 }
 
-/** Why a chosen InMail can't go now, as of its session's latest report (ADR 0004 14.5); none promises when it will. */
+/** Why a chosen InMail can't go now, as of its session's latest report (ADR 0004 15.5); none promises when it will. */
 function inmailUnavailableWords(cause: NonNullable<Extract<StepWhenView, { kind: "waits" }>["inmail"]>, reportedAt: string | undefined, userZone: string): string {
   const asOf = reportedAt ? ` (as your session last reported on ${dateIn(userZone, reportedAt)})` : "";
   switch (cause) {

@@ -1,7 +1,7 @@
 # 0004. Social channel tracks: LinkedIn, then Instagram and Facebook
 
 - **Date:** 2026-11-16.
-- **Status:** Proposed. Written by the ticket 24 implementer before the code (delivery workflow, "Design first"). The council reviews it with part a's pull request. Section 13 (Instagram, and Facebook as its second instance) added by the ticket 25 implementer on 17 November 2026, before its code.
+- **Status:** Proposed. Written by the ticket 24 implementer before the code (delivery workflow, "Design first"). The council reviews it with part a's pull request. Section 13 (Instagram, and Facebook as its second instance) added by the ticket 25 implementer on 17 November 2026, before its code. Section 14 (Facebook) added by the ticket 26 implementer on 17 November 2026.
 - **Consumers:** tickets [24](https://github.com/Pierpaolo01/omnichannel-outreach/issues/24) (LinkedIn, this design worked in full), [25](https://github.com/Pierpaolo01/omnichannel-outreach/issues/25) (Instagram), [26](https://github.com/Pierpaolo01/omnichannel-outreach/issues/26) (Facebook) and [27](https://github.com/Pierpaolo01/omnichannel-outreach/issues/27) (the InMail fallback, which attaches at one point named in 4.4).
 - **Builds on:** [ADR 0003](0003-sequence-engine.md), every rule of which a social track keeps unless this ADR says otherwise: one definition, lead time and stored deadlines, the claim and the handover transaction with its predicates, the attempt table (5.3), capacity counted per provider work, pacing at every send call, priority (4.3), quiesce, holds, the reads that say when, test runs as subjects, and the generated-run discipline. [ADR 0002](0002-email-through-instantly.md) is the model for how a provider limitation is recorded.
 - **Product source:** [the social decision](https://github.com/Pierpaolo01/omnichannel-outreach/issues/9#issuecomment-6823218555), quoted in each ticket. The [research](https://github.com/Pierpaolo01/omnichannel-outreach/blob/789af21/docs/research/social-first-contact.md) states the platforms' documented behaviour. Everything else is a factory decision and says so.
@@ -112,7 +112,7 @@ The pending step after a sent invite is the first message, with **no due time** 
 | The pre-send check answers `not_connected` | The handover goes on as ADR 0003 5.5 says. |
 | The invite is sent (observed, by lookup, or the user's "mark sent") | The `sent` result, the lead touched (ADR 0003 1.3: it was reached), and `accept_by` resolved from the send point. The first message waits for acceptance. |
 | Acceptance observed, at platform time `t` | If the track is unfinished, awaiting acceptance, and `leadAt(t) < accept_by`: `connection = accepted` at that point, and the first message resolved from it. Otherwise it is recorded as a fact (the measure counts it) and changes nothing: a finished track never restarts (ADR 0003 invariant 6). An acceptance reported for work not yet recorded as sent first records the invite's send at `t` (it was sent if it was accepted), then the acceptance. |
-| Lead time reaches `accept_by` with no connection | The **acceptance expiry**, in evaluation (2.6), before the next steps: with the fallback off, or on with a session not eligible (section 14), `invite_withdrawal = wanted` and the track finishes `invite_not_accepted` at `accept_by` (lead time and the wall instant it stood at), so what waits on it starts after its delay from then. The lead's other tracks carry on; the endings are checked after it (ADR 0003 2.1). |
+| Lead time reaches `accept_by` with no connection | The **acceptance expiry**, in evaluation (2.6), before the next steps: with the fallback off, or on with a session not eligible (section 15), `invite_withdrawal = wanted` and the track finishes `invite_not_accepted` at `accept_by` (lead time and the wall instant it stood at), so what waits on it starts after its delay from then. The lead's other tracks carry on; the endings are checked after it (ADR 0003 2.1). |
 | The worker's withdrawal pass | For each track with `invite_withdrawal = wanted`, not asked within `SETTLING`, the port's `withdrawInvite` with the invite's work: `withdrawn` sets `withdrawn`; `already_accepted` sets `accepted_first` and records the acceptance as a fact; `unknown` is asked again a settling period later. Asked while the lead is held or ended too: withdrawing sends nothing to the prospect. |
 | A message is sent | As any step: its successor resolves from the send. |
 | A message refused `not_connected` | The track finishes `failed_bad_destination`, the profile not marked bad (Q37). |
@@ -451,34 +451,184 @@ As section 12 for LinkedIn: no Instagram session is connected and no test accoun
 3. **Wording.** The inspector says what two tracks of one lead on two sessions do (13.6; Q46 is with the principal). Before launch gives the shared-account limit per track. Both "Blocks launch" sentences come from one exhaustive record over the domain's blocker kinds.
 4. **The article** before a channel's name is the registry's `aName`. The generated coverage is Instagram's (13.2), and ticket 26 parameterises it.
 
-## 14. The InMail fallback (ticket 27)
+## 14. Facebook, the second message-request channel (ticket 26)
+
+Added by the ticket 26 implementer on 17 November 2026. Facebook is the second instance of section 13's message-request channel: an entry in the registry and what that entry needs, not a copy of Instagram's code. Everything in section 13 holds for Facebook as written, with "Instagram" read as the channel. This section says only what differs, what had to change outside the registry and why, and how the tests show it.
+
+### 14.1 What is the same
+
+By reference, unchanged: the track and its step kinds (13.3), the destination rule and the skip causes (13.4, apart from the normaliser), the per-track sender choice, its fixing at the track's first handover and the removed track that keeps its sessions (13.5), ownership of a conversation (13.6), allowances, capacity, priority, windows and interruption (13.7), the reply mark, test runs and measures (13.8), invariants M1 to M10 and 29 (13.9), and the unconnected port in the running application. No session of either channel is connected, so a Facebook track meets launch blocker 3 exactly as an Instagram track does, and `GET /api/social-providers` says "No Facebook session is connected, so Facebook tracks cannot launch."
+
+### 14.2 The registry entry
+
+| Fact | Where | Facebook |
+| - | - | - |
+| The channel | `MessageRequestChannel`, `MESSAGE_REQUEST_CHANNELS` | `"facebook"`, after Instagram |
+| Its name, and with its article | `SOCIAL_CHANNELS.facebook.name`, `.aName` | Facebook, "a Facebook" |
+| Its account normaliser | `.accountKey` | `facebookAccountKey` (14.3) |
+| Its account id prefix | `.accountPrefix` | `facebook:` |
+| What its address is called | `.addressNoun` | profile ("Your Facebook profile, for the messages"; the ticket says "the user's own Facebook profile") |
+| A fictitious example address | `.exampleAddress` | `https://www.facebook.com/your.name` |
+| Its CSV columns | `MESSAGE_REQUEST_COLUMNS.facebook` | people `facebook` (absent from the verified schema: Q43 applies), businesses `facebook` |
+| Its sender kinds in words | `MESSAGE_REQUEST_SENDER_KINDS` (new) | personal: "a personal profile", "your personal profile"; business: "a Page", "your Page" |
+| Its icon | `web/icons.tsx` | a person with a small message beside them, not the platform's mark |
+| Its store row | migration 26 | `message_request_channels` row and one `addChannel(db, "facebook")` |
+
+`MESSAGE_REQUEST_SENDER_KINDS` is the one fact that had to be added to the registry: section 13 hard-coded "a business account" and "your business session" in three places (the inspector's sender list, the record's first-message sentence and the inspector's limits). On Facebook a business sender is a Page, so those words are now the registry's, per channel, through an exhaustive record. The session kind stays `personal | business` in the store and the API (`sender_accounts.social_kind`); only its words differ.
+
+### 14.3 The normaliser, and the address table
+
+Rewritten after the council on `f3c9014` (item 1), before its code. The class of fault is **one account, several keys**. The review bot's period finding was one example; an address that carries an account's number was another. This section closes the class as far as the application can: every form it can read is in the table below with what it is read as. The two readings are each one registry fact per channel (`SOCIAL_CHANNELS[c].accountKey`, `MESSAGE_REQUEST_MAY_NAME[c]`).
+
+**Two readings, two directions of error.**
+- **`accountKey`, what a track messages.** It gives the one key of an account the application can open, or null, which reads as missing. Missing is its safe side: a lead is skipped rather than messaged at an address the app cannot read.
+- **`mayName`, what the test-contact boundary reads.** It gives every key an imported cell may name. It is a superset of `accountKey`: it adds the forms the app never messages but that plainly carry an account's username or number. A user's test contact is refused when any person's or company's cell may name its key, both when it is saved and when a test run starts. Refusing a test contact is the safe side here, so where two forms could be one account and the app cannot know, this reading treats them as one.
+- **Ownership and bad marks** read `accountKey` alone. They never merge accounts the app cannot show are one.
+
+**Facebook** (`facebookAccountKey`, `facebookMayName`; `N` is an account's number, digits only, read without leading zeros):
+
+| Form | `accountKey` (messaged; ownership; bad marks) | `mayName` (test-contact boundary) |
+| - | - | - |
+| `facebook.com/<username>` on any host of the hosts row, with or without a trailing slash, query or fragment | `facebook.com/<username>`, lower-cased, periods dropped (Facebook's documented rule: periods and capitals do not tell usernames apart) | the same |
+| `facebook.com/N` | `facebook.com/profile.php?id=N` | the same |
+| `facebook.com/profile.php?id=N` (other parameters dropped) | `facebook.com/profile.php?id=N` | the same |
+| `facebook.com/<name>-N`: a Page with no username; a username has no hyphen, so the trailing digits (five or more) are its number | `facebook.com/profile.php?id=N` | the same |
+| `facebook.com/<name>-<text>`, or a name ending in fewer than five digits after a hyphen: no username and no number | not an account | not an account |
+| `facebook.com/pages/<name>/N`, `facebook.com/people/<name>/N` | not an account (Q48's interim) | `facebook.com/profile.php?id=N` |
+| `facebook.com/<username or N>/<more>`, such as `/about` or `/posts/1` | not an account | the key of its first segment, by the rows above |
+| a bare `@<username>` or `<username>` with no URL | not an account (profile URLs only) | `facebook.com/<username>` as above |
+| **Hosts** that are only other names for facebook.com with the same path: `facebook.com`, `www.`, `m.`, `mbasic.`, `web.`, a locale such as `en-gb.` or `de-de.`, and `fb.com` | every row above reads the same on each: the same account (the safe side for the test-contact check too) | the same |
+| `business.facebook.com` (the business tools, not a profile), `fb.me/<…>` and `m.me/<…>` (short links whose target the application cannot know), any other subdomain or host | not an account | not an account |
+| `facebook.com/me` (whoever is signed in), the site's own sections (`groups`, `events`, `watch`, `marketplace`, `login`, `share`, `sharer`, `photos`, `help` and the rest in the code), a name ending `.php` | not an account | not an account |
+| any other host, empty, not a URL | not an account | not an account |
+
+**A username and a number are two keys.** A Page or profile with a username also has a number. Nothing in an address joins the two: `facebook.com/exampleharbour` and `facebook.com/profile.php?id=N` may be one account, and only a session opening them could tell. The application keys them apart everywhere. For ownership and bad marks this errs toward two accounts: the account may get a first message from the same session for two leads, which Q46 already raises. For the test-contact boundary it errs toward allowing a test contact that is a prospect's account under its other form, so the application says so where it matters (the council on `f3c9014`, item 1a). One sentence from the registry (`MESSAGE_REQUEST_TEST_CONTACT_LIMIT`) appears under the Facebook test contact field, and beside **Run test** while the sequence has a Facebook step. It says that the application compares addresses as written, cannot tell that a username and a number are one account, and that the user must give their own account. This joins Q48 below: the same limit applies to `/pages/` and `/people/` forms, which carry only the number.
+
+**Instagram has no such pair.** Its addresses carry only the username: no public form names an account by its number, so every form the table reads keys to the username. No sentence is shown for Instagram (its registry entry is null).
+
+**Instagram** (`instagramAccountKey` as 13.4, `instagramMayName`):
+
+| Form | `accountKey` | `mayName` |
+| - | - | - |
+| `instagram.com/<username>` on `www.`, `m.` or no subdomain, any case, trailing slash, query, fragment | `instagram.com/<username>`, lower-cased (periods kept: on Instagram they are part of the name) | the same |
+| `instagram.com/<username>/<more>`, such as `/reels` or `/tagged` | not an account | the key of its first segment |
+| a bare `@<username>` | not an account (profile URLs only) | `instagram.com/<username>` |
+| any host other than `instagram.com`, `www.` and `m.` (`instagr.am`, other subdomains) | not an account | not an account |
+| the site's own sections (13.4), any other host, empty | not an account | not an account |
+
+Measured against the real businesses export on 17 November 2026, by aggregate counts only: 12 rows; 7 one-segment `www.facebook.com/<name>`, 1 `profile.php?id=`, 1 a six-segment path holding `pages`, and 3 empty. `accountKey` reads 8 as accounts. The people file has no Facebook column.
+
+### 14.4 The sender
+
+The user chooses each Facebook track's sessions, each a personal profile or a Page, in the inspector, as on Instagram (13.5); each session is shown with its kind in Facebook's words. What each kind can message is the platform's, and the application assumes none of it. The research documents that a personal profile can message someone who is not a friend, into Message Requests, and that blocking can prevent delivery; that eligible Pages can send up to 10 new message requests a day to people and Pages, with availability gradual and eligibility conditions on sender and recipient; and that Messenger's business API needs a qualifying interaction first, which this app does not use. So, as on Instagram: any chosen session of either kind may be used for any account; the platform's refusal is reported (`not_allowed`, the account not marked bad, Q44); and no limit is set by the app (Q47, Q49).
+
+### 14.5 The store
+
+Migration 26, the next number after the integration tip's 25: one row in `message_request_channels` and `addChannel(db, "facebook")`, which widens the four CHECKs that list the social channels (`sender_accounts.channel`, `replies.channel`, the stopping reply's channel on enrollments and test runs) and `sms_bindings.channel`, rebuilding each from its own stored text with its indexes, views and triggers. The destination triggers and the bad marks read `message_request_channels`, so they take a Facebook account by that row. `migration-26.test.ts` upgrades a version-25 database holding Instagram rows. Should pull request 71 (InMail) land first, this migration takes the next number when the integration tip is merged.
+
+### 14.6 Two channels in one campaign
+
+A lead with an Instagram track and a Facebook track has two conversations: each track goes to that channel's account, from that channel's session, through that channel's pair, allowance and reply mark. Nothing is read across channels. The account ids carry the channel (`instagram:<session>`, `facebook:<session>`) even where the platform's session ids are the same, a pair stores its channel (`sms_bindings.channel`), and a reply mark is allowed only where something reached the person on its own channel. A mark on either channel ends the lead in the campaign, as any reply does (section 7), so both tracks stop. Shown through HTTP in `message-request-channels.test.ts` ("Instagram and Facebook in one campaign"): the same session id on both channels; an account taken on Instagram leaves the lead's Facebook track free; each channel's allowance is its own; a mark refused on the channel nothing reached and accepted on the other. In the browser by `e2e/message-requests.spec.ts`.
+
+### 14.7 The tests, parameterised by channel
+
+- **Through HTTP:** `src/server/engine/instagram.test.ts` is now `message-request-channels.test.ts`: every one of its 23 cases runs once per message-request channel, with each channel's sentences written out by hand in the test, then the three joint cases above. `removed-started-track.test.ts`, `claimed-not-handed.test.ts` and `session-pacing.test.ts` run on every message-request channel. `test/support/message-request-accounts.ts` gives each channel's fictitious account forms, written by hand, never through the production normaliser.
+- **The harness:** `EngineHarness`'s `instagram` option and getter are now `social: { [channel]: { sessions } }` and `h.social(channel)`; the engine and app take every simulated provider the harness has.
+- **The generated runs** (`test/support/generated-message-requests.ts`): each drawn channel is a **lane** with its own sessions, allowances, account cells, scripts, tracks, chosen senders and provider logs, and the record's own forms and reading of each channel's cells (`FORMS`, which imports nothing from `src/domain/`). A seed draws Instagram alone, Facebook alone, or both in one campaign, from a stream of its own (`channelsOf`); with both, the first lane draws from the main stream exactly as before and the second from streams of its own, so a seed drawn with one channel is ticket 25's world under that channel's names. The two lanes use the same session ids. Email, SMS and LinkedIn tracks are drawn beside or after the first lane's track as before. M1 to M10 are checked on every lane; M3 holds every lane after a mark or stop on any; M10 counts a lead reached on any channel as touched. A behaviour of one lane is named with its channel (`facebook:a-reply-marked`), and `RUN_CHANNELS` must equal `MESSAGE_REQUEST_CHANNELS` (a test fails otherwise).
+- **Fixed seeds:** offsets 1, 4, 5, 6, 14, 17, 26, 28 and 31 from 25000, one bounded case each, cover all 65 behaviours, every lane behaviour on both channels and the joint ones ("instagram-and-facebook-in-one-campaign", "one-lead-reached-on-both-channels", "a-reply-marked-on-one-channel-of-a-lead-reached-on-both"). Offsets 0 to 39 all passed unmutated, locally, on one worker: 128 s for the forty, 34 s for the nine.
+- **Mutations:** each of section 13's fourteen now runs on Instagram alone and on Facebook alone at its recorded seed; every recorded seed still kills on both (97 s for the 28 locally, one worker). One new mutation only a joint campaign can show: "a reply mark's reach read on any message-request channel" (M6), killed with both channels at offset 10. In the search, each mutation and channel searches its own killing seed.
+
+### 14.8 Nothing changes for email, SMS, calls, LinkedIn or Instagram
+
+`scripts/no-instagram-digest.ts` with `DIGEST_WITH_INSTAGRAM=1` adds an Instagram track to its campaign of email, SMS, phone and LinkedIn tracks, and runs unchanged on the integration tip and on this branch: digest `349028b6…` on both. Without the variable it is `ba6e437d…` on both, as ticket 25 recorded, and `scripts/no-social-digest.ts` is `eb4141e8…` on both.
+
+### 14.9 Questions for the principal
+
+Q43 to Q47 as they stand for Facebook:
+
+- **Q43 applies.** The verified people file has no Facebook column either (checked on the real export, by counts). *Built:* a people-file `facebook` column is read when a file has one; otherwise every Facebook track goes to the company's account.
+- **Q44 applies.** A personal recipient may restrict message requests or block the sender, and a Page's first-contact messages have eligibility conditions. *Built:* the refusal fails the track for that lead, the account not marked bad.
+- **Q45 applies, more sharply.** On Facebook the research documents a Page-specific first-contact route with conditions. *Built:* any chosen session of either kind for any account; the platform's refusal is reported.
+- **Q46 applies** unchanged: one conversation per (session, account), Facebook's Pages shared by colleagues as Instagram's accounts are.
+- **Q47 applies:** no default allowance on Facebook either.
+
+New:
+
+- **Q48. Which Facebook addresses are a lead's account, and a username against its number.** *Built:* 14.3's table. A username and every form that carries the number are messaged. `/pages/<name>/<id>` and `/people/<name>/<id>` are not messaged, so such a company counts as having no Facebook account (one of twelve rows in the real export holds a `pages` path), though the test-contact check reads them by their number. A username and a number are two keys the application cannot join without a session opening them; the Test run tab says so. Should the `/pages/` and `/people/` forms be messaged by their number?
+- **Q49. A Page's documented 10 new message requests a day.** *Built:* the user's own number per session, with no cap from the app, so a Page's allowance can be set above what Facebook may let it send; whatever Facebook then answers is reported as it answers (a refusal, or a limit that holds the session's messages), unverified until a session is connected. Should a Page session's allowance be capped at 10 new conversations a day, or left to the user?
+
+### 14.9a The review bot on `c072ae8` (18 November 2026)
+
+**Facebook username aliases.** The key kept a username's periods, so `exampleharbourphysio` imported for a prospect and `example.harbour.physio` given as a test contact were two keys. The test contact was saved and a test run messaged the prospect's account; a conversation's pair and a bad mark were split the same way. The key now drops the periods (14.3). That fixed the example, not the class: one account could still have several keys when its number was in the address, which the council on `f3c9014` found (14.9b). Regressions through HTTP (`message-request-channels.test.ts`, "Facebook usernames ignore periods"), each failing before the fix: the plain spelling imported refuses the dotted test contact, the dotted spelling imported refuses the plain one, and in each case no test run starts; a test contact saved before a prospect with its other spelling is imported is refused when the run starts. The normaliser's tests cover the aliases. The generated runs' own reading of a Facebook cell drops periods too. The fixed seeds and every mutation still pass and kill on both channels.
+
+### 14.9b The council on `f3c9014` (18 November 2026)
+
+**One Facebook account, several keys (blocking).** `facebook.com/N`, `profile.php?id=N` and a Page's `/<name>-N` were three keys for one account. So a test contact in one form of a prospect's account was saved and messaged by a test run, and one Page in two forms got two first messages from one session. The class is now closed as far as the application can close it, by 14.3's table:
+- every form that carries the number is one id key;
+- hosts that are only other names for facebook.com read the same;
+- `fb.me`, `m.me`, `business.` and `facebook.com/me` are not read;
+- a hyphenated name with no trailing number is not an account;
+- the test-contact boundary reads a superset (`mayName`) whose safe side is refusal.
+
+A username and its number stay two keys. The application says so on the Test run tab, under the Facebook field and beside **Run test**.
+
+Tests:
+- `social-account.test.ts` runs 14.3's table row by row for both channels and both readings.
+- `message-request-channels.test.ts` ("one Facebook account under several spellings") covers, for every pair of spellings in both orders, a prospect against a test contact at save and at the start of a test run.
+- The same file runs, for every pair, two leads whose companies give one account in two forms: one session sends one first message and the other lead is skipped as taken. Every number-form and host case fails on `f3c9014`'s normaliser.
+- `e2e/message-requests.spec.ts` checks the sentence is shown on Facebook and absent on Instagram.
+- `migration-26.test.ts` finds its migration by name, so renumbering after pull request 71 changes only the migration's own `version`.
+
+The generated runs' record reads every Facebook form by its own hand-written rule, and keys a logged destination by that rule before comparing.
+
+**Deferred by the principal on 18 November 2026, to the follow-up issue:**
+- the generated runs' alias draws, on Facebook and Instagram, and their mutation;
+- HTTP cases for a bad mark and a re-import across spellings;
+- the sentence on a Page's limits (item 2);
+- a second mutation that needs both channels (item 3).
+
+### 14.10 What is unverified, and why
+
+As 13.12, for Facebook: no Facebook session is connected and no test profile is designated (#28), so everything is verified on the simulated provider only. Unverified: that a session can send each message and how it answers; whether a sent request is visible to the recipient; the platform's limits on the user's profiles and Pages; which kinds of sender can message which accounts (Q45, Q49); whether the URL forms of Q48 identify the account a session can open; the test run on the user's own profile; and whether a session survives the laptop sleeping.
+
+### 14.11 What had to change outside the registry, and why
+
+- **Sender-kind words** (14.2): three screens named a business sender as an Instagram business account.
+- **Test support, by channel** (14.7): the harness option, the generated runs and the HTTP tests named Instagram; ticket 25 left them for this ticket.
+- **Browser tests:** `e2e/fake-instagram.ts` and `e2e/instagram.spec.ts` became `fake-message-requests.ts` and `message-requests.spec.ts`, run once per channel and once with both; the keyboard checks of the Add track menu count its items from the registry, not by Instagram's position; the win-back menu lists Facebook. The accessibility and layout scans gain each channel's screens and the joint record.
+- **Migration tests** that expected the latest version to be 25 now read the number of migrations, so a later migration does not break them.
+- **The digest script** (14.8) gains its Instagram form.
+
+Nothing in the engine, the server, the store's code, the reply-action parser or the request schemas changed: they took Facebook from the registry, as the scratch proof of 13.2 found.
+
+## 15. The InMail fallback (ticket 27)
 
 Written by the ticket 27 implementer before the code, 17 November 2026. It attaches at the two points 3.5 names, `inviteExpired` and `connectionGate`, and changes nothing in sections 1 to 12 for a track with the fallback off. Product source: the decision's LinkedIn point 3 ("If the invite isn't accepted within a configurable wait, the track can send an InMail fallback. This is switched on per track and needs a Premium/Sales Navigator sender with credits. The DM follow-ups then follow the InMail. Otherwise the invite is withdrawn and the LinkedIn track ends for that lead.") and ticket 27's criteria. The research: an InMail reaches a person who is not a connection, needs an eligible paid plan and available credits, and the recipient's own settings can refuse it; a plan is no evidence that every profile is reachable.
 
-### 14.1 The rule in one paragraph
+### 15.1 The rule in one paragraph
 
 A LinkedIn track may carry one **InMail step**, placed right after the invite; the track's fallback is on exactly while that step is live. At the acceptance expiry, with the fallback on, the track's session is judged once, by its own report: Premium or Sales Navigator with a credit free. If it is eligible, the InMail becomes the pending step, due at the deadline, and the invite is left open; the track's first message is not sent, and its follow-up messages follow the InMail after their waits, counted from the InMail's send. If it is not eligible, or the fallback is off, the track does what it did before: the invite is to be withdrawn and the track finishes `invite_not_accepted`, with the reason the InMail did not go stored on the track. A recipient LinkedIn refuses an InMail for is a failure with its own stored cause, after which the track takes the same withdrawal path. Nothing else changes: acceptance is not a reply, replies are marked by the user, and every other rule of the engine applies to the InMail as to any LinkedIn step.
 
-### 14.2 Where it is configured
+### 15.2 Where it is configured
 
 - **Per LinkedIn track, beside the acceptance wait**, as a step of its own role: `StepDefinition.role = "inmail"` (absent on every other step). The track's fallback is on exactly while it has a live InMail step; the inspector's switch adds that step or removes it. *Why one fact:* a separate switch beside a stored text would be two facts that could disagree (a switch on with no step, a step with the switch off); the step is what the engine runs, so it is the switch.
 - **Off by default.** A new LinkedIn track has no InMail step; a definition saved before ticket 27 has none, so every existing track reads as off.
 - **The validator** (ADR 0003 7.1) refuses: an InMail step on a track of another channel (`inmail_not_linkedin`); more than one live InMail step (`inmail_twice`); a live InMail step anywhere but directly after the invite among the live steps (`inmail_position`); a subject on it (as on every LinkedIn step); a step that changes its role between saves (`step_role_changed`: a step's role is fixed with its id, so results and work recorded for it keep their meaning). A running track's InMail may be switched on (a new InMail step inserted after the invite) or off (its step removed); a removed InMail step stays removed, and switching on again inserts a new one.
 - **No text is a launch blocker.** A live InMail step with an empty body meets launch blocker 1 (empty copy), as a message step does. *Why:* the invite's empty note is allowed because a plain invite is a LinkedIn choice; an InMail with no text sends nothing a person can read, so a switched-on fallback without text is a mistake to fix, not a choice.
-- **Its wait** is not read: the InMail is due at the acceptance deadline (14.3). The editor offers no wait for it. **It has no subject** (question Q53).
+- **Its wait** is not read: the InMail is due at the acceptance deadline (15.3). The editor offers no wait for it. **It has no subject** (question Q53).
 
-### 14.3 What happens at expiry
+### 15.3 What happens at expiry
 
 `inviteExpired(state, trackId, now)` (3.3) is the one rule, unchanged in where it runs. It now asks two things, in this order:
 
 1. **Is the fallback on?** A live InMail step on the track, with no result. If not: as before (`invite_withdrawal = wanted`, finish `invite_not_accepted` at the deadline). Stored cause: none (`inmail` null).
-2. **Is the track's session eligible now, by its own report?** The session is the track's own: the invite's sender, the session of the pair (`linkedinSessionOf`). An InMail never goes from another session: the pair is the conversation (ADR 0004 Q41), and an InMail from another session would open a second one. Eligible means (14.5) the session's last report says Premium or Sales Navigator and it has at least one credit free. If not: the withdrawal path above, with the cause stored (`inmail = no_plan` or `no_credit`), so the record says why the InMail did not go.
+2. **Is the track's session eligible now, by its own report?** The session is the track's own: the invite's sender, the session of the pair (`linkedinSessionOf`). An InMail never goes from another session: the pair is the conversation (ADR 0004 Q41), and an InMail from another session would open a second one. Eligible means (15.5) the session's last report says Premium or Sales Navigator and it has at least one credit free. If not: the withdrawal path above, with the cause stored (`inmail = no_plan` or `no_credit`), so the record says why the InMail did not go.
 
 If both hold, the track **does not finish**: `inmail = chosen`, `inmail_session` = the session, and the InMail is the pending step, due at the deadline in lead time (`accept_by`, its wall instant `accept_by_wall`), so it goes at the next window opening, by the existing claim and handover. Its claim and handover are any LinkedIn step's: the window, the pacing slot, the in-flight bound, the allowance, the priority (a touched lead, so a follow-up's priority).
 
 **The invitation when the InMail goes: left open, not withdrawn** (question Q50). The decision pairs withdrawal with the track ending ("Otherwise the invite is withdrawn and the LinkedIn track ends"); with the fallback the track does not end, and nothing in the decision says to withdraw. An open invite costs nothing the user has set and may still be accepted; withdrawing first would be one change in this rule. The read says the invite stays open, with the existing sentence's facts (`inviteOpenOn`).
 
-**Once, at the expiry.** The judgment is made at the expiry and stored; it is not made again. *Why:* the decision makes the InMail the consequence of "not accepted within the wait", so the wait's end is the moment; judging again later would let a session's report a week later undo or redo what the expiry decided. After `chosen`, an InMail that cannot be claimed because its session lost its credit or its plan (the user spent credits by hand, a plan ended) waits, said with its reason and no time (`inmail_unavailable`), as a step waits for an allowance; the user can switch the fallback off, which reaches it (14.8).
+**Once, at the expiry.** The judgment is made at the expiry and stored; it is not made again. *Why:* the decision makes the InMail the consequence of "not accepted within the wait", so the wait's end is the moment; judging again later would let a session's report a week later undo or redo what the expiry decided. After `chosen`, an InMail that cannot be claimed because its session lost its credit or its plan (the user spent credits by hand, a plan ended) waits, said with its reason and no time (`inmail_unavailable`), as a step waits for an allowance; the user can switch the fallback off, which reaches it (15.8).
 
 **At most one InMail per lead and session.** The InMail is one step of one track, with one result; a non-retryable transport (2.2) never repeats a call; an unknown answer is looked up and, if the lookup cannot tell, held for the user's mark (ADR 0003 5.3), never sent again under a new key. A second campaign cannot InMail the person from the same session: the pair is the first subject's (Q41).
 
@@ -493,7 +643,7 @@ If both hold, the track **does not finish**: `inmail = chosen`, `inmail_session`
 
 **A user's skip of a pending InMail** takes the withdrawal path at the skip's instant (`inmail = skipped_by_user`): nothing else could make the track's messages due.
 
-### 14.4 The connection gate
+### 15.4 The connection gate
 
 `rules.connectionGate(track, stepId, progress)` (3.5) decides, per step kind:
 
@@ -501,12 +651,12 @@ If both hold, the track **does not finish**: `inmail = chosen`, `inmail_session`
 | - | - |
 | invite | always (as before) |
 | InMail | `connection` is null and `inmail = chosen` |
-| first message | `connection` is set (as before), or `inmail = sent` (a step promoted to this place by an edit after the InMail; the replaced one was skipped at the InMail's send; 14.15) |
+| first message | `connection` is set (as before), or `inmail = sent` (a step promoted to this place by an edit after the InMail; the replaced one was skipped at the InMail's send; 15.15) |
 | follow-up | `connection` is set, or `inmail = sent` |
 
 So a follow-up after an InMail goes without a connection, and nothing else does: no first message without a connection, no InMail before the expiry chose it or after a connection, no follow-up after an InMail not known sent. Handover predicate 19 and the due-time resolution read this one function, as before.
 
-### 14.5 Eligibility, credits and allowances
+### 15.5 Eligibility, credits and allowances
 
 **The session's report.** A LinkedIn session reports, with its account listing, its InMail standing: `inmail: { plan: "premium" | "sales_navigator" | "none", credits: n }`, by its own reading of the account. The engine stores the last report with its instant (`sender_accounts.inmail_plan`, `inmail_credits`, `inmail_reported_wall`, migration 25). A session that reports none is not eligible. The engine invents no plan and no credit count; the running app's port lists no session (1.1), so no session is ever eligible there.
 
@@ -536,14 +686,14 @@ The instant of the report a judgment used is stored with it (`track_progress.inm
 
 No InMail allowance of its own is added (question Q54): the messages per day are the user's guard on how much a session sends, and the credits are LinkedIn's own limit, reported. **A credit is never spent on a retry of an unknown answer without the lookup**: the transport is non-retryable (2.2), so an unknown answer is looked up one settling period later and, if still unknown, held for the user's mark (5.3); the uncertain work keeps its reservation of the message and the credit meanwhile.
 
-### 14.6 Ownership, replies, test runs, measures
+### 15.6 Ownership, replies, test runs, measures
 
 - **Ownership** of the (session, profile) pair is unchanged. An InMail is LinkedIn work on the pair: sent, it makes the conversation known and holds the pair for good (`bindingUnsent` already keeps a pair with any work sent); refused, it settles not sent, and the withdrawn invite then releases the pair as before. Nothing new is read by the ownership query: the InMail's work is a `provider_work` row of kind `message`, whose columns the triggers already watch. `inmail` and `inmail_session` on `track_progress` are not read by the ownership rule and so are not in `CONVERSATION_INPUTS`.
 - **Replies.** A reply marked by hand stops the lead as now. An InMail handed over is LinkedIn work that reached the person, so the mark is allowed after it (Q39's rule reads work of every kind).
 - **Test runs** include the fallback, to the user's own test profile, from the real session, by the same rule. The acceptance wait is not cut short (Q40), so a test reaches the InMail only if the user leaves the test invite unaccepted for the track's whole wait. The InMail spends a real credit of the session; the Test run tab says so while the fallback is on. The follow-ups after it use the minute waits.
 - **Measures** gain **InMails sent** (InMail attempts sent) for LinkedIn, beside invites sent, invites accepted and messages sent; a refused InMail counts as failed. Messages sent count message steps only, not InMails. Nothing claims delivery or reading.
 
-### 14.7 Reads
+### 15.7 Reads
 
 - A pending InMail chosen by the expiry, waiting on time: its earliest instant, as any step; ready when its time has come; `inmail_unavailable` (with its cause) when its session cannot take it now.
 - A lead waiting for acceptance on a track with the fallback on reads as before, and the record adds what happens at the end of the wait: "If they haven't accepted by then, an InMail goes instead, if your session can send one then."
@@ -552,24 +702,24 @@ No InMail allowance of its own is added (question Q54): the messages per day are
 - The first message skipped: "Not sent: the InMail went instead."
 - `stepWhen`, `holdWait`, `dependentStateOf`, `finishedStateOf`, the step role and every wording switch take the new kind, wait and causes through their `never` checks.
 
-### 14.8 Running edits
+### 15.8 Running edits
 
 The spec's rule: an edit reaches what has not been sent. By the lead's state:
 
 | Lead | Switch on (an InMail step inserted) | Switch off (the InMail step removed) | InMail text changed |
 | - | - | - | - |
-| Invite not sent yet, or waiting for acceptance | At its expiry it takes the InMail, by 14.3 | At its expiry the invite is withdrawn and the track ends | Its InMail, if it goes, has the new text |
+| Invite not sent yet, or waiting for acceptance | At its expiry it takes the InMail, by 15.3 | At its expiry the invite is withdrawn and the track ends | Its InMail, if it goes, has the new text |
 | Past expiry, track finished (fallback was off or not eligible) | Nothing: a finished track never restarts (ADR 0003 invariant 6) | Nothing | Nothing |
 | Past expiry, InMail chosen, not handed over (claimed or not) | (already on) | The InMail is not sent: its claim is withdrawn and the track takes the withdrawal path at the edit's instant, `inmail = switched_off` | The new text, by the existing rule that copy is rendered at the handover |
 | InMail handed over or sent | (already on) | Nothing changes: it was sent, or may have been; the follow-ups go | Nothing: it was rendered at its handover |
 
 The edit preview names the change by the step's stored kind and the shared numbering ("LinkedIn track · InMail"), and counts each lead by the row it is in. A lead still waiting for acceptance is one the InMail **may** reach: "N leads still waiting for acceptance will get the InMail if the invite is not accepted in time and your session can send one then"; switched off, "won’t get an InMail: if the invite is not accepted in time, this track ends for them and the app asks LinkedIn to withdraw the invite". A chosen InMail switched off before its handover is skipped; one handed over goes as it was; one sent is past (the council on `d6ad9f5`, item 5). The digest the save checks pins the draft, which carries the switch.
 
-### 14.9 Step kinds
+### 15.9 Step kinds
 
-`linkedinStepKind` returns `invite`, `inmail`, `first_message` or `follow_up`. An InMail step is known by its role, never its position; the other steps are named by their position among the live steps that are not InMail steps, so switching the fallback on or off renames no other step. `SocialAction` gains `inmail`, whose allowance bucket is the message bucket (14.5). The shared step titles (`LINKEDIN_STEP_KIND_AT`, `stepTitle`) take the step's role, and every exhaustive mapping of kinds and wording takes `inmail` through its `never` check.
+`linkedinStepKind` returns `invite`, `inmail`, `first_message` or `follow_up`. An InMail step is known by its role, never its position; the other steps are named by their position among the live steps that are not InMail steps, so switching the fallback on or off renames no other step. `SocialAction` gains `inmail`, whose allowance bucket is the message bucket (15.5). The shared step titles (`LINKEDIN_STEP_KIND_AT`, `stepTitle`) take the step's role, and every exhaustive mapping of kinds and wording takes `inmail` through its `never` check.
 
-### 14.10 Store
+### 15.10 Store
 
 Migration 25:
 - `track_progress.inmail` (`chosen`, `sent`, `accepted` (an acceptance came before the InMail was handed over), `no_plan`, `no_credit`, `refused`, `switched_off`, `skipped_by_user`), `inmail_session`; a trigger refuses a move other than null → any, `chosen` → any but null and `chosen`;
@@ -578,7 +728,7 @@ Migration 25:
 
 `StepDefinition.role` is stored with the definition (JSON); no column.
 
-### 14.11 Invariants (L18 to L25) and the generated runs
+### 15.11 Invariants (L18 to L25) and the generated runs
 
 Asserted after every event by the LinkedIn generated runs, on the simulated provider's own logs:
 
@@ -595,7 +745,7 @@ L3 (nothing after a marked reply) covers the InMail and its follow-ups, and inva
 
 **Generated.** In a share of runs (from a stream of its own, so runs drawn without it are unchanged): the fallback switched on for the LinkedIn track, with InMail text; each session's report drawn as Premium, Sales Navigator, none or unreported, with credits from 0 to 3; profiles that refuse InMail; acceptances drawn before, after and never; the report's credits dropping (the user spending credits by hand) at a drawn instant; edits of the switch on and off at drawn instants, and of the InMail's text. **The record** keeps its own model: each session's report and its own credit count, each track's InMail state by its own reading of the deadline, acceptances and refusals, and predicts the expiry's choice from them.
 
-**Mutations, one per invariant**, each killed by a recorded seed in `pnpm check` (the seeds are recorded in 14.13 as built):
+**Mutations, one per invariant**, each killed by a recorded seed in `pnpm check` (the seeds are recorded in 15.13 as built):
 - the InMail chosen again after it was sent (a second InMail) — L18;
 - the fallback read as on for every LinkedIn track — L19;
 - the InMail due at the invite's send, not the deadline — L20;
@@ -605,7 +755,7 @@ L3 (nothing after a marked reply) covers the InMail and its follow-ups, and inva
 - a refused InMail leaves the track running — L24;
 - switching off ignored for a chosen InMail — L25.
 
-### 14.12 Questions for the principal
+### 15.12 Questions for the principal
 
 Numbered on from Q50 (ticket 25 uses Q43 to Q49). Each names what is built meanwhile.
 
@@ -619,7 +769,7 @@ Numbered on from Q50 (ticket 25 uses Q43 to Q49). Each names what is built meanw
 - **Q57. A test run reaching the InMail spends a real credit.** *Built:* included, as the ticket asks, and said on the Test run tab while the fallback is on.
 - **Q58. How old a session's report may be before eligibility is not judged on it.** A session reports with every listing while it is signed in; signed out, it reports nothing, and its last report stands. *Built:* 24 hours (`INMAIL_REPORT_MAX_AGE`). An expiry on an older report of a signed-out session takes the withdrawal path (`stale_report`); of a signed-in session, it waits for the next sync. A chosen InMail waits until a fresh report backs it. Every sentence of eligibility says the report's day. A shorter or longer age is one constant.
 
-### 14.13 Unverified
+### 15.13 Unverified
 
 Verified on the simulated provider only. Unverified until a Premium or Sales Navigator session is connected and a test profile designated (#28):
 - that a session can report its plan and its credits, how current that report is, and what it says for each of Premium Career, Business, Sales Navigator (whose InMails are sent from Sales Navigator, research);
@@ -627,7 +777,7 @@ Verified on the simulated provider only. Unverified until a Premium or Sales Nav
 - whether LinkedIn lets the session send follow-up messages in an InMail thread before the recipient answers or connects (a refusal would be `not_connected`, failing the track as Q37's rule does, and the read says so);
 - the real test run of the fallback.
 
-### 14.14 As built (17 November 2026)
+### 15.14 As built (17 November 2026)
 
 - **Code.** `definition.ts`: `StepDefinition.role`, `inmailStepOf`, the step kind `inmail` (by role; the other steps by position among the steps that are not InMail steps), `SocialAction` `inmail` and `allowanceOf`, the validator's four refusals. `progress.ts`: `inviteExpired` with the fallback, `inmailNotSent` (the withdrawal path with its stored cause), `inmailStanding` (the one eligibility test), the gate per kind, `remainingSteps` (an InMail is ahead only once chosen), the InMail's send, an acceptance before it, its refusal, a switch-off in `alignPending`. `dispatch.ts`: `sessionsFor` selects for an InMail only its eligible session, and the reads' `inmail_unavailable` (`inmailUnavailable`) derive from that selection. The engine's pre-send check lets an InMail past its own invite's `pending` and holds it on `connected`.
 - **Store.** Migration 25. `provider_work.inmail` and `attempts.inmail` mark InMail work, while `kind` and `action` stay `message`, the allowance it spends. A session's report is stored by the account sync (`upsertAccounts` with the listing's instant). `AccountState.inmail` carries the reported credits, the InMails spent since the report, and the InMails committed by chosen tracks.
@@ -651,28 +801,28 @@ Verified on the simulated provider only. Unverified until a Premium or Sales Nav
   - Mutation seeds, found over offsets 0 to 29: L18 24, L19 16, L20 7, L21 18, L22 0, L23 24, L24 18, L25 7.
 - **No change for the fallback off, email, SMS or calls.** `scripts/no-inmail-digest.ts` gives the same digest on the tip `5c43963` and on this branch: `284e00a5982d36894e10ae87757f6773886c12fa3b40a26639284c6ae9869781`. That run is a LinkedIn track without the fallback, then email: 12 handovers, 11 deliveries, 2 acceptances, 4 withdrawals, 25 checks and 1 refusal. `scripts/no-social-digest.ts` still gives `eb4141e8…3708`.
 
-### 14.15 The review bot on `b49a71b`
+### 15.15 The review bot on `b49a71b`
 
 Three defects, each reproduced first as a failing test through HTTP (`linkedin-inmail.test.ts`, "the review bot on b49a71b"):
 
-1. **A running edit after the InMail stalled the follow-ups.** The edit removed the replaced first message, so the next follow-up read as the first message by position, and the gate held it for a connection. *Changed:* the gate lets a step that reads as the first message through once an InMail is known sent (14.4). The first message the InMail replaced was already skipped at the InMail's send, so a step promoted to that position by an edit is a follow-up the user kept.
+1. **A running edit after the InMail stalled the follow-ups.** The edit removed the replaced first message, so the next follow-up read as the first message by position, and the gate held it for a connection. *Changed:* the gate lets a step that reads as the first message through once an InMail is known sent (15.4). The first message the InMail replaced was already skipped at the InMail's send, so a step promoted to that position by an edit is a follow-up the user kept.
 2. **An acceptance after a refused InMail did not connect the track.** The InMail had been refused for a limit, and the invite was accepted before the retry. Any InMail work that had been handed over stopped the skip, so the track was neither connected nor able to send. *Changed:* only InMail work that may have gone (unsettled, or sent) stops the skip. Work that was refused, or settled not sent, does not.
 3. **Two concurrent expiries could commit the same last credit.** The evaluation's version guard did not cover the shared InMail standing. *Changed:* an evaluation that judges an InMail also requires the standing of each session it judged to be unchanged at the write (`inmailJudgedSessions`). Otherwise it is discarded and decided again on fresh state, which covers a new report too.
 
 **Fixing the class:** every decision that reads state another subject can change now names that state in the write's guard.
 
-### 14.16 The council on `8b0c846`
+### 15.16 The council on `8b0c846`
 
 Each item was reproduced first through HTTP, in `linkedin-inmail.test.ts` ("credits held by named work", "the step the InMail replaces is named when it is chosen") and `linkedin.test.ts` (item 3). Every one of those tests fails on `8b0c846`.
 
-1. **The step the InMail replaces is named once, at the choice** (`track_progress.inmail_replaces`). It was the first message by its place among every step of the track, removed ones included; 14.18 corrects that to the first live message at the choice. Only that step is ever skipped as `inmail_instead`, and only if it is live with no result. The gate reads the same fact. Before, the send took whichever live step read as the first message, so a follow-up the user kept after removing the first message was skipped. This is the other side of 14.15 item 1. *Class:* a fact read at two moments is stored at the first one.
-2. **Items 2, 7 and 8 are one design: a credit is held by a named piece of work** (14.5, rewritten). Before, three places counted credits afresh from counts that did not record who holds what:
+1. **The step the InMail replaces is named once, at the choice** (`track_progress.inmail_replaces`). It was the first message by its place among every step of the track, removed ones included; 15.18 corrects that to the first live message at the choice. Only that step is ever skipped as `inmail_instead`, and only if it is live with no result. The gate reads the same fact. Before, the send took whichever live step read as the first message, so a follow-up the user kept after removing the first message was skipped. This is the other side of 15.15 item 1. *Class:* a fact read at two moments is stored at the first one.
+2. **Items 2, 7 and 8 are one design: a credit is held by a named piece of work** (15.5, rewritten). Before, three places counted credits afresh from counts that did not record who holds what:
    - two chosen InMails sharing one credit deadlocked (item 2);
    - a restart restored a commitment it had not acquired (item 7);
    - a handover ignored a report that came after its claim (item 8).
-3. **A pending invitation stops every step but the InMail and the follow-ups after it, as on the integration tip.** Since 14.3, a `pending` answer from the pre-send check had stopped invites only, so a message to a removed connection with an invitation pending was handed over and refused. Reproduced against the tip first: the tip stops it, `8b0c846` did not. The digest's world `scripts/no-inmail-digest.ts` now scripts the case, and its digest is equal on the tip and here.
+3. **A pending invitation stops every step but the InMail and the follow-ups after it, as on the integration tip.** Since 15.3, a `pending` answer from the pre-send check had stopped invites only, so a message to a removed connection with an invitation pending was handed over and refused. Reproduced against the tip first: the tip stops it, `8b0c846` did not. The digest's world `scripts/no-inmail-digest.ts` now scripts the case, and its digest is equal on the tip and here.
 4. **The undo helper derives the migration's version by name**, and the upgrade is tested on a lead the tip left waiting for acceptance (`test/fixtures/upgrade/tip-5c43963-linkedin-waiting.sql`, written by the tip's own code). After the upgrade, its expiry takes the withdrawal path with the fallback null.
-5. **The report's age** (14.5, question Q58).
+5. **The report's age** (15.5, question Q58).
 6. **Wording.** A chosen InMail is said as chosen and not gone; the next step's line says why it waits. Copy for a lead mentions the InMail path while the fallback is on.
 7. **The open invite is said only while the read says it is open** (`inviteOpen`). An acceptance after the InMail is said on its own line.
 
@@ -682,7 +832,7 @@ Each item was reproduced first through HTTP, in `linkedin-inmail.test.ts` ("cred
 
 **What the new draws found, fixed here, each with a regression test through HTTP that fails without its fix:**
 - **Seed 24024 (invariant 29):** a restarted lead waiting for a credit was cached as settled, so a new report giving a credit did not reach it, where a fresh engine acquired and sent at once. *Changed:* a session's InMail standing now has a version, moved by the database in the same write as every fact the standing reads: a holding acquired or released, a track finishing, a report or the session's health, an InMail's work handed, sent or settled (key `inmail:` plus the session, in `conversation_versions`; four triggers in migration 25). A cached evaluation or readiness of a subject with a chosen InMail, or waiting at its expiry, remembers it. A report's aging is a horizon. Test: "a restarted lead waiting for a credit acquires one a new report gives, with no change to its own record".
-- **Seed 24018 (L22):** after the laptop was off over a deadline, a user's action ran the expiry before the first sync, on a report old only because the app had not run, and judged it stale. *Changed:* an old report from a session still signed in defers the judgment to the next sync, which reads a new report. Only a signed-out session is judged `stale_report` (14.5, Q58). Test: "a user action before the first sync does not judge the expiry on the old report of a signed-in session; the next tick does".
+- **Seed 24018 (L22):** after the laptop was off over a deadline, a user's action ran the expiry before the first sync, on a report old only because the app had not run, and judged it stale. *Changed:* an old report from a session still signed in defers the judgment to the next sync, which reads a new report. Only a signed-out session is judged `stale_report` (15.5, Q58). Test: "a user action before the first sync does not judge the expiry on the old report of a signed-in session; the next tick does".
 - **The record's own error (seed 24024 again, L22 at the handover):** a report and a handover at the same instant. The simulated provider now orders its report and handover logs with one sequence, and the record judges a handover by the last report before it.
 
 **The generated runs** draw, from a fourth stream:
@@ -707,19 +857,19 @@ Mutations, with seeds recorded in `linkedin-mutations.ts`:
 
 | Mutation | Invariant | Seed |
 |---|---|---|
-| an InMail sent is sent again | L18 | 5 (0 before 14.17) |
+| an InMail sent is sent again | L18 | 5 (0 before 15.17) |
 | a switched-off InMail is still sent | L19 | 16 |
 | the InMail goes before the expiry | L20 | 0 |
 | an acceptance does not stop the InMail | L21 | 18 |
-| every session taken as eligible for InMail | L22 | 3 (7 before 14.17) |
-| the first message goes after the InMail | L23 | 5 (0 before 14.17) |
+| every session taken as eligible for InMail | L22 | 3 (7 before 15.17) |
+| the first message goes after the InMail | L23 | 5 (0 before 15.17) |
 | a refused InMail leaves the track running | L24 | 42 |
 | a switch-off does not reach a chosen InMail | L25 | 16 |
 | the replaced step is found among the live steps at the handover | L23 | 0 |
-| a restart restores a commitment without acquiring | L27 | 93 (0 before 14.17) |
+| a restart restores a commitment without acquiring | L27 | 93 (0 before 15.17) |
 | the handover does not re-read the report | L22 | 18 |
-| a step moved before the replaced step is not sent (14.17) | L23 | 40 |
-| a holding settled unsent on a stopped lead is kept (14.17) | L26 | 7 |
+| a step moved before the replaced step is not sent (15.17) | L23 | 40 |
+| a holding settled unsent on a stopped lead is kept (15.17) | L26 | 7 |
 
 `LINKEDIN_FIXED_SEEDS` is now a greedy cover by cost of every behaviour the runs name over offsets 0 to 50, keeping 15, 46, 69, 73 and 93: 4, 8, 15, 16, 18, 30, 32, 42, 46, 50, 69, 73 and 93. With the new draws, 24 and 29 alone took over two minutes; the new set takes about two minutes in all. A switch-off while an InMail waits is reached by no offset from 0 to 50, so it is pinned by its example test ("switched off while the InMail is chosen and not yet handed over") and listed in `LINKEDIN_OTHER_FEATURES`.
 
@@ -729,7 +879,7 @@ The removal changes offsets 0 and 1, the contested runs that draw it. Three earl
 - **Seeds 24044 and 24049 (L8 at an edit of the wait):** the record checked the deadline of a lead whose reply had been marked. That lead's clock stopped with it, so the record skips ended leads there, as its check after the drain already did.
 - **Seed 24024 (L23's other side):** a skip drawn for a lead waiting for acceptance was not noted among the record's skips, so two messages the user skipped read as kept. Every skip is now noted.
 
-### 14.17 The search and the review bot on `56030c4`, and ticket 25's merge
+### 15.17 The search and the review bot on `56030c4`, and ticket 25's merge
 
 **The search** failed on two seeds, both the record's errors, each fixed in the record and added to the fixed seeds:
 - **Seed 24071 (L13, L15):** a chosen InMail's room is its own session's messages per day; the record took the whole pool, and read the lead as still awaiting acceptance. With no credit and no room both true, the read names the credit first. An InMail's open invite (Q50) is a held conversation, not one being withdrawn, so the pair it holds grounds another lead's skip.
@@ -737,7 +887,7 @@ The removal changes offsets 0 and 1, the contested runs that draw it. Three earl
 
 It also emitted a behaviour name registered nowhere. **Every name a run can report is now a typed list** (`LINKEDIN_EMITTED`): a name not in it fails the typecheck, and a unit test with no run requires the list to equal the two registries.
 
-**B. A step moved before the replaced one is sent.** The step walk's cursor is the last step resolved by something that happened to it. The skip the InMail's send writes on the replaced step (`inmail_instead`) stops that step only, and never stands for the steps an edit placed before it (`remainingSteps`). The step replaced is still named once, at the choice (item 1 of 14.16). Tests through HTTP: a follow-up moved before the replaced step, a message inserted before it, a step removed in front of it, the replaced step moved to the end, each after the choice; the same reorder at the choice's own instant, before the choice (then the first message at the choice is the one replaced) and after the InMail went. A test run ends at any edit (ADR 0003), so no step can move around a test's replaced step; unedited, its follow-ups go. The runs' reorder while an InMail is chosen moves the first follow-up in front of the first message. Mutation: "a step moved before the replaced step is not sent" (L23).
+**B. A step moved before the replaced one is sent.** The step walk's cursor is the last step resolved by something that happened to it. The skip the InMail's send writes on the replaced step (`inmail_instead`) stops that step only, and never stands for the steps an edit placed before it (`remainingSteps`). The step replaced is still named once, at the choice (item 1 of 15.16). Tests through HTTP: a follow-up moved before the replaced step, a message inserted before it, a step removed in front of it, the replaced step moved to the end, each after the choice; the same reorder at the choice's own instant, before the choice (then the first message at the choice is the one replaced) and after the InMail went. A test run ends at any edit (ADR 0003), so no step can move around a test's replaced step; unedited, its follow-ups go. The runs' reorder while an InMail is chosen moves the first follow-up in front of the first message. Mutation: "a step moved before the replaced step is not sent" (L23).
 
 **C. A holding settled unsent is released, whoever settles it.** Every transition that settles work (a lookup's answer, a provider's refusal or late answer, a confirmed withdrawal, the user's mark, a claim that expires, at store open too) ends at `attend`, which now releases the holding of a finished track or an ended lead (stopped, replied, won back onto another branch) once nothing its InMail holds may have gone (`releaseSettledHolds`). A running or paused lead's chosen InMail still owes its send, so it keeps its holding; sent work keeps it until a report absorbs it. Tests through HTTP: the bot's reproduction, ending with the next lead's InMail taking the credit; restarted before the mark (the lead's InMail goes, the next finds none); marked sent instead (held until the next report). The runs draw, in contested runs, an InMail answered unknown with nothing sent, its lead stopped at the handover and the work marked not sent once unresolved; L26 is also checked during the run (at least `min(free, n)` of the `n` chosen InMails backed, the record's free credits net of InMail work still uncertain), and L22's count of committed credits leaves out a stopped lead's settled work. Mutation: "a holding settled unsent on a stopped lead is kept" (L26).
 
@@ -751,17 +901,17 @@ It also emitted a behaviour name registered nowhere. **Every name a run can repo
 - LinkedIn's fixed session and the pacing from tracks with leads running on it carry over unchanged to the InMail, which goes from the track's own session;
 - the runs' draw "remove a started track before a lead's first claim" holds with the InMail fallback on, on the fixed seeds and offsets 0 to 50.
 
-The draws for B and C change offsets 0, 5, 7, 13, 14, 23, 32, 40, 44, 49, 84 and others of the contested runs; four InMail mutations killed only at 0 or 7 were searched again (the table in 14.16). B's reorder is drawn in contested runs without the removal, from a stream of its own, so the fifth stream's draws stay put.
+The draws for B and C change offsets 0, 5, 7, 13, 14, 23, 32, 40, 44, 49, 84 and others of the contested runs; four InMail mutations killed only at 0 or 7 were searched again (the table in 15.16). B's reorder is drawn in contested runs without the removal, from a stream of its own, so the fifth stream's draws stay put.
 
 Both no-change digests are equal on `b4e2e8c` and here (the simulated provider's own `seq` field, a test double's, is left out of the first).
 
-### 14.18 The council's last pass on `d6ad9f5`
+### 15.18 The council's last pass on `d6ad9f5`
 
-1. **The replaced step is the first message at the choice** (blocking). `d6ad9f5` picked it by its place among every step, removed ones included, so a first message removed while the lead waited was "replaced" and the next message, by then the track's first message, went after the InMail; a removal and a reorder before the choice gave opposite results. The rule now, in the inspector's words: the InMail replaces the track’s first message as the sequence stands when the wait ends, and no later edit changes which (14.3). Tests through HTTP, each saying exactly which steps went and which was replaced: the first message removed before the choice; removed and a new one added in its place (a removed step cannot come back on a running campaign); a message inserted before it; every message removed (refused: a LinkedIn track keeps a first message); a test run of a sequence whose first message was removed. The record names the replaced step from its own live model at the choice; the runs draw, from a stream of their own, the first message removed or a message inserted before it while a lead waits. Mutation: "the replaced step picked by place, removed steps included" (L23).
+1. **The replaced step is the first message at the choice** (blocking). `d6ad9f5` picked it by its place among every step, removed ones included, so a first message removed while the lead waited was "replaced" and the next message, by then the track's first message, went after the InMail; a removal and a reorder before the choice gave opposite results. The rule now, in the inspector's words: the InMail replaces the track’s first message as the sequence stands when the wait ends, and no later edit changes which (15.3). Tests through HTTP, each saying exactly which steps went and which was replaced: the first message removed before the choice; removed and a new one added in its place (a removed step cannot come back on a running campaign); a message inserted before it; every message removed (refused: a LinkedIn track keeps a first message); a test run of a sequence whose first message was removed. The record names the replaced step from its own live model at the choice; the runs draw, from a stream of their own, the first message removed or a message inserted before it while a lead waits. Mutation: "the replaced step picked by place, removed steps included" (L23).
 2. **An acceptance that came while the InMail was uncertain applies when its work settles not sent** (blocking). `recordAcceptance` only stored it, since work that may have gone stops the skip, and nothing revisited it, so the InMail stayed pending for a connection and every check before sending answered `connected` and looped. One transition now overtakes a chosen InMail for a connection (`skipInmailForConnection`: claims withdrawn, the InMail skipped as `accepted`, its credit released, the track connected), used by an acceptance, by `attend` when the work settles not sent by any transition (a provider's late answer, the user's mark, a confirmed withdrawal, a claim that expires at store open), and by a `connected` answer at the InMail's own check, in the handover's write. Sent and still-uncertain work and finished tracks keep it from applying. Tests through HTTP in both orders, with a stop and restart between (the unresolved mark is the engine's: it has no HTTP route yet, an earlier ticket's gap), and the connected check. LinkedIn's lookup does not settle "not sent" (its transport does not treat it as final), so the tests settle by the mark. The runs draw, in contested runs, an acceptance before or after the mark of an InMail answered unknown; the record's L13 requires, from its own logs, that the InMail is no longer the pending step once both have happened. Mutation: "an acceptance recorded while the InMail was uncertain is not applied when it settles unsent" (L13).
 3. **The record's own InMail judgment.** L15's "is the invite being withdrawn" and L13's "is the InMail pending" no longer read the engine's stored state: the record judges, from its own switches, acceptances, reports, credits, refusals and the withdrawals the session was asked for, whether the expiry left the invite open for an InMail and whether that InMail has been handed over. When the read says the InMail waits on a credit, the record's count must agree (fewer credits free than InMails pending on the session). It found no disagreement on the fixed seeds or offsets 0 to 50.
 4. **What went is said from the work.** An InMail confirmed sent after its track stopped moving (stopped and won back, marked replied, or its track removed) said "It hasn't gone", read from the track's `chosen`. The sentence now reads the sent work, names the session from that work's account, and keeps the follow-up clause only where the track moved past the InMail. The invite's sentences already read its work (`invitingWork`). Tests through HTTP for the three lifecycles.
-5. **The running-edit preview** counts a lead still waiting for acceptance as one the InMail may reach (switched on) or may not (switched off), said as that condition, and names the step by its stored kind (14.8). Tests on the read and through the screen.
+5. **The running-edit preview** counts a lead still waiting for acceptance as one the InMail may reach (switched on) or may not (switched off), said as that condition, and names the step by its stored kind (15.8). Tests on the read and through the screen.
 
 ## The review of `194fc44` (council, review bot and verifier, 16 November 2026)
 
@@ -920,4 +1070,4 @@ Fifteen items, each reproduced as a failing test first (`src/server/linkedin-scr
 - **ADR 0003.** `TrackChannel` and the account channel gain `linkedin`; `FinishReason` gains `invite_not_accepted`; `StepWait` gains `awaiting_acceptance`; a reply's channel gains `linkedin` (a mark only). Its section 11's "Social tracks" line is replaced by this ADR. Its question numbers continue here.
 - **ADR 0001.** A LinkedIn profile is a contact fact of a person read from the import, not a `contact_details` row: it is never matched on, merged or searched. Its bad mark is kept by key.
 - **Tickets 25 and 26** are section 13: one shared message-request channel, with Instagram worked through and Facebook one entry in each of 13.2's mappings.
-- **Ticket 27** attaches at `inviteExpired` (3.5); section 14.
+- **Ticket 27** attaches at `inviteExpired` (3.5); section 15.

@@ -1,0 +1,97 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, test } from "vitest";
+import { EngineHarness } from "../../../test/support/engine-harness.ts";
+import { migrate, MIGRATIONS } from "./migrations.ts";
+
+/**
+ * The InMail fallback's migration (ticket 27, ADR 0004 15.10; 27 since tickets 25 and 26 took 25 and 26) on a database at the version
+ * before it, holding rows earlier code wrote (`test/fixtures/upgrade/tip-9ae8c38-linkedin-skip.sql`, a LinkedIn track and its
+ * session). After it, nothing reads differently: no track has an InMail state, no work is an InMail, no session has a
+ * report. Fictitious data only.
+ */
+/** This migration's number: the InMail fallback's, wherever the sequence put it at merge time. */
+const INMAIL = MIGRATIONS.find((m) => m.name.startsWith("the LinkedIn InMail fallback"))!.version;
+/**
+ * A lead with its invitation sent and still waiting, as the integration tip `c633f73` wrote it with its own code (migrations 1
+ * to 26). The rows of `message_request_channels` its own migrations insert are left out: the migrations insert them again.
+ */
+const WAITING = readFileSync(path.join(import.meta.dirname, "../../../test/fixtures/upgrade/tip-c633f73-linkedin-waiting.sql"), "utf8").split("\n").filter((l) => l.trim() !== "");
+const ROWS = readFileSync(path.join(import.meta.dirname, "../../../test/fixtures/upgrade/tip-9ae8c38-linkedin-skip.sql"), "utf8").split("\n").filter((l) => l.trim() !== "");
+const dirs: string[] = [];
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+describe("the InMail fallback's migration on a database just before it", () => {
+  test("existing rows read as before: no InMail state, no InMail work, no InMail report; the first sync stores a session's report", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "migration-inmail-"));
+    dirs.push(dir);
+    const file = path.join(dir, "app.db");
+    const tip = new DatabaseSync(file);
+    migrate(tip, () => "2026-11-02T09:00:00.000Z", MIGRATIONS.filter((m) => m.version < INMAIL));
+    tip.exec("PRAGMA foreign_keys = OFF");
+    for (const row of ROWS) tip.exec(row);
+    tip.exec("PRAGMA foreign_keys = ON");
+    tip.close();
+    const h = new EngineHarness({
+      start: Date.parse("2026-11-02T10:00:00Z"),
+      databasePath: file,
+      idPrefix: "after-inmail-rows",
+      accounts: [{ id: "inbox-a", capacity: 50, gapMs: 60_000, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+      linkedin: { sessions: [{ id: "li-session-1", gapMs: 60_000, k: 1, healthy: true, resetZone: "Europe/London", inmail: { plan: "sales_navigator", credits: 3 } }] },
+    });
+    const db = (h.store.engine as unknown as { db: DatabaseSync }).db;
+    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: MIGRATIONS.at(-1)?.version });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM track_progress WHERE inmail IS NOT NULL OR inmail_session IS NOT NULL").get()).toEqual({ n: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM provider_work WHERE inmail <> 0").get()).toEqual({ n: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM attempts WHERE inmail <> 0").get()).toEqual({ n: 0 });
+    await h.tick();
+    expect(db.prepare("SELECT inmail_plan, inmail_credits FROM sender_accounts WHERE id = 'linkedin:li-session-1'").get()).toEqual({ inmail_plan: "sales_navigator", inmail_credits: 3 });
+    await h.store.close();
+  });
+
+  test("a lead the tip left waiting for acceptance: after the upgrade its expiry takes the withdrawal path, the fallback null (council on 8b0c846, item 4)", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "migration-inmail-waiting-"));
+    dirs.push(dir);
+    const file = path.join(dir, "app.db");
+    const tip = new DatabaseSync(file);
+    migrate(tip, () => "2026-11-02T09:00:00.000Z", MIGRATIONS.filter((m) => m.version < INMAIL));
+    tip.exec("PRAGMA foreign_keys = OFF");
+    for (const row of WAITING) tip.exec(row);
+    tip.exec("PRAGMA foreign_keys = ON");
+    expect(tip.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    tip.close();
+    const h = new EngineHarness({
+      start: Date.parse("2026-11-02T12:00:00Z"),
+      databasePath: file,
+      idPrefix: "after-inmail",
+      accounts: [{ id: "inbox-a", capacity: 50, gapMs: 60_000, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
+      // The session reports Premium with credits: the track has no InMail step, so nothing about the fallback applies.
+      linkedin: { sessions: [{ id: "li-session-1", gapMs: 60_000, k: 1, healthy: true, resetZone: "Europe/London", inmail: { plan: "premium", credits: 3 } }] },
+    });
+    const db = (h.store.engine as unknown as { db: DatabaseSync }).db;
+    const before = db.prepare("SELECT accept_by_wall, inmail, inmail_hold_wall FROM track_progress WHERE track_id = 'li'").get() as { accept_by_wall: number; inmail: null; inmail_hold_wall: null };
+    expect(before).toMatchObject({ inmail: null, inmail_hold_wall: null });
+    await h.advanceTo(before.accept_by_wall + 3_600_000);
+    expect(db.prepare("SELECT finish_reason, inmail, invite_withdrawal FROM track_progress WHERE track_id = 'li'").get()).toEqual({ finish_reason: "invite_not_accepted", inmail: null, invite_withdrawal: "wanted" });
+    // The withdrawal is asked; this harness's simulated provider never saw the tip's invite, so it cannot confirm it.
+    expect(h.linkedin.handoverLog.some((x) => x.action === "inmail")).toBe(false);
+    await h.store.close();
+  });
+
+  test("a track's InMail state only moves forward, by an update or by the store's replace; InMail work is message work", () => {
+    const db = new DatabaseSync(":memory:");
+    migrate(db, () => "2026-11-02T09:00:00.000Z");
+    db.exec("PRAGMA foreign_keys = OFF; PRAGMA ignore_check_constraints = OFF;");
+    db.exec("DROP TRIGGER IF EXISTS track_progress_destination_detail_id_known_insert");
+    db.exec("INSERT INTO track_progress (subject_id, track_id, inmail) VALUES ('s', 't', 'chosen')");
+    db.exec("UPDATE track_progress SET inmail = 'sent'");
+    expect(() => db.exec("UPDATE track_progress SET inmail = 'chosen'")).toThrow(/only moves forward/);
+    expect(() => db.exec("INSERT OR REPLACE INTO track_progress (subject_id, track_id, inmail) VALUES ('s', 't', NULL)")).toThrow(/only moves forward/);
+    expect(() => db.exec("INSERT INTO provider_work (key, subject_id, track_id, step_id, account_id, destination, kind, inmail) VALUES ('k', 's', 't', 'x', 'a', 'd', 'invite', 1)")).toThrow(/CHECK/);
+    db.close();
+  });
+});

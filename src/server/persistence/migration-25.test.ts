@@ -23,6 +23,9 @@ function tipDatabase(): DatabaseSync {
   return db;
 }
 
+/** Migrations 1 to 25: this file is about 25 alone; migration-26.test.ts takes the database on from there. */
+const UP_TO_25 = MIGRATIONS.filter((m) => m.version <= 25);
+
 const tables = (db: DatabaseSync) => db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map((r) => String(r["name"]));
 const columns = (db: DatabaseSync, table: string) => db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all().map((r) => String(r["name"]));
 const rowsOf = (db: DatabaseSync, table: string, cols: readonly string[]) => db.prepare(`SELECT ${cols.map((c) => `"${c}"`).join(", ")} FROM ${table} ORDER BY rowid`).all();
@@ -32,8 +35,7 @@ describe("migration 25 on the integration tip's own database", () => {
     const db = tipDatabase();
     const before = new Map(tables(db).map((t) => [t, { cols: columns(db, t), rows: rowsOf(db, t, columns(db, t)) }]));
     const triggersBefore = db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all().map((r) => String(r["name"]));
-    // Migration 25 alone: 26 (the InMail fallback) adds triggers of its own, tested in migration-26.test.ts.
-    migrate(db, () => "2026-11-17T09:00:00.000Z", MIGRATIONS.filter((m) => m.version <= 25));
+    migrate(db, () => "2026-11-17T09:00:00.000Z", UP_TO_25);
     expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: 25 });
     for (const [table, was] of before) {
       if (table === "schema_migrations") continue;
@@ -49,7 +51,7 @@ describe("migration 25 on the integration tip's own database", () => {
 
   test("the channel lists take Instagram, and nothing else changes in what they refuse", () => {
     const db = tipDatabase();
-    migrate(db, () => "2026-11-17T09:00:00.000Z");
+    migrate(db, () => "2026-11-17T09:00:00.000Z", UP_TO_25);
     db.prepare("INSERT INTO sender_accounts (id, channel, label, capacity, k, daily_limit, social_kind) VALUES ('instagram:s1', 'instagram', 'x', 0, 1, 0, 'business')").run();
     expect(() => db.prepare("INSERT INTO sender_accounts (id, channel, label, capacity, k, daily_limit) VALUES ('tiktok:s1', 'tiktok', 'x', 0, 1, 0)").run()).toThrow();
     expect(() => db.prepare("INSERT INTO sender_accounts (id, channel, label, capacity, k, daily_limit, social_kind) VALUES ('instagram:s2', 'instagram', 'x', 0, 1, 0, 'robot')").run()).toThrow();
@@ -62,7 +64,7 @@ describe("migration 25 on the integration tip's own database", () => {
 
   test("the destination triggers take an account of the lead's own person or company on a message-request channel, and refuse any other", () => {
     const db = tipDatabase();
-    migrate(db, () => "2026-11-17T09:00:00.000Z");
+    migrate(db, () => "2026-11-17T09:00:00.000Z", UP_TO_25);
     const e = db.prepare("SELECT id, person_id, company_id FROM enrollments LIMIT 1").get() as { id: string; person_id: string | null; company_id: string };
     const insert = (detail: string) => db.prepare("UPDATE track_progress SET destination_detail_id = ? WHERE subject_id = ?").run(detail, e.id);
     expect(() => insert(`instagram:c:${e.company_id}:https://www.instagram.com/example_harbour`)).not.toThrow();
@@ -74,7 +76,7 @@ describe("migration 25 on the integration tip's own database", () => {
 
   test("addChannel adds a channel once: a second call changes nothing", () => {
     const db = tipDatabase();
-    migrate(db, () => "2026-11-17T09:00:00.000Z");
+    migrate(db, () => "2026-11-17T09:00:00.000Z", UP_TO_25);
     const schema = () => db.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name").all();
     const once = schema();
     db.exec("PRAGMA foreign_keys = OFF");

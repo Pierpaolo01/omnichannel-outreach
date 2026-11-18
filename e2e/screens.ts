@@ -1,9 +1,11 @@
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { OUTREACH_STATUSES } from "../src/domain/outreach-status.ts";
+import { MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS } from "../src/domain/social-channels.ts";
 import type { BeforeLaunchView, CampaignDefinition, CampaignListItem, CompanyRecord, ControlStepView, ControlView, EnrollmentRead, ImportRecord, LeadControlApi, LeadSearchResult, NeedsAttention, OutreachStatus, PersonRecord, RecordCalls, RecordColleagues, RecordControls, RecordLead, SequenceView, SummaryEntry, TodayView } from "../src/shared/api.ts";
 import { refusedPair, respond, serverError } from "./mocks.ts";
 import { fakeLinkedinApp, type FakeLinkedinApp, type LinkedinScenario } from "./fake-linkedin.ts";
+import { fakeMessageRequestApp, trackIdOf, type FakeMessageRequestApp, type MessageRequestScenario, type ScenarioChannels } from "./fake-message-requests.ts";
 import { FAKE_INBOX, FAKE_NUMBERS, OWN_TEST_EMAIL, OWN_TEST_MOBILE, TWO_CHANNELS, fakeCallsApp, fakeInterruptionApp, fakePeopleApp, fakeProviderApp, fakeTestRunApp, fakeMeasuresApp, type MeasuresScenario, type CallsScenario, type FakeCallsApp, type FakePeopleApp, type FakeProviderApp, type FakeTestRunApp, type InterruptionScenario } from "./fake-provider.ts";
 import { fixture } from "./support.ts";
 
@@ -379,7 +381,7 @@ async function readyForm(page: Page): Promise<void> {
 
 /** An import whose rows include the ones that changed nothing and a number a colleague holds. */
 function importWithUnmatchedRows(): { campaign: { id: string; name: string; defaultTimezone: null; createdAt: string }; imports: ImportRecord[] } {
-  const reach = { email: false, sms: false, call: true, linkedin: false, instagram: false };
+  const reach = { email: false, sms: false, call: true, linkedin: false, instagram: false, facebook: false };
   const person = (name: string, title: string, outcome: "new" | "already_enrolled" | "updated", id: string): Extract<SummaryEntry, { channels: unknown }> => ({
     outcome,
     lead: { kind: "person", personId: id },
@@ -2234,7 +2236,28 @@ export const SCREENS: readonly Screen[] = [
   // Ticket 27: the InMail fallback, switched on, in the inspector; and a record whose wait ends with an InMail.
   { name: "linkedin: the inspector with the InMail fallback on", open: async (page) => { await linkedinScreen(page, "inmail-ready", (f) => `/campaigns/${f.campaign}?track=li`); await settle(page, "Send an InMail if they don’t accept in time"); } },
   { name: "linkedin: a record waiting, with the InMail fallback on", open: async (page) => { await linkedinScreen(page, "inmail", async (f) => `/leads/people/${await f.person("Nia Cole")}`); await settle(page, "an InMail goes instead"); } },
+  // Tickets 25 and 26: each message-request channel's screens on its simulated provider (`fakeMessageRequestApp`), and both
+  // channels in one campaign; no session of either is connected anywhere.
+  ...MESSAGE_REQUEST_CHANNELS.flatMap((channel): Screen[] => {
+    const name = SOCIAL_CHANNELS[channel].name;
+    const track = trackIdOf(channel);
+    return [
+      { name: `${channel}: the inspector's sender choice, one session unable to send`, open: async (page) => { await messageRequestScreen(page, channel, "two-sessions", (f) => `/campaigns/${f.campaign}?track=${track}`); await settle(page, "can’t send: the provider reports it unavailable"); } },
+      { name: `${channel}: before launch`, open: async (page) => { await messageRequestScreen(page, channel, "ready", (f) => `/campaigns/${f.campaign}/before-launch`); await settle(page, `account to message`); } },
+      { name: `${channel}: the test run tab with the user's own account`, open: async (page) => { await messageRequestScreen(page, channel, "ready", (f) => `/campaigns/${f.campaign}/test-run`); await settle(page, `Your ${name}`); } },
+      { name: `${channel}: a running track's record`, open: async (page) => { await messageRequestScreen(page, channel, "running", async (f) => `/leads/people/${await f.person("Pat Oneil")}`); await settle(page, `The first message went to their own ${name} account`); } },
+      { name: `${channel}: today with a session that has no allowance`, open: async (page) => { await messageRequestScreen(page, channel, "no-allowance", () => "/"); await settle(page, "can’t go yet"); } },
+    ];
+  }),
+  { name: "instagram and facebook: a record with both channels' tracks", open: async (page) => { await messageRequestScreen(page, "together", "running", async (f) => `/leads/people/${await f.person("Pat Oneil")}`, "screens-together"); await settle(page, "from your Page"); } },
 ];
+
+/** Opens a page of a message-request channel's simulated app (tickets 25 and 26), at its clock. */
+async function messageRequestScreen(page: Page, on: ScenarioChannels, scenario: MessageRequestScenario, path: (f: FakeMessageRequestApp) => string | Promise<string>, name = `screens-${scenario}`): Promise<void> {
+  const f = await fakeMessageRequestApp(on, scenario, name);
+  await page.clock.setFixedTime(f.h.clock);
+  await page.goto(`${f.url}${await path(f)}`);
+}
 
 /** Opens a page of ticket 24b's simulated-LinkedIn app, at its clock. */
 async function linkedinScreen(page: Page, scenario: LinkedinScenario, path: (f: FakeLinkedinApp) => string | Promise<string>): Promise<void> {
@@ -2552,14 +2575,14 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
     focused: (page) => page.getByRole("menuitem", { name: "Email track" }),
   },
   {
-    name: "Up on Add track opens its menu on the last item, Instagram track",
+    name: "Up on Add track opens its menu on the last item, the last message-request channel's track",
     open: async (page) => {
       const id = await campaignWith(page, "Focus: menu opens on last");
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
     },
     act: (page) => page.keyboard.press("ArrowUp"),
-    focused: (page) => page.getByRole("menuitem", { name: "Instagram track" }),
+    focused: (page) => page.getByRole("menuitem", { name: `${SOCIAL_CHANNELS[MESSAGE_REQUEST_CHANNELS.at(-1)!].name} track` }),
   },
   // Ticket 14c: phone tracks.
   {
@@ -2568,10 +2591,9 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       const id = await campaignWith(page, "Focus: add a phone track");
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add track" }).focus();
-      // Up opens the menu on its last item, Instagram track (ticket 25); LinkedIn track is above it, then Phone track.
-      await page.keyboard.press("ArrowUp");
-      await page.keyboard.press("ArrowUp");
-      await page.keyboard.press("ArrowUp");
+      // Up opens the menu on its last item, the last message-request channel's track; the others are above it, then
+      // LinkedIn track, then Phone track (tickets 25 and 26).
+      for (let i = 0; i < MESSAGE_REQUEST_CHANNELS.length + 2; i++) await page.keyboard.press("ArrowUp");
     },
     act: (page) => page.keyboard.press("Enter"),
     focused: (page) => page.getByLabel("Call script"),
@@ -2671,10 +2693,9 @@ export const FOCUS_TRANSITIONS: readonly FocusTransition[] = [
       const id = await campaignWith(page, "Focus: add a win-back SMS track", WITH_A_BRANCH);
       await page.goto(`/campaigns/${id}`);
       await page.getByRole("button", { name: "Add win-back track" }).focus();
-      // Email, SMS, LinkedIn, then Instagram (ticket 25): Up opens on Instagram, and SMS is two above it.
-      await page.keyboard.press("ArrowUp");
-      await page.keyboard.press("ArrowUp");
-      await page.keyboard.press("ArrowUp");
+      // Email, SMS, LinkedIn, then each message-request channel (tickets 25 and 26): Up opens on the last, and SMS is
+      // LinkedIn's one plus those above it.
+      for (let i = 0; i < MESSAGE_REQUEST_CHANNELS.length + 2; i++) await page.keyboard.press("ArrowUp");
     },
     act: (page) => page.keyboard.press("Enter"),
     focused: (page) => page.getByLabel("Text 1 message"),

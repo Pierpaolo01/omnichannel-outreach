@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type SyntheticEvent } from "react";
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type SyntheticEvent } from "react";
 import { contactsUnsaved } from "../../domain/test-contacts.ts";
 import type { TestRunRead, TestRunTab as TestRunTabView, TestStepRow } from "../../shared/api.ts";
 import { ApiRequestError, postJson, putJson } from "../api.ts";
@@ -11,7 +11,7 @@ import { answered, isTestRunPressKey, keepPress, pendingPress, type TestRunPress
 import { ConfirmStrip } from "../controls/ControlViews.tsx";
 import { testReplyHelper, WITHDRAWAL_ANSWERS } from "./linkedin-wording.ts";
 import { markRepliedWords, messageRequestTestHelper } from "./reply-mark-wording.ts";
-import { MESSAGE_REQUEST_CHANNELS, messageRequestRecord, SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel } from "../../domain/social-channels.ts";
+import { MESSAGE_REQUEST_CHANNELS, MESSAGE_REQUEST_TEST_CONTACT_LIMIT, messageRequestRecord, SOCIAL_CHANNEL_LIST, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel } from "../../domain/social-channels.ts";
 
 /** What the user typed on the Test run tab: the social fields only where the page offers them. */
 type Typed = { readonly email: string; readonly mobile: string; readonly linkedin?: string } & { readonly [C in MessageRequestChannel]?: string };
@@ -336,18 +336,21 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
         )}
         {asked.map((c) => {
           const facts = SOCIAL_CHANNELS[c];
+          const limit = MESSAGE_REQUEST_TEST_CONTACT_LIMIT[c];
           return (
-            <ContactField
-              key={c}
-              id={`${socialId}-${c}`}
-              label={`Your ${facts.name} ${facts.addressNoun}, for the messages`}
-              icon={c}
-              value={social[c]}
-              onChange={(v) => setSocial((now) => ({ ...now, [c]: v }))}
-              type="url"
-              placeholder={facts.exampleAddress}
-              error={fieldError?.field === c ? fieldError.message : tab.contacts.social[c].isALead ? `A lead or a company has this ${facts.addressNoun} now, so tests can’t use it. Use another of your own.` : null}
-            />
+            <Fragment key={c}>
+              <ContactField
+                id={`${socialId}-${c}`}
+                label={`Your ${facts.name} ${facts.addressNoun}, for the messages`}
+                icon={c}
+                value={social[c]}
+                onChange={(v) => setSocial((now) => ({ ...now, [c]: v }))}
+                type="url"
+                placeholder={facts.exampleAddress}
+                error={fieldError?.field === c ? fieldError.message : tab.contacts.social[c].isALead ? `A lead or a company has this ${facts.addressNoun} now, so tests can’t use it. Use another of your own.` : null}
+              />
+              {limit !== null && <p className="-mt-1.5 text-[13px] text-muted">{limit}</p>}
+            </Fragment>
           );
         })}
         <p className="text-[13.5px] text-muted">Only contacts that are your own. They are never leads: a lead’s email{asksLinkedin || asked.length > 0 ? `, number${asksLinkedin ? ", profile" : ""}${asked.length > 0 ? " or account" : ""}` : " or number"} is refused.</p>
@@ -385,9 +388,15 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
       <p className="text-[14px] text-ink-2">
         Sends every step of the current sequence to you, in order, from the real sender accounts. Each wait is cut to about a minute
         {asksLinkedin ? ", except the wait for you to accept the LinkedIn invite on your test profile, which you do by hand" : ""}.
-        {/* The InMail fallback in a test (ticket 27; ADR 0004 14.6): reached only by leaving the invite unaccepted. */}
+        {/* The InMail fallback in a test (ticket 27; ADR 0004 15.6): reached only by leaving the invite unaccepted. */}
         {inmailOn ? " With the InMail fallback on, the test reaches the InMail only if you leave the test invite unaccepted for the whole wait; the InMail then spends one of your session’s InMail credits." : ""}
       </p>
+      {/* Where a test run with such a channel's steps starts: what the app cannot tell about its test contact (ADR 0004 14.3). */}
+      {MESSAGE_REQUEST_CHANNELS.filter((c) => MESSAGE_REQUEST_TEST_CONTACT_LIMIT[c] !== null && editor.view.definition.tracks.some((t) => !t.removed && t.channel === c)).map((c) => (
+        <p key={c} className="text-[13.5px] text-ink-2">
+          {MESSAGE_REQUEST_TEST_CONTACT_LIMIT[c]}
+        </p>
+      ))}
       <div className="flex flex-wrap items-center gap-2.5">
         {running && !(pending && press.kind === "run") ? (
           <>

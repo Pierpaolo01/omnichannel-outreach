@@ -10,6 +10,7 @@ const evidence = (email: number | null, sms: number | null, linkedin: number | n
   sms: { contactAt: sms, freshForMs: 60_000, failedAt: null, failedPart: null },
   linkedin: { contactAt: linkedin, freshForMs: 60_000, failedAt: null, failedPart: null },
   instagram: { contactAt: T, freshForMs: 60_000, failedAt: null, failedPart: null },
+  facebook: { contactAt: T, freshForMs: 60_000, failedAt: null, failedPart: null },
 });
 
 describe("a provider is fresh while its last contact stands", () => {

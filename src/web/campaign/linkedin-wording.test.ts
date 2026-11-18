@@ -144,7 +144,7 @@ describe("Activity's LinkedIn entries in words", () => {
   });
 });
 
-describe("the InMail fallback on the record (ticket 27, ADR 0004 14.7)", () => {
+describe("the InMail fallback on the record (ticket 27, ADR 0004 15.7)", () => {
   const ZONE = "Europe/London";
   const REPORT = "2026-11-03T21:00:00.000Z";
   const inm = (fields: Partial<LinkedinTrackView["inmail"]>): LinkedinTrackView["inmail"] => ({ on: true, state: null, work: null, sentAt: null, sentFrom: null, reportedAt: REPORT, ...fields });

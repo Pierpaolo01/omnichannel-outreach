@@ -32,6 +32,9 @@ export const UNDO_SINCE_18 = `
  */
 export const UNDO_25 = undoTo(24);
 
+/** Migration 26 undone (ticket 26): the schema taken back to what migrations 1 to 25 make, computed the same way. */
+export const UNDO_26 = undoTo(25);
+
 /** Migration 24 undone (ticket 24b): a LinkedIn skip's recorded cause, dropped. Run first by every undo that goes back past 24. */
 export const UNDO_24 = `${UNDO_25}
   ALTER TABLE track_progress DROP COLUMN skip_cause;

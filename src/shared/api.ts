@@ -104,7 +104,7 @@ export interface MessageMeasures {
 export interface LinkedinMeasures {
   readonly invitesSent: number;
   readonly invitesAccepted: number;
-  /** InMails the session reported sent, by the fallback (ADR 0004 14.6). Not among `messagesSent`. */
+  /** InMails the session reported sent, by the fallback (ADR 0004 15.6). Not among `messagesSent`. */
   readonly inmailsSent: number;
   readonly messagesSent: number;
   readonly failed: number;
@@ -193,7 +193,7 @@ export type StepWaitApi =
    */
   | "no_allowance"
   /**
-   * An InMail the acceptance expiry chose whose session cannot send it now by its own report (ADR 0004 14.3): `inmail` on
+   * An InMail the acceptance expiry chose whose session cannot send it now by its own report (ADR 0004 15.3): `inmail` on
    * the read says whether it no longer reports Premium or Sales Navigator, or has no credit free. No time.
    */
   | "inmail_unavailable";
@@ -231,7 +231,7 @@ export interface ControlStepView {
   readonly channel: TrackChannelApi;
   readonly branch: "main" | "win_back";
   readonly stepId: string;
-  /** A LinkedIn InMail fallback step, named by its role (ADR 0004 14.9). */
+  /** A LinkedIn InMail fallback step, named by its role (ADR 0004 15.9). */
   readonly role?: "inmail";
   /** Its place among the track's steps, from 1, and how many there are. */
   readonly number: number;
@@ -546,9 +546,9 @@ export interface EditImpactChange {
   readonly skips: number;
   /** Leads whose affected step is with a provider now: it goes as it was handed. */
   readonly inFlight: number;
-  /** Leads waiting for acceptance whom a switched-on InMail reaches only if the invite is not accepted and the session can send one (14.8). */
+  /** Leads waiting for acceptance whom a switched-on InMail reaches only if the invite is not accepted and the session can send one (15.8). */
   readonly mayReach: number;
-  /** Leads waiting for acceptance whom a switched-off InMail would have reached under that same condition (14.8). */
+  /** Leads waiting for acceptance whom a switched-off InMail would have reached under that same condition (15.8). */
   readonly maySkip: number;
   /** Leads past it, finished with that track, in the other branch, or ended. */
   readonly untouched: number;
@@ -612,7 +612,7 @@ export interface SendView {
 export interface StepProgressView {
   readonly stepId: string;
   readonly number: number;
-  /** A LinkedIn InMail fallback step, named by its role; its number then counts nothing (ADR 0004 14.9). */
+  /** A LinkedIn InMail fallback step, named by its role; its number then counts nothing (ADR 0004 15.9). */
   readonly role?: "inmail";
   readonly removed: boolean;
   readonly result: "sent" | "skipped" | "failed" | null;
@@ -656,12 +656,12 @@ export interface LinkedinTrackView {
   /** An invite already pending on LinkedIn that this application did not send, first seen then (question Q42). */
   readonly pendingElsewhereSince: string | null;
   /**
-   * The InMail fallback (ticket 27; ADR 0004 14.3), from stored facts: `on`, the track has a live InMail step now; `state`,
+   * The InMail fallback (ticket 27; ADR 0004 15.3), from stored facts: `on`, the track has a live InMail step now; `state`,
    * what the acceptance expiry judged and what became of it (null before the expiry, or with the fallback off then); `work`,
    * the InMail's own work, `sent` once recorded sent, `handed` while with the session and not known to have gone; `sentAt`,
    * its send's instant once recorded.
    */
-  readonly inmail: { readonly on: boolean; readonly state: import("../domain/sequence/state.ts").InmailState | null; readonly work: "sent" | "handed" | null; readonly sentAt: string | null; /** The session the InMail went from, by its label: from the sent work (14.7). */ readonly sentFrom: string | null; /** The instant of the session's report the expiry judged on (14.5). */ readonly reportedAt: string | null };
+  readonly inmail: { readonly on: boolean; readonly state: import("../domain/sequence/state.ts").InmailState | null; readonly work: "sent" | "handed" | null; readonly sentAt: string | null; /** The session the InMail went from, by its label: from the sent work (15.7). */ readonly sentFrom: string | null; /** The instant of the session's report the expiry judged on (15.5). */ readonly reportedAt: string | null };
 }
 
 /**
@@ -1028,7 +1028,7 @@ export interface CopyPreview {
     readonly channel: SendChannelApi;
     /** Its number within its track: Email 2, Text 1. */
     readonly number: number;
-    /** A LinkedIn InMail fallback, named by its role (ADR 0004 14.9). */
+    /** A LinkedIn InMail fallback, named by its role (ADR 0004 15.9). */
     readonly role?: "inmail";
     /** The day the projection sends it to this lead, counting launch day as day 1; null with `noDay` otherwise. */
     readonly day: number | null;

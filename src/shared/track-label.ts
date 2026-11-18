@@ -47,7 +47,7 @@ export function stepNoun(track: Pick<TrackLabel, "branch">, channel: SendChannel
 }
 
 /**
- * A LinkedIn step's role (ADR 0004 3.1, 14.9): an InMail step by its role, which reads carry with the step; any other by its
+ * A LinkedIn step's role (ADR 0004 3.1, 15.9): an InMail step by its role, which reads carry with the step; any other by its
  * number among the track's live steps that are not InMail steps, counted from 1 (`stepNumber`), as the engine's
  * `linkedinStepKind` decides it. A test holds the two equal at every position, with the fallback on and off.
  */

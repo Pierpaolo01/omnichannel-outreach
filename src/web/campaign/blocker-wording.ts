@@ -27,7 +27,7 @@ const and = (items: readonly string[]): string => (items.length <= 1 ? (items[0]
 /** A step's title in its track, which the sentence names beside it: "Email 2", "Text 1", a LinkedIn step by its role ("First message"). */
 const stepName = (track: TrackDefinition | undefined, number: number, stepId?: string): string => {
   const channel = track?.channel ?? "email";
-  // The InMail fallback by its role (ADR 0004 14.9), from the step the blocker names.
+  // The InMail fallback by its role (ADR 0004 15.9), from the step the blocker names.
   const role = track?.steps.some((s) => s.id === stepId && s.role === "inmail") ? ("inmail" as const) : undefined;
   return channel === "call" ? `${STEP_NOUN.call} ${number}` : stepTitle({ branch: "main" }, channel, number, role);
 };

@@ -127,7 +127,7 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
             const result = s.results.find((r) => r.stepId === st.id);
             return {
               stepId: st.id,
-              // A LinkedIn step by its role's numbering, the InMail named by its role (ADR 0004 14.9); other channels as before.
+              // A LinkedIn step by its role's numbering, the InMail named by its role (ADR 0004 15.9); other channels as before.
               number: track.channel === "linkedin" ? stepNumber(track, st.id) : i + 1,
               ...stepRoleOf(track, st.id),
               removed: st.removed,
@@ -267,7 +267,7 @@ export async function needsAttention(
       // LinkedIn too (council on dee365d, item 4), each session judged by the step's own kind of action (`forAction`).
       if (channel === undefined || channel === "call") continue;
       const social = socialActionOf(socialStepKind(s.campaign.definition.tracks.find((t) => t.id === item.trackId) ?? { channel, steps: [] }, item.stepId));
-      // The allowance it waits on (ADR 0004 14.5): an InMail waits on the session's messages.
+      // The allowance it waits on (ADR 0004 15.5): an InMail waits on the session's messages.
       const action = social === null ? null : allowanceOf(social);
       const step = s.campaign.definition.tracks.find((t) => t.id === item.trackId)?.steps.find((x) => x.id === item.stepId);
       const base = { enrollmentId: id, trackId: item.trackId, stepId: item.stepId, channel, dueAt: new Date(item.dueWall).toISOString() };
@@ -402,7 +402,7 @@ export function linkedinTrackView(s: SubjectState, trackId: string, labels: Read
   };
 }
 
-/** The InMail fallback's stored facts for a read (ADR 0004 14.7): the switch now, the expiry's judgment, the InMail's work and send. */
+/** The InMail fallback's stored facts for a read (ADR 0004 15.7): the switch now, the expiry's judgment, the InMail's work and send. */
 function inmailView(s: SubjectState, trackId: string, labels: Readonly<Record<string, string>>): LinkedinTrackView["inmail"] {
   const track = s.campaign.definition.tracks.find((t) => t.id === trackId);
   const p = s.tracks.find((x) => x.trackId === trackId);
@@ -416,7 +416,7 @@ function inmailView(s: SubjectState, trackId: string, labels: Readonly<Record<st
     state: p?.inmail ?? null,
     work: sent ? "sent" : work.some((w) => w.settled === null) ? "handed" : null,
     sentAt: result ? new Date(result.atWall).toISOString() : sentWork?.sentWall != null ? new Date(sentWork.sentWall).toISOString() : null,
-    // The session it went from, from the sent work's own account: a sentence about what went names it (ADR 0004 14.7).
+    // The session it went from, from the sent work's own account: a sentence about what went names it (ADR 0004 15.7).
     sentFrom: sentWork ? (labels[sentWork.accountId] ?? sentWork.accountId) : null,
     reportedAt: p?.inmailReportedWall != null ? new Date(p.inmailReportedWall).toISOString() : null,
   };

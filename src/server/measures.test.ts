@@ -34,7 +34,7 @@ describe("GET /api/campaigns/:id/measures", () => {
       email: NO_MESSAGES,
       sms: NO_MESSAGES,
       linkedin: { invitesSent: 0, invitesAccepted: 0, inmailsSent: 0, messagesSent: 0, failed: 0, replies: 0, fromTests: { invitesSent: 0, invitesAccepted: 0, inmailsSent: 0, messagesSent: 0, failed: 0, replies: 0 } },
-      messageRequests: { instagram: { messagesSent: 0, failed: 0, replies: 0, fromTests: { messagesSent: 0, failed: 0, replies: 0 } } },
+      messageRequests: { instagram: { messagesSent: 0, failed: 0, replies: 0, fromTests: { messagesSent: 0, failed: 0, replies: 0 } }, facebook: { messagesSent: 0, failed: 0, replies: 0, fromTests: { messagesSent: 0, failed: 0, replies: 0 } } },
       calls: { ...NO_CALLS, fromTests: NO_CALLS },
       replyRate: { numerator: 0, denominator: 0, percent: null, fromTests: { numerator: 0, denominator: 0 } },
       connectRate: { numerator: 0, denominator: 0, percent: null, fromTests: { numerator: 0, denominator: 0 } },

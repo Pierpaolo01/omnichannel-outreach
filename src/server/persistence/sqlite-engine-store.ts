@@ -42,7 +42,7 @@ import type { StoredTestContacts, TestRunRecord, TestStop } from "../engine/engi
 import type { SocialAllowances, BounceEvent, CallNoteRecord, MeasureFacts, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, RunningSave, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 import { linkedinProfileKey } from "../../domain/linkedin-profile.ts";
-import { accountDetailId, accountOfDetailId, isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, MESSAGE_REQUEST_COLUMNS, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel, type SocialSenderKind } from "../../domain/social-channels.ts";
+import { accountDetailId, accountOfDetailId, isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, MESSAGE_REQUEST_COLUMNS, MESSAGE_REQUEST_MAY_NAME, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel, type SocialSenderKind } from "../../domain/social-channels.ts";
 import { holdsLeaseOn, releaseLeaseOn, takeLeaseOn } from "./lease-table.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -429,8 +429,9 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   /**
-   * Whether some person's or company's record holds this account on a message-request channel (ADR 0004 13.8's boundary),
-   * read from the import's cells by the channel's one normaliser.
+   * Whether some person's or company's record may hold this account on a message-request channel (ADR 0004 13.8's boundary,
+   * 14.3): any key an imported cell may name, a superset of the account key, so a form of a prospect's account the app
+   * never messages still refuses it as a test contact.
    */
   private leadHasAccount(channel: MessageRequestChannel, key: string): boolean {
     const columns = MESSAGE_REQUEST_COLUMNS[channel];
@@ -438,7 +439,7 @@ export class SqliteEngineStore implements EngineStore {
       ...this.sql("SELECT json_extract(source_row, '$.' || ?) AS cell FROM people WHERE json_extract(source_row, '$.' || ?) <> ''").all(columns.people, columns.people),
       ...this.sql("SELECT json_extract(source_row, '$.' || ?) AS cell FROM companies WHERE json_extract(source_row, '$.' || ?) <> ''").all(columns.businesses, columns.businesses),
     ];
-    return cells.some((r) => SOCIAL_CHANNELS[channel].accountKey(String(r["cell"] ?? "")) === key);
+    return cells.some((r) => MESSAGE_REQUEST_MAY_NAME[channel](String(r["cell"] ?? "")).includes(key));
   }
 
   /** Whether some person's record holds this LinkedIn profile (ADR 0004 section 8's boundary), read by the one key rule. */
@@ -823,7 +824,7 @@ export class SqliteEngineStore implements EngineStore {
            WHERE sender_accounts.channel = excluded.channel`,
           [a.id, a.channel, a.label, a.capacity, a.gapMs, a.k, a.healthy ? 1 : 0, a.healthy ? null : (a.problem ?? "unhealthy"), a.resetZone, a.dailyLimit, isMessageRequestChannel(a.channel) ? (a.socialKind ?? null) : null],
         );
-        // A LinkedIn session's InMail report (ADR 0004 14.5), with when it was read: kept until the session reports again.
+        // A LinkedIn session's InMail report (ADR 0004 15.5), with when it was read: kept until the session reports again.
         if (a.channel === "linkedin" && a.inmail !== undefined) {
           const report = a.inmail;
           this.run(
@@ -1229,7 +1230,7 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   /**
-   * A LinkedIn session's InMail standing (ADR 0004 14.5): its last report, the InMails that report cannot include yet (work
+   * A LinkedIn session's InMail standing (ADR 0004 15.5): its last report, the InMails that report cannot include yet (work
    * unsettled, or sent at or after the report: a claim's reservation, work handed and not settled, a send since), and the
    * InMails running tracks chose on it whose work is not out (none yet, or only work that settled not sent).
    */
@@ -1239,7 +1240,7 @@ export class SqliteEngineStore implements EngineStore {
     const credits = numOrNull(account, "inmail_credits") ?? 0;
     // A session that never reported, or reports no plan, can back no InMail: no holding to count.
     if (plan !== "premium" && plan !== "sales_navigator") return { plan, credits, reportedWall, holdings: [] };
-    // Every credit held on the session (14.5), earliest acquired first, but those the report already includes: an InMail sent
+    // Every credit held on the session (15.5), earliest acquired first, but those the report already includes: an InMail sent
     // before the report was read.
     const holdings = this.sql(
       `SELECT t.subject_id, t.track_id, t.inmail_hold_wall FROM track_progress t
@@ -1751,7 +1752,7 @@ export class SqliteEngineStore implements EngineStore {
       if ((was?.connection ?? null) !== null && was?.connection !== t.connection) throw new Error(`a track's connection is set once (${t.trackId})`);
       // The deadline is stored once: it moves only with the wait it was resolved from (an edit), never on its own.
       if (was?.acceptBy != null && t.acceptBy !== was.acceptBy && t.acceptByDays === was.acceptByDays) throw new Error(`an acceptance deadline moves only with an edit of its wait (${t.trackId})`);
-      // The InMail state too (ADR 0004 14.10): null to any, then only from `chosen`, and never back to null.
+      // The InMail state too (ADR 0004 15.10): null to any, then only from `chosen`, and never back to null.
       if ((was?.inmail ?? null) !== null && t.inmail !== was?.inmail && (was?.inmail !== "chosen" || (t.inmail ?? null) === null)) throw new Error(`a track's InMail state only moves forward (${t.trackId})`);
       const order = { wanted: 1, withdrawn: 2, accepted_first: 2, kept_by_user: 2 } as const;
       if (was?.inviteWithdrawal && (!t.inviteWithdrawal || order[t.inviteWithdrawal] < order[was.inviteWithdrawal] || (order[was.inviteWithdrawal] === 2 && t.inviteWithdrawal !== was.inviteWithdrawal))) throw new Error(`an invite's withdrawal only moves forward (${t.trackId})`);
@@ -1806,7 +1807,7 @@ export class SqliteEngineStore implements EngineStore {
           a.id, id, a.trackId, a.stepId, a.accountId, a.destinationDetailId, a.destination, a.state, a.copy ? JSON.stringify(a.copy) : null, a.threading, a.threadRef,
           a.retryable ? 1 : 0, a.notSentIsFinal ? 1 : 0, a.idempotencyKey, a.calls, a.claimedWall, a.handedAt, a.handedWall, a.lastCallWall, a.presendCheckedWall,
           a.presendFoundReply ? 1 : 0, a.endedBy, a.withdrawRequested ? 1 : 0, a.withdrawCalled ? 1 : 0, a.awaitingAnswer ? 1 : 0, a.retry, a.rejectReason,
-          // An InMail is message work marked as one (ADR 0004 14.10): the action column keeps the allowance it counts on.
+          // An InMail is message work marked as one (ADR 0004 15.10): the action column keeps the allowance it counts on.
           a.action === undefined ? null : a.action === "inmail" ? "message" : a.action, a.action === "inmail" ? 1 : 0,
         ],
       );

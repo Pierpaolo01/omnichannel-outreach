@@ -41,7 +41,7 @@ export interface HandoverRequest {
   readonly stepId: string;
   /**
    * A social step's action (ADR 0004 2.1): an invite, whose note is `rendered.body` (empty: no note, decided in the handover
-   * transaction), a message, or an InMail (ADR 0004 14.3: a message to a person who is not a connection, which spends one of
+   * transaction), a message, or an InMail (ADR 0004 15.3: a message to a person who is not a connection, which spends one of
    * the session's InMail credits). Absent on email and SMS.
    */
   readonly action?: "invite" | "message" | "inmail";
@@ -100,7 +100,7 @@ export interface PresendRequest {
 }
 
 /**
- * A LinkedIn session's InMail standing, by its own reading of the account (ADR 0004 14.5): its plan, and the InMail credits it
+ * A LinkedIn session's InMail standing, by its own reading of the account (ADR 0004 15.5): its plan, and the InMail credits it
  * has now. Reported with the session's listing; the application invents neither.
  */
 export interface InmailReport {

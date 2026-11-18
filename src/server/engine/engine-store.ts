@@ -74,7 +74,7 @@ export interface SenderAccountConfig {
   readonly problem?: string | null;
   readonly resetZone: string;
   /**
-   * A LinkedIn session's InMail standing, as the session reported it with this listing (ADR 0004 14.5); null: a report the
+   * A LinkedIn session's InMail standing, as the session reported it with this listing (ADR 0004 15.5); null: a report the
    * store cannot hold (read as no plan). Absent: no report with this listing, so the last one stands.
    */
   readonly inmail?: { readonly plan: "premium" | "sales_navigator" | "none"; readonly credits: number } | null;
@@ -108,7 +108,7 @@ export function storableAccount<T extends SenderAccountConfig>(reported: T, chan
     whole(r["dailyLimit"], 0) &&
     whole(r["k"], 1) &&
     (r["gapMs"] === null || whole(r["gapMs"], 1));
-  // A session's InMail report that is not a known plan and a whole number of credits is read as none (ADR 0004 14.5): an
+  // A session's InMail report that is not a known plan and a whole number of credits is read as none (ADR 0004 15.5): an
   // InMail never goes on a report the engine cannot read.
   const inmail = r["inmail"];
   const report = inmail as { plan?: unknown; credits?: unknown } | null | undefined;
@@ -440,7 +440,7 @@ export interface EngineStore {
   /** Reply events pending correlation. */
   pendingReplies(): Promise<ReplyEvent[]>;
 
-  /** `now`: when the listing was read, the instant a LinkedIn session's InMail report is stored with (ADR 0004 14.5). */
+  /** `now`: when the listing was read, the instant a LinkedIn session's InMail report is stored with (ADR 0004 15.5). */
   upsertAccounts(accounts: readonly SenderAccountConfig[], now?: number): Promise<void>;
   /** Marks unhealthy every account of `channel` its port no longer reports: it is disconnected. */
   disconnectUnlisted(channel: SendChannel, listed: readonly string[]): Promise<void>;

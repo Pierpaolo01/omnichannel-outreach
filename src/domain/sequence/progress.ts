@@ -248,14 +248,14 @@ export function finishTrack(state: SubjectState, trackId: string, reason: Finish
           : {};
   const finished = withTrack(state, trackId, (t) => ({ ...t, finishedAt: at, finishedWall: atWall, finishReason: reason, ...cause }));
   const closed = { ...finished, callTasks: finished.callTasks.map((t) => (t.trackId === trackId && t.open ? { ...t, open: false, closedWall: atWall } : t)) };
-  // A track finishing without its InMail having gone releases the credit it held (ADR 0004 14.5).
+  // A track finishing without its InMail having gone releases the credit it held (ADR 0004 15.5).
   return quiesce(releaseInmailHold(closed, trackId), trackId);
 }
 
 /** Ends the lead in this campaign: its outreach quiesces and its clock freezes. */
 export function end(state: SubjectState, reason: EndReason, now: number): SubjectState {
   let ended: SubjectState = { ...state, subject: { ...state.subject, ended: reason, endedAt: leadNow(state.subject.clock, now), endedWall: now } };
-  // A lead stopped or ended releases the credits its InMails held and had not used (ADR 0004 14.5; council on 8b0c846, item
+  // A lead stopped or ended releases the credits its InMails held and had not used (ADR 0004 15.5; council on 8b0c846, item
   // 7): a restart acquires again, and never takes back what another lead holds by then.
   for (const p of state.tracks) ended = releaseInmailHold(ended, p.trackId);
   return synced(quiesce(ended), now);
@@ -288,7 +288,7 @@ export function nextStepOf(state: SubjectState, track: TrackDefinition): string 
 
 /**
  * The steps still ahead of the lead in a track, in order (5.1): live, after its last resolved step, with no result. A LinkedIn
- * InMail step is ahead only once the acceptance expiry chose it (ADR 0004 14.3): until then the walk passes over it, so a lead
+ * InMail step is ahead only once the acceptance expiry chose it (ADR 0004 15.3): until then the walk passes over it, so a lead
  * waiting for acceptance waits at its first message, as with the fallback off.
  */
 export function remainingSteps(state: SubjectState, track: TrackDefinition): string[] {
@@ -351,7 +351,7 @@ export const rules = {
    */
   conversationKeysOwnOnly: false,
   /**
-   * Whether the step must wait (ADR 0004 3.5, 14.4): the invite never; the InMail until the expiry chose it, and for good once
+   * Whether the step must wait (ADR 0004 3.5, 15.4): the invite never; the InMail until the expiry chose it, and for good once
    * connected; the first message until connected; a follow-up until connected or an InMail is known sent.
    */
   connectionGate: (track: TrackDefinition, stepId: string, progress: TrackProgress): boolean => {
@@ -375,10 +375,10 @@ export const rules = {
       }
     }
   },
-  /** The expiry judges the session's InMail standing (ADR 0004 14.5); false only for the mutation that takes every session as eligible. */
+  /** The expiry judges the session's InMail standing (ADR 0004 15.5); false only for the mutation that takes every session as eligible. */
   inmailJudgesStanding: true,
   /**
-   * The InMail fallback's seams for the generated runs' mutations (ADR 0004 14.11), each true but in its mutation: the InMail
+   * The InMail fallback's seams for the generated runs' mutations (ADR 0004 15.11), each true but in its mutation: the InMail
    * waits for the expiry's choice; an acceptance before it is handed over skips it; a refusal ends the track; switching the
    * fallback off reaches a chosen InMail (and a removed InMail step is off); the InMail takes the first message's place.
    */
@@ -389,13 +389,13 @@ export const rules = {
   inmailOffWhenRemoved: true,
   inmailTakesFirstPlace: true,
   /**
-   * A restart acquires a credit only if one is free (14.5); false only for the mutation "a restart restores a commitment
+   * A restart acquires a credit only if one is free (15.5); false only for the mutation "a restart restores a commitment
    * without acquiring", which re-takes it at the place it had (its InMail's due time), ahead of a lead that chose since.
    */
   restartAcquires: true,
-  /** The handover re-reads the session's report (14.5, predicate 20); false only for the mutation that does not. */
+  /** The handover re-reads the session's report (15.5, predicate 20); false only for the mutation that does not. */
   handoverRechecksBacking: true,
-  /** The replaced first message is named at the choice (14.15); false only for the mutation that finds it among the live steps at the send. */
+  /** The replaced first message is named at the choice (15.15); false only for the mutation that finds it among the live steps at the send. */
   replacedNamedAtChoice: true,
   /**
    * The replaced step is the first live message at the choice; false only for the mutation "the replaced step picked by
@@ -423,7 +423,7 @@ export function advanceTrack(state: SubjectState, track: TrackDefinition, at: nu
   // step's, so a skip, an edit or a restart cannot reach a message before it. Until then the step is pending with no due time.
   if (rules.connectionGate(track, stepId, progress)) {
     // The InMail the expiry chose resolved without going (skipped by the user; refused is recorded by its refusal): nothing
-    // else can make the track's messages due, so it takes the withdrawal path now (ADR 0004 14.3).
+    // else can make the track's messages due, so it takes the withdrawal path now (ADR 0004 15.3).
     if (progress.inmail === "chosen") {
       const im = state.results.find((r) => r.trackId === track.id && linkedinStepKind(track, r.stepId) === "inmail");
       if (im && im.result !== "sent") return inmailNotSent(state, track.id, im.reason === "by_user" ? "skipped_by_user" : "refused", at, atWall);
@@ -525,7 +525,7 @@ export function evaluate(
     if (awaitingAcceptance(s, track.id) && (progressOf(s, track.id)?.acceptBy ?? Infinity) <= lead) s = (options.inviteExpired ?? inviteExpired)(s, track.id, now);
   }
 
-  // A restarted lead's chosen InMail acquires a credit again, if one is free (ADR 0004 14.5).
+  // A restarted lead's chosen InMail acquires a credit again, if one is free (ADR 0004 15.5).
   s = reacquireInmailHolds(s, now);
 
   // Next steps for started tracks with no pending step and no live attempt.
@@ -770,7 +770,7 @@ function applySettledAcceptances(state: SubjectState, now: number): SubjectState
  * 56030c4, item C). Every transition that settles work passes here (`applyToWork` and `applyToAttempt` end with `attend`):
  * a lookup's answer, a provider's refusal or late answer, a confirmed withdrawal, the user's mark, a claim that expires (at
  * store open too), whatever the lead's state. A track finished, or a lead ended (stopped, replied, won back onto another
- * branch), owes no InMail; its holding was kept at that moment only while its InMail might have gone (14.5). A running or
+ * branch), owes no InMail; its holding was kept at that moment only while its InMail might have gone (15.5). A running or
  * paused lead's chosen InMail still owes its send, so its holding stays; sent work keeps it until a report absorbs it.
  */
 function releaseSettledHolds(state: SubjectState): SubjectState {
@@ -935,7 +935,7 @@ function recordSent(
   // A sent LinkedIn invite starts its acceptance wait, resolved once from the send point (ADR 0004 3.2).
   const kind = linkedinStepKind(track, attempt.stepId);
   if (kind === "invite") s = withTrack(s, track.id, (t) => ({ ...t, ...acceptDeadline(s, track, point.at, point.atWall) }));
-  // The InMail went (ADR 0004 14.3): the follow-ups may go without a connection, and the first message is not sent, since
+  // The InMail went (ADR 0004 15.3): the follow-ups may go without a connection, and the first message is not sent, since
   // the InMail took its place (question Q52); the next follow-up resolves from the InMail's send.
   if (kind === "inmail") {
     s = withTrack(s, track.id, (t) => ({ ...t, inmail: "sent" }));
@@ -979,7 +979,7 @@ function recordRejected(state: SubjectState, attempt: Attempt, reason: Attempt["
       : { ...state, results: [...state.results, { stepId: attempt.stepId, trackId: attempt.trackId, result: "failed" as const, reason: "not connected", at, atWall, attemptId: attempt.id }] };
     return checkEndings(finishTrack(failed, attempt.trackId, "failed_bad_destination", at, atWall), now);
   }
-  // LinkedIn refused the InMail for this recipient (ADR 0004 14.3, question Q55): a failure with its own cause, the profile
+  // LinkedIn refused the InMail for this recipient (ADR 0004 15.3, question Q55): a failure with its own cause, the profile
   // kept good, and the track takes the withdrawal path at the refusal.
   if (reason === "inmail_refused" && rules.refusedInmailEndsTrack) {
     if (!progress || progress.finishedAt !== null) return state;
@@ -1068,7 +1068,7 @@ export function alignPending(state: SubjectState, now: number): SubjectState {
     if (p.startedAt === null || p.finishedAt !== null || p.nextStepId === null || p.basisAt === null || p.basisWall === null) continue;
     const track = s.campaign.definition.tracks.find((t) => t.id === p.trackId);
     if (!track || inFlight(s, p.trackId)) continue;
-    // The InMail the expiry chose, switched off before it was handed over (ADR 0004 14.8): it is not sent, and the track takes
+    // The InMail the expiry chose, switched off before it was handed over (ADR 0004 15.8): it is not sent, and the track takes
     // the withdrawal path at the edit's instant.
     if (rules.switchOffReachesChosen && rules.inmailOffWhenRemoved && p.inmail === "chosen" && linkedinStepKind(track, p.nextStepId) === "inmail" && !track.steps.some((x) => x.id === p.nextStepId && !x.removed)) {
       s = inmailNotSent(s, track.id, "switched_off", leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now));
@@ -1415,7 +1415,7 @@ export function conversationKeysOf(state: SubjectState): string[] {
   return [...new Set([...state.lead.details.map((d) => d.key), ...state.attempts.map((a) => a.destination), ...standing])].sort();
 }
 
-/** The InMail standings a subject's chosen InMails read (14.5): each one's session, by its version key. */
+/** The InMail standings a subject's chosen InMails read (15.5): each one's session, by its version key. */
 function inmailStandingKeys(state: SubjectState): string[] {
   const keys = state.tracks.filter(waitsOnStanding).map((p) => `inmail:${p.inmailSession}`);
   // An expiry waiting for its session's next report (an old one, the session signed in) reads that session's standing too.
@@ -1425,7 +1425,7 @@ function inmailStandingKeys(state: SubjectState): string[] {
 }
 const waitsOnStanding = (p: TrackProgress): boolean => p.inmail === "chosen" && p.finishedAt === null && (p.inmailSession ?? null) !== null;
 
-/** When a chosen InMail's session report grows too old to back it (14.5): its standing changes with time alone. */
+/** When a chosen InMail's session report grows too old to back it (15.5): its standing changes with time alone. */
 function inmailStandingHorizons(state: SubjectState): number[] {
   return state.tracks.filter(waitsOnStanding).flatMap((p) => {
     const reported = state.accounts[p.inmailSession ?? ""]?.inmail?.reportedWall ?? null;
@@ -1533,7 +1533,7 @@ export function awaitingAcceptance(state: SubjectState, trackId: string): boolea
   const p = progressOf(state, trackId);
   const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
   if (!p || !track || track.channel !== "linkedin" || p.startedAt === null || p.finishedAt !== null) return false;
-  // Once the expiry judged the InMail fallback, the wait is over (ADR 0004 14.3), whatever it chose.
+  // Once the expiry judged the InMail fallback, the wait is over (ADR 0004 15.3), whatever it chose.
   return (p.connection ?? null) === null && (p.acceptBy ?? null) !== null && (p.inmail ?? null) === null;
 }
 
@@ -1574,7 +1574,7 @@ export function recordAcceptance(state: SubjectState, trackId: string, providerT
   const p = progressOf(state, trackId);
   if (!p) return state;
   const s = (p.acceptedWall ?? null) === null ? withTrack(state, trackId, (t) => ({ ...t, acceptedWall: Math.min(Math.max(providerTime, handedWall), now) })) : state;
-  // The expiry chose the InMail and it has not been handed over (ADR 0004 14.3, question Q56): a person who accepted is a
+  // The expiry chose the InMail and it has not been handed over (ADR 0004 15.3, question Q56): a person who accepted is a
   // connection, so the InMail is not sent, and the first message follows the connection.
   if (p.inmail === "chosen" && p.finishedAt === null && (p.connection ?? null) === null && rules.acceptanceSkipsInmail) {
     if (!inmailMayBeSkipped(s, trackId)) return s;
@@ -1588,7 +1588,7 @@ export function recordAcceptance(state: SubjectState, trackId: string, providerT
 }
 
 /**
- * Whether a track's chosen InMail can still be skipped for a connection (ADR 0004 14.3): the track runs on, unconnected, its
+ * Whether a track's chosen InMail can still be skipped for a connection (ADR 0004 15.3): the track runs on, unconnected, its
  * InMail is the pending step, and no InMail work may have gone. Work that may have gone (unsettled, or sent) stops the skip;
  * work refused or settled not sent does not (review bot on b49a71b).
  */
@@ -1601,7 +1601,7 @@ function inmailMayBeSkipped(state: SubjectState, trackId: string): boolean {
 }
 
 /**
- * The one transition by which a connection overtakes a chosen InMail (ADR 0004 14.3, question Q56): its claims withdrawn,
+ * The one transition by which a connection overtakes a chosen InMail (ADR 0004 15.3, question Q56): its claims withdrawn,
  * the InMail skipped as `accepted`, its credit released, and the track connected, so the first message follows the
  * connection. Used by an acceptance, by an acceptance recorded while the InMail's work was uncertain once that work settles
  * not sent (`attend`), and by a session that answers `connected` at the InMail's own check.
@@ -1625,7 +1625,7 @@ export function inviteExpired(state: SubjectState, trackId: string, now: number)
   if (!p || !track || (p.acceptBy ?? null) === null) return state;
   const at = p.acceptBy ?? 0;
   const atWall = wallAtLead(state.subject.clock, state.freezes, at, now);
-  // The InMail fallback (ADR 0004 14.3): on (a live InMail step with no result), the track's own session judged once, now,
+  // The InMail fallback (ADR 0004 15.3): on (a live InMail step with no result), the track's own session judged once, now,
   // by its own report. Eligible: the InMail is the pending step, due at the deadline, and the invite is left open (Q50).
   const im = rules.inmailOffWhenRemoved ? inmailStepOf(track) : (track.steps.find((s) => s.role === "inmail") ?? null);
   if (im && !state.results.some((r) => r.stepId === im.id)) {
@@ -1649,7 +1649,7 @@ export function inviteExpired(state: SubjectState, trackId: string, now: number)
 }
 
 /**
- * The withdrawal path when the InMail fallback did not go (ADR 0004 14.3): its cause stored, the track's claims withdrawn,
+ * The withdrawal path when the InMail fallback did not go (ADR 0004 15.3): its cause stored, the track's claims withdrawn,
  * the invite to be withdrawn, and the track finished `invite_not_accepted` at `at` (the deadline at the expiry; the instant of
  * a refusal, an edit or a skip otherwise), so what waits on it starts from then.
  */
@@ -1661,7 +1661,7 @@ export function inmailNotSent(state: SubjectState, trackId: string, cause: Inmai
 }
 
 /**
- * The sessions whose InMail standing an evaluation read to make a judgment (ADR 0004 14.5; review bot on b49a71b): every
+ * The sessions whose InMail standing an evaluation read to make a judgment (ADR 0004 15.5; review bot on b49a71b): every
  * session of a track whose InMail state the evaluation set. The evaluation's write is refused when any of their standings
  * changed since its snapshot (another lead's commitment, a new report), so a credit is never committed twice.
  */
@@ -1679,17 +1679,17 @@ export function inmailJudgedSessions(before: SubjectState, after: SubjectState):
   return [...sessions];
 }
 
-/** How long a session's report stays fresh enough to judge eligibility on (ADR 0004 14.5, question Q58's interim). */
+/** How long a session's report stays fresh enough to judge eligibility on (ADR 0004 15.5, question Q58's interim). */
 export const INMAIL_REPORT_MAX_AGE = 24 * 60 * 60_000;
 
-/** A holding's key: its subject and track (14.5). */
+/** A holding's key: its subject and track (15.5). */
 export const holdingKey = (subjectId: string, trackId: string): string => `${subjectId}|${trackId}`;
 
 const planned = (s: AccountState["inmail"]) => s !== undefined && (s.plan === "premium" || s.plan === "sales_navigator");
 const reportFresh = (s: NonNullable<AccountState["inmail"]>, now: number) => s.reportedWall !== null && now - s.reportedWall <= INMAIL_REPORT_MAX_AGE;
 
 /**
- * Whether a session can give one more credit now (ADR 0004 14.5), from its latest report and every holding on it: no plan
+ * Whether a session can give one more credit now (ADR 0004 15.5), from its latest report and every holding on it: no plan
  * reported, a report too old, no credit free beyond the holdings, or free. The one test every acquisition reads.
  */
 export function inmailAvailability(account: AccountState | undefined, now: number): "free" | "no_plan" | "stale_report" | "no_credit" {
@@ -1700,7 +1700,7 @@ export function inmailAvailability(account: AccountState | undefined, now: numbe
 }
 
 /**
- * Whether the track's InMail may go now, by the credit it holds (ADR 0004 14.5): backed while its holding ranks, earliest
+ * Whether the track's InMail may go now, by the credit it holds (ADR 0004 15.5): backed while its holding ranks, earliest
  * acquired first, below the credits the session reports now; otherwise why not. The one function dispatch's selection, the
  * handover's predicate and every read of an InMail's wait derive from.
  */
@@ -1720,7 +1720,7 @@ export function inmailBacking(state: SubjectState, trackId: string, now: number)
 
 const byAcquisition = (a: { key: string; acquiredWall: number }, b: { key: string; acquiredWall: number }) => a.acquiredWall - b.acquiredWall || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 
-/** Acquires a credit for the track's InMail on its session (14.5): the holding stored, and counted on the account in this state. */
+/** Acquires a credit for the track's InMail on its session (15.5): the holding stored, and counted on the account in this state. */
 function acquireInmailHold(state: SubjectState, trackId: string, session: string, now: number): SubjectState {
   const s = withTrack(state, trackId, (t) => ({ ...t, inmailHoldWall: now }));
   const account = s.accounts[session];
@@ -1731,7 +1731,7 @@ function acquireInmailHold(state: SubjectState, trackId: string, session: string
 }
 
 /**
- * Releases the credit the track's InMail holds (14.5), unless its InMail may have gone: work handed over and unsettled, or
+ * Releases the credit the track's InMail holds (15.5), unless its InMail may have gone: work handed over and unsettled, or
  * sent, whose credit the session may have spent and its next report will show.
  */
 export function releaseInmailHold(state: SubjectState, trackId: string): SubjectState {
@@ -1749,7 +1749,7 @@ export function releaseInmailHold(state: SubjectState, trackId: string): Subject
 
 /**
  * A lead running again with its InMail chosen and no credit held (restarted after a stop) acquires one, only if one is free
- * (14.5; council on 8b0c846, item 7): it never takes back what another lead holds, and waits with its reason otherwise.
+ * (15.5; council on 8b0c846, item 7): it never takes back what another lead holds, and waits with its reason otherwise.
  */
 export function reacquireInmailHolds(state: SubjectState, now: number): SubjectState {
   let s = state;
@@ -1767,7 +1767,7 @@ export function reacquireInmailHolds(state: SubjectState, now: number): SubjectS
  * skipped, `already_connected`, and the track is connected at that instant, so the first message follows with its wait.
  */
 /**
- * A session that answers `connected` at a chosen InMail's own check (ADR 0004 14.3; the council on d6ad9f5, item 2): they
+ * A session that answers `connected` at a chosen InMail's own check (ADR 0004 15.3; the council on d6ad9f5, item 2): they
  * accepted, and the acceptance has not been reported. In the handover's own write, with no call: the claim is withdrawn and
  * the connection overtakes the InMail by the one transition an acceptance uses, so the next check never meets it again.
  */

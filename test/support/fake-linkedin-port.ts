@@ -23,7 +23,7 @@ export interface FakeSession {
   /** False: the port no longer lists the session at all. */
   listed?: boolean;
   /**
-   * The session's InMail standing as it reports it (ADR 0004 14.5): its plan and its credits now. A sent InMail spends one;
+   * The session's InMail standing as it reports it (ADR 0004 15.5): its plan and its credits now. A sent InMail spends one;
    * a test may change either, as the user spending credits by hand or a plan ending would. Absent: it reports none.
    */
   inmail?: { plan: "premium" | "sales_navigator" | "none"; credits: number };

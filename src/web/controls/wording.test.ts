@@ -187,7 +187,7 @@ describe("the controls offered: exactly the ones the read allows, in a fixed ord
       controls: [refused("pause", "Outreach to them has ended in this campaign (stopped manually)."), allowed("move_to_win_back", { next: step() }), allowed("resume_from_next_step", { next: step() }), refused("skip", "x")],
     });
     expect(offeredControls(r).map((c) => c.action)).toEqual(["resume_from_next_step", "move_to_win_back"]);
-    expect(CONTROL_LABEL).toEqual({ pause: "Pause", resume: "Resume", skip: "Skip this step", stop: "Stop", resume_from_next_step: "Resume from the next step", move_to_win_back: "Move to win-back", "mark_replied:linkedin": "Mark replied on LinkedIn", "mark_replied:instagram": "Mark replied on Instagram", invite_withdrawn: "It’s withdrawn", invite_kept: "It’s still there" });
+    expect(CONTROL_LABEL).toEqual({ pause: "Pause", resume: "Resume", skip: "Skip this step", stop: "Stop", resume_from_next_step: "Resume from the next step", move_to_win_back: "Move to win-back", "mark_replied:linkedin": "Mark replied on LinkedIn", "mark_replied:instagram": "Mark replied on Instagram", "mark_replied:facebook": "Mark replied on Facebook", invite_withdrawn: "It’s withdrawn", invite_kept: "It’s still there" });
   });
 });
 

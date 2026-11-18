@@ -61,10 +61,10 @@ test.describe("the declined path and the win-back branch in the campaign editor 
     await expect(page.locator('[data-edge-from="call"]')).toHaveCount(1);
     expect((await stored(page, id)).tracks.find((t) => t.id === "call")?.declinedPath).toBe("win_back");
 
-    // The branch's own Add offers email, SMS, LinkedIn and Instagram (tickets 24b, 25): no phone track in win-back.
+    // The branch's own Add offers email, SMS, LinkedIn, Instagram and Facebook (tickets 24b, 25, 26): no phone track in win-back.
     await page.getByRole("button", { name: "Add win-back track" }).focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("menuitem")).toHaveText(["Email track", "SMS track", "LinkedIn track", "Instagram track"]);
+    await expect(page.getByRole("menuitem")).toHaveText(["Email track", "SMS track", "LinkedIn track", "Instagram track", "Facebook track"]);
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
     await expect(inspector.getByRole("heading", { name: "Win-back SMS track" })).toBeVisible();

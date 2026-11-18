@@ -1138,7 +1138,7 @@ export class Engine {
       // refuses it, and the next pass decides again on the state as it is (question Q7 answered). Accounts it never reads.
       // Written over the current accounts and bindings: an evaluation adds or removes no binding, so with the guard
       // above they are the snapshot's; without it, it could never remove one another process released or add one taken.
-      // An InMail judged at the expiry read its session's standing (ADR 0004 14.5): refused too when that standing moved since
+      // An InMail judged at the expiry read its session's standing (ADR 0004 15.5): refused too when that standing moved since
       // (another lead's commitment of the last credit, a new report), and decided again (review bot on b49a71b).
       const judged = inmailJudgedSessions(snapshot, next);
       const standingHeld = (current: SubjectState) => judged.every((session) => JSON.stringify(snapshot.accounts[session]?.inmail ?? null) === JSON.stringify(current.accounts[session]?.inmail ?? null));
@@ -1530,13 +1530,13 @@ export class Engine {
         return false;
       }
       // A pending invitation stops every step as on the integration tip, but the InMail, whose own invite stays open while it
-      // goes (ADR 0004 14.3; council on 8b0c846, item 3: a message to a connection removed with an invitation pending).
+      // goes (ADR 0004 15.3; council on 8b0c846, item 3: a message to a connection removed with an invitation pending).
       const inmail = subject !== null && this.rules.actionOfStep(subject, a.trackId, a.stepId) === "inmail";
       // A message after an InMail known sent goes beside the track's own invite, which the fallback leaves open.
       const ownInviteOpen = inmail || subject?.tracks.find((p) => p.trackId === a.trackId)?.inmail === "sent";
       if (pendingStops && !ownInviteOpen) return false;
       // Connected at an InMail's slot: they accepted and the session has not reported it yet. No InMail to a connection: the
-      // connection overtakes it in the handover's own write, so the next check never meets it again (14.3; the council on
+      // connection overtakes it in the handover's own write, so the next check never meets it again (15.3; the council on
       // d6ad9f5, item 2: it looped, claimed and expired every morning).
       if (asked.kind === "connected" && inmail && inmailSeams.acceptanceSkipsInmail) {
         await this.update(a.subjectId, now, (s) => {

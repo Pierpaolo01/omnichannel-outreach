@@ -97,7 +97,7 @@ export function failureWords(row: Pick<TestStepRow, "channel" | "reason">): stri
     // Q37's interim: the connection is gone, and the profile is still the person's; it is not marked wrong.
     case "not connected":
       return "no longer connected on LinkedIn, so the message couldn’t go";
-    // The InMail fallback (ADR 0004 14.3): LinkedIn refused the InMail for the recipient; the profile is not marked wrong.
+    // The InMail fallback (ADR 0004 15.3): LinkedIn refused the InMail for the recipient; the profile is not marked wrong.
     case "inmail refused":
       return "LinkedIn refused the InMail for your test profile";
     // A message-request channel's two refusals (ADR 0004 13.3, Q44), in the step's own channel's name.
