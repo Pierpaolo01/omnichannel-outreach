@@ -1,0 +1,254 @@
+@import "tailwindcss";
+@import "@fontsource-variable/schibsted-grotesk/wght.css";
+
+@plugin "daisyui" {
+  themes: false;
+  logs: false;
+}
+
+/* Tokens from the approved daily-workspace prototype (prototype/daily-workspace, 3515d86).
+   Four were adjusted on 12 November 2026 to meet WCAG AA text contrast; see DESIGN.md. */
+@plugin "daisyui/theme" {
+  name: "outreach-light";
+  default: true;
+  prefersdark: false;
+  color-scheme: light;
+  --color-base-100: #ffffff;
+  --color-base-200: #f3f5f8;
+  --color-base-300: #e1e5ec;
+  --color-base-content: #151a2d;
+  --color-primary: #0b875d;
+  --color-primary-content: #ffffff;
+  --color-secondary: #2c55c9;
+  --color-secondary-content: #ffffff;
+  --color-accent: #0b875d;
+  --color-accent-content: #ffffff;
+  --color-neutral: #151a2d;
+  --color-neutral-content: #f3f5f8;
+  --color-info: #2c55c9;
+  --color-info-content: #ffffff;
+  --color-success: #0b7a55;
+  --color-success-content: #ffffff;
+  --color-warning: #9a5a00;
+  --color-warning-content: #ffffff;
+  --color-error: #c0352b;
+  --color-error-content: #ffffff;
+  --radius-selector: 5px;
+  --radius-field: 9px;
+  --radius-box: 14px;
+  --size-selector: 0.25rem;
+  --size-field: 0.21875rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+@plugin "daisyui/theme" {
+  name: "outreach-dark";
+  default: false;
+  prefersdark: true;
+  color-scheme: dark;
+  --color-base-100: #161b28;
+  --color-base-200: #0f131e;
+  --color-base-300: #262d3e;
+  --color-base-content: #e8ebf3;
+  --color-primary: #22b07d;
+  --color-primary-content: #04170f;
+  --color-secondary: #8aa8f5;
+  --color-secondary-content: #0f131e;
+  --color-accent: #22b07d;
+  --color-accent-content: #04170f;
+  --color-neutral: #222a3e;
+  --color-neutral-content: #ffffff;
+  --color-info: #8aa8f5;
+  --color-info-content: #0f131e;
+  --color-success: #4ccb9a;
+  --color-success-content: #04170f;
+  --color-warning: #f0b35a;
+  --color-warning-content: #2a1a00;
+  --color-error: #f2928b;
+  --color-error-content: #3e1c1a;
+  --radius-selector: 5px;
+  --radius-field: 9px;
+  --radius-box: 14px;
+  --size-selector: 0.25rem;
+  --size-field: 0.21875rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+/* Prototype tokens daisyUI has no slot for. Same theme switching as daisyUI. */
+:root {
+  --o-raised: #f8f9fb;
+  --o-line: #e1e5ec;
+  --o-line-strong: #c9cfda;
+  --o-ink-2: #3a4157;
+  --o-muted: #636b80;
+  /* AA leaves no room for a lighter text tier on these surfaces, so faint is muted. */
+  --o-faint: var(--o-muted);
+  --o-call: #0b875d;
+  --o-call-hover: #097450;
+  --o-call-soft: #e2f4ec;
+  --o-band: #151a2d;
+  --o-band-ink: #ffffff;
+  --o-band-muted: #a9b0c6;
+  /* On the call band, light and dark: inside calling hours, and outside them (the daily-workspace prototype). */
+  --o-band-ok: #7be0b5;
+  --o-band-warn: #ffce85;
+  --o-you: #0b7a55;
+  --o-you-soft: #e2f4ec;
+  --o-hand: #2c55c9;
+  --o-hand-soft: #e5ecfb;
+  --o-pause: #9a5a00;
+  --o-pause-soft: #fcefd9;
+  --o-end: #666c7e;
+  --o-end-soft: #edeff3;
+  --o-crit: #c0352b;
+  --o-crit-soft: #fbe6e4;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="outreach-light"]) {
+    --o-raised: #1b2131;
+    --o-line: #262d3e;
+    --o-line-strong: #36405a;
+    --o-ink-2: #c5cada;
+    --o-muted: #98a0b5;
+    --o-faint: #8e94a9;
+    --o-call: #22b07d;
+    --o-call-hover: #2bc48b;
+    --o-call-soft: #123327;
+    --o-band: #222a3e;
+    --o-you: #4ccb9a;
+    --o-you-soft: #123327;
+    --o-hand: #8aa8f5;
+    --o-hand-soft: #1a2646;
+    --o-pause: #f0b35a;
+    --o-pause-soft: #3a2a10;
+    --o-end: #98a0b5;
+    --o-end-soft: #21283a;
+    --o-crit: #f2928b;
+    --o-crit-soft: #3e1c1a;
+  }
+}
+
+:root[data-theme="outreach-dark"] {
+  --o-raised: #1b2131;
+  --o-line: #262d3e;
+  --o-line-strong: #36405a;
+  --o-ink-2: #c5cada;
+  --o-muted: #98a0b5;
+  --o-faint: #8e94a9;
+  --o-call: #22b07d;
+  --o-call-hover: #2bc48b;
+  --o-call-soft: #123327;
+  --o-band: #222a3e;
+  --o-you: #4ccb9a;
+  --o-you-soft: #123327;
+  --o-hand: #8aa8f5;
+  --o-hand-soft: #1a2646;
+  --o-pause: #f0b35a;
+  --o-pause-soft: #3a2a10;
+  --o-end: #98a0b5;
+  --o-end-soft: #21283a;
+  --o-crit: #f2928b;
+  --o-crit-soft: #3e1c1a;
+}
+
+@theme inline {
+  --font-sans: "Schibsted Grotesk Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --color-raised: var(--o-raised);
+  --color-line: var(--o-line);
+  --color-line-strong: var(--o-line-strong);
+  --color-ink-2: var(--o-ink-2);
+  --color-muted: var(--o-muted);
+  --color-faint: var(--o-faint);
+  --color-call: var(--o-call);
+  --color-call-hover: var(--o-call-hover);
+  --color-call-soft: var(--o-call-soft);
+  --color-band: var(--o-band);
+  --color-band-ink: var(--o-band-ink);
+  --color-band-muted: var(--o-band-muted);
+  --color-band-ok: var(--o-band-ok);
+  --color-band-warn: var(--o-band-warn);
+  --color-you: var(--o-you);
+  --color-you-soft: var(--o-you-soft);
+  --color-hand: var(--o-hand);
+  --color-hand-soft: var(--o-hand-soft);
+  --color-pause: var(--o-pause);
+  --color-pause-soft: var(--o-pause-soft);
+  --color-end: var(--o-end);
+  --color-end-soft: var(--o-end-soft);
+  --color-crit: var(--o-crit);
+  --color-crit-soft: var(--o-crit-soft);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+  body {
+    background: var(--color-base-200);
+    color: var(--color-base-content);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1,
+  h2,
+  h3 {
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    /* User content such as a long unbroken campaign name wraps instead of scrolling sideways. */
+    overflow-wrap: anywhere;
+  }
+  :focus-visible {
+    outline: 2px solid var(--o-call);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--o-call-soft);
+    color: var(--color-base-content);
+  }
+  input,
+  textarea {
+    caret-color: var(--o-call);
+  }
+  a {
+    text-underline-offset: 3px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+}
+
+/* daisyUI fields take their focus outline from --input-color; the prototype's is the call green.
+   Unlayered so it wins over daisyUI's component layer. */
+.input,
+.select {
+  --input-color: var(--o-call);
+}
+
+/* Our themes set --noise to 0, but daisyUI still declares the noise layer as a background image.
+   Without it, buttons have a plain background that the accessibility scan can measure. */
+.btn {
+  background-image: none;
+}
+
+/* Placeholders in enabled fields are readable text: muted meets AA on every field surface.
+   daisyUI's default is base-content at 50%, about 3.3:1 in the light theme. */
+input::placeholder,
+textarea::placeholder {
+  color: var(--o-muted);
+  opacity: 1;
+}

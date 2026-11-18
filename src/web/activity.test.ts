@@ -1,0 +1,245 @@
+import { describe, expect, test } from "vitest";
+import type { ActivityEntry, DependentTrackState, TrackLabel } from "../shared/api.ts";
+import { describeEntry, nextNotePress, noteSendFailure } from "./activity.tsx";
+import { ApiRequestError } from "./api.ts";
+
+const campaign = { id: "c1", name: "Autumn physio" };
+const at = "2026-11-02T09:05:00.000Z";
+const one = (label: string): TrackLabel => ({ label, several: false, branch: "main" });
+
+describe("what the timeline says of a track that ended on a bad address (re-check B14)", () => {
+  test("it says what the stored ending says, and does not claim another campaign marked the address", () => {
+    // Stored: the email track failed on a bad destination, with no bounce event of this campaign's.
+    // That is true of another campaign's bounce, and of this campaign's bounce observed before
+    // migration 10, which kept no event. The entry claims neither.
+    const said = describeEntry({ campaign, at, kind: "address_bad", channel: "email", track: one("Email track"), to: "sam@harbour.example" }, "Europe/London");
+    expect(said.title).toBe("Email track ended");
+    expect(said.body).toBe("sam@harbour.example is marked wrong, so nothing more is sent to it.");
+  });
+});
+
+describe("what the timeline says of SMS, skipped and released tracks (ticket 13b)", () => {
+  const say = (entry: ActivityEntry) => {
+    const { title, body, track } = describeEntry(entry, "Europe/London");
+    return [title, body, track];
+  };
+
+  test("a text sent, its number refused or reported bad, each by its own name", () => {
+    expect(say({ campaign, at, kind: "sent", channel: "sms", track: one("SMS track"), stepNumber: 1, from: "+44 7700 900001", to: "+44 7700 900211", copy: { subject: "", body: "Hi." } })).toEqual(["Text 1 sent", null, null]);
+    expect(say({ campaign, at, kind: "failed", channel: "sms", track: one("SMS track"), stepNumber: 2, to: "+44 7700 900244", reason: "invalid number" })).toEqual(["Text 2 failed", "+44 7700 900244: The number was refused as invalid. It is marked wrong.", null]);
+    expect(say({ campaign, at, kind: "bounced", channel: "sms", track: one("SMS track"), stepNumber: 1, to: "+44 7700 900222" })).toEqual(["Text 1: bad number", "+44 7700 900222 was reported invalid and is marked wrong. Nothing more is texted to it.", null]);
+  });
+
+  test("a step of the win-back branch is named for it, through the track's label (council on 4fd9ca4, item 5)", () => {
+    const winBack: TrackLabel = { label: "Win-back email track", several: false, branch: "win_back" };
+    expect(say({ campaign, at, kind: "sent", channel: "email", track: winBack, stepNumber: 1, from: "a", to: "b", copy: null })).toEqual(["Win-back email 1 sent", null, null]);
+    expect(say({ campaign, at, kind: "bounced", channel: "email", track: winBack, stepNumber: 2, to: "pat@harbour.example" })[0]).toBe("Win-back email 2 bounced");
+    expect(say({ campaign, at, kind: "failed", channel: "sms", track: { label: "Win-back SMS track", several: false, branch: "win_back" }, stepNumber: 1, to: "+44 7700 900111", reason: "invalid number" })[0]).toBe("Win-back text 1 failed");
+    expect(say({ campaign, at, kind: "sent", channel: "email", track: one("Email track"), stepNumber: 1, from: "a", to: "b", copy: null })[0]).toBe("Email 1 sent");
+  });
+
+  test("with two tracks on one channel, the entry names its track, never its position", () => {
+    expect(say({ campaign, at, kind: "sent", channel: "email", track: { label: "Email track 2", several: true, branch: "main" }, stepNumber: 1, from: "a", to: "b", copy: null })).toEqual(["Email 1 sent", null, "Email track 2"]);
+  });
+
+  test("skipped and released tracks are said plainly", () => {
+    expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "no_mobile" })).toEqual(["SMS track skipped", "No mobile of their own.", null]);
+    expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "company_lead" })).toEqual(["SMS track skipped", "A company lead is never texted: a main line isn’t a mobile.", null]);
+    // Question Q7 answered: the campaign that keeps the conversation is named, in the past tense of the skip.
+    expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false, lead: null }] })).toEqual([
+      "SMS track skipped",
+      "Their mobile was already in a text conversation with campaign Spring clinics on every number this campaign can use, so a reply couldn’t show which campaign it answers.",
+      null,
+    ]);
+    expect(say({ campaign, at, kind: "skipped", channel: "sms", track: one("SMS track"), stepNumber: null, reason: "sms_conversation_taken", owners: [{ name: "Spring clinics", test: false, lead: null }, { name: "Winter clinics", test: true, lead: null }] })[1]).toContain(
+      "with campaign Spring clinics and the test run of campaign Winter clinics on every number",
+    );
+    expect(say({ campaign, at, kind: "released", channel: "sms", track: one("SMS track"), after: one("Email track"), because: "skipped" })).toEqual(["SMS track started", "It starts after the email track, which was skipped for this lead.", null]);
+    expect(say({ campaign, at, kind: "released", channel: "email", track: { label: "Email track 2", several: true, branch: "main" }, after: one("SMS track"), because: "failed" })).toEqual(["Email track 2 started", "It starts after the SMS track, which ended on a bad number.", null]);
+  });
+});
+
+describe("Activity is history; a present state or a day only from the server's read (council on 32454ea, C and D; verifier re-check, H)", () => {
+  const call = (fields: Partial<Extract<ActivityEntry, { kind: "call"; channel: "call" }>>): ActivityEntry => ({
+    campaign,
+    at,
+    kind: "call",
+    channel: "call",
+    track: one("Phone track"),
+    outcome: "callback_requested",
+    number: null,
+    note: "",
+    redial: false,
+    callbackAt: "2026-11-02T15:00:00.000Z",
+    onCallback: null,
+    zone: "Europe/London",
+    redialListedFrom: null,
+    callbackPending: false,
+    callbackListed: false,
+    declinedPath: null,
+    afterDecline: [],
+    ...fields,
+  });
+  const body = (entry: ActivityEntry, zone = "Europe/London") => describeEntry(entry, zone).body;
+
+  test("a callback asked for says the hold only while the server says it is pending, and that it is off the list while paused", () => {
+    expect(body(call({ callbackPending: true, callbackListed: true }))).toBe("Callback asked for, Mon 2 Nov at 15:00 their time; their automated outreach in this campaign is held until you log how it went");
+    // Ticket 22 (verifier F2): a paused lead's callback is pending, as the campaign's figures count it, but not on the list.
+    expect(body(call({ callbackPending: true, callbackListed: false }))).toBe("Callback asked for, Mon 2 Nov at 15:00 their time; still pending, and off your call list while their outreach is paused");
+    expect(body(call({ callbackPending: false, callbackListed: false }))).toBe("Callback asked for, Mon 2 Nov at 15:00 their time");
+  });
+
+  test("a redial names the day the engine listed it from; a skip for now on a callback is history", () => {
+    expect(body(call({ outcome: "no_answer", callbackAt: null, redial: true, redialListedFrom: "2026-11-09" }))).toBe("Redial asked for: listed again from Mon 9 Nov");
+    expect(body(call({ outcome: "skip_for_now", callbackAt: null, onCallback: "2026-11-02T15:00:00.000Z" }))).toBe("Skipped for now on the callback for Mon 2 Nov at 15:00 their time");
+  });
+
+  test("an unworked skip prints the engine's calendar due date as a date, and each track after it as it stands", () => {
+    const skip = (after: Extract<ActivityEntry, { reason: "unworked" }>["after"]): ActivityEntry => ({ campaign, at, kind: "skipped", channel: "call", track: one("Phone track"), stepNumber: null, reason: "unworked", dueDate: "2026-11-01", limitDays: 2, after });
+    // A Honolulu user: the due date is the server's 1 November, whatever the browser's zone.
+    expect(body(skip([]), "Pacific/Honolulu")).toBe("Not called within 2 days of its due date, Sun 1 Nov, so the call was skipped.");
+    expect(body(skip([{ track: one("Email track 2"), state: "stopped", startsAt: null }]))).toBe("Not called within 2 days of its due date, Sun 1 Nov, so the call was skipped. Email track 2 did not start: their outreach in this campaign stopped.");
+    expect(body(skip([{ track: one("Email track 2"), state: "held", startsAt: null }]))).toContain("Email track 2 starts after its delay, once their outreach is no longer held.");
+    expect(body(skip([{ track: one("Email track 2"), state: "waiting", startsAt: "2026-11-06T00:00:00.000Z" }]), "Pacific/Honolulu")).toContain("Email track 2 starts after its delay, on Thu 5 Nov.");
+  });
+});
+
+describe("what the timeline says of a declined call (ticket 16)", () => {
+  const say = (entry: ActivityEntry) => {
+    const { title, body, track } = describeEntry(entry, "Europe/London");
+    return [title, body, track];
+  };
+  const number = { detailId: "d1", kind: "direct" as const, owner: "person" as const, value: "+44 20 7946 0111" };
+
+  test("it says the path the decline took, as stored, then the number and the note", () => {
+    const declined = (declinedPath: "stop" | "continue" | "win_back") => ({ campaign, at, kind: "call" as const, channel: "call" as const, track: one("Phone track"), outcome: "not_interested" as const, number, note: "Happy with their supplier.", declinedPath, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackPending: false, callbackListed: false, afterDecline: [] });
+    expect(say(declined("stop"))).toEqual(["Call: not interested", "Stopped in this campaign. +44 20 7946 0111, direct. Happy with their supplier.", null]);
+    expect(say(declined("continue"))).toEqual(["Call: not interested", "No more calls in this campaign; the other channels were kept going. +44 20 7946 0111, direct. Happy with their supplier.", null]);
+    expect(say(declined("win_back"))).toEqual(["Call: not interested", "Moved to this campaign’s win-back branch, with no more calls. +44 20 7946 0111, direct. Happy with their supplier.", null]);
+    // Any other call has no path.
+    expect(say({ campaign, at, kind: "call", channel: "call", track: one("Phone track"), outcome: "no_answer", number, note: "", declinedPath: null, redial: false, callbackAt: null, onCallback: null, zone: "Europe/London", redialListedFrom: null, callbackPending: false, callbackListed: false, afterDecline: [] })).toEqual(["Call: no answer", "+44 20 7946 0111, direct", null]);
+  });
+});
+
+describe("every track state the server sends after an unworked skip has its own sentence, and only a server state promises a start (verifier on 2027f24)", () => {
+  test("the table walks every state", async () => {
+    const { dependentLine } = await import("./activity.tsx");
+    const track: TrackLabel = { label: "Email track 2", several: false, branch: "main" };
+    const table: Record<DependentTrackState["state"], string> = {
+      started: "Email track 2 started after it.",
+      finished: "Email track 2 has finished.",
+      waiting: "Email track 2 starts after its delay, on Sat 14 Nov.",
+      held: "Email track 2 starts after its delay, once their outreach is no longer held.",
+      dropped_for_win_back: "Email track 2 will not start: they moved to this campaign’s win-back branch.",
+      skipped_declined: "Email track 2 was skipped: they declined on a call.",
+      skipped_unworked: "Email track 2 was skipped: its call wasn’t made within its skip limit.",
+      skipped_no_channel: "Email track 2 was skipped: there is nothing to reach them on for it.",
+      skipped_conversation_taken: "Email track 2 was skipped: their mobile was already in a text conversation with campaign Spring clinics on every number this campaign can use.",
+      skipped: "Email track 2 was skipped.",
+      stopped: "Email track 2 did not start: their outreach in this campaign stopped.",
+      stopped_after_start: "Email track 2 started after it, then stopped: their outreach in this campaign stopped.",
+      started_held: "Email track 2 started after it, and is waiting while their outreach is held.",
+      no_more_calls: "Email track 2 will not call them: they declined on a call.",
+      not_started: "Email track 2 has not started.",
+    };
+    for (const [state, sentence] of Object.entries(table) as [DependentTrackState["state"], string][]) {
+      const a = (state === "waiting" ? { track, state, startsAt: "2026-11-14T01:05:00.000Z" } : { track, state, startsAt: null, owners: [{ name: "Spring clinics", test: false, lead: null }], channel: "sms" }) as { track: typeof track } & DependentTrackState;
+      expect(dependentLine(a, "Europe/London"), state).toBe(sentence);
+    }
+    // Only waiting and held, states the server read, say it will start.
+    expect(Object.entries(table).filter(([, s]) => s.includes("starts after")).map(([k]) => k).sort()).toEqual(["held", "waiting"]);
+  });
+});
+
+describe("what a decline did to each remaining track, as the server's read holds it now (ticket 16c)", () => {
+  const number = { detailId: "d1", kind: "direct" as const, owner: "person" as const, value: "+44 20 7946 0111" };
+  const several = (label: string): TrackLabel => ({ label, several: true, branch: label.startsWith("Win-back") ? "win_back" : "main" });
+  test("history in the past tense; a present state only as the read's state says it", () => {
+    const entry: ActivityEntry = {
+      campaign,
+      at,
+      kind: "call",
+      channel: "call",
+      track: one("Phone track"),
+      outcome: "not_interested",
+      number,
+      note: "",
+      declinedPath: "win_back",
+      redial: false,
+      callbackAt: null,
+      onCallback: null,
+      zone: "Europe/London",
+      redialListedFrom: null,
+      callbackPending: false,
+      callbackListed: false,
+      afterDecline: [
+        { track: several("Email track 1"), state: "dropped_for_win_back", startsAt: null },
+        { track: several("Phone track 2"), state: "dropped_for_win_back", startsAt: null },
+        { track: several("Win-back email track 1"), state: "started", startsAt: null },
+        { track: several("Win-back email track 2"), state: "waiting", startsAt: "2026-11-04T00:00:00.000Z" },
+      ],
+    };
+    expect(describeEntry(entry, "Europe/London").body).toBe(
+      "Moved to this campaign’s win-back branch, with no more calls. Email track 1 was dropped for the win-back branch. Phone track 2 was dropped for the win-back branch. Win-back email track 1 started, and is running. Win-back email track 2 starts after its delay, on Wed 4 Nov. +44 20 7946 0111, direct",
+    );
+    // After a reply in win-back the same entry reads the lead as it stands: the branch's unstarted track never starts.
+    const replied = { ...entry, afterDecline: [{ track: several("Win-back email track 1"), state: "finished" as const, startsAt: null }, { track: several("Win-back email track 2"), state: "stopped" as const, startsAt: null }] };
+    expect(describeEntry(replied, "Europe/London").body).toBe("Moved to this campaign’s win-back branch, with no more calls. Win-back email track 1 has finished. Win-back email track 2 did not start: their outreach in this campaign stopped. +44 20 7946 0111, direct");
+  });
+});
+
+describe("what the timeline says of the controls the user applied (ticket 17b), in the past tense", () => {
+  const say = (entry: ActivityEntry) => {
+    const { title, body, track } = describeEntry(entry, "Europe/London");
+    return [title, body, track];
+  };
+  const control = (action: Extract<ActivityEntry, { kind: "control" }>["action"], step: Extract<ActivityEntry, { kind: "control" }>["step"] = null): ActivityEntry => ({ campaign, at, kind: "control", action, step });
+
+  test("pause, resume and stop", () => {
+    expect(say(control("pause"))).toEqual(["Paused by you", "Their waits froze.", null]);
+    expect(say(control("resume"))).toEqual(["Resumed by you", null, null]);
+    expect(say(control("stop"))).toEqual(["Stopped by you", null, null]);
+  });
+
+  test("a skip names the step it skipped, and its track when the campaign has several on that channel", () => {
+    expect(say(control("skip", { channel: "email", track: one("Email track"), number: 2, call: null }))).toEqual(["Email 2 skipped by you", "It was never sent.", null]);
+    expect(say(control("skip", { channel: "sms", track: { label: "SMS track 2", several: true, branch: "main" }, number: 1, call: null }))).toEqual(["Text 1 skipped by you", "It was never sent.", "SMS track 2"]);
+    expect(say(control("skip", { channel: "call", track: one("Phone track"), number: 1, call: { attempts: 0, callback: false } }))).toEqual(["Call skipped by you", "It was never made.", null]);
+    // Council on 57d874f, item 8: a call already tried, or a callback, is not said as never made.
+    expect(say(control("skip", { channel: "call", track: one("Phone track"), number: 1, call: { attempts: 2, callback: false } }))).toEqual(["Call skipped by you", "Its remaining attempts were skipped: no further call was made on this phone track.", null]);
+    expect(say(control("skip", { channel: "call", track: one("Phone track"), number: 1, call: { attempts: 1, callback: true } }))).toEqual(["Callback skipped by you", "No further call was made on this phone track.", null]);
+  });
+
+  test("the restarts name the step they resumed at", () => {
+    expect(say(control("resume_from_next_step", { channel: "email", track: one("Email track"), number: 3, call: null }))).toEqual(["Resumed from the next step by you", "They resumed at email 3.", null]);
+    expect(say(control("move_to_win_back", { channel: "email", track: { label: "Win-back email track", several: false, branch: "win_back" }, number: 1, call: null }))).toEqual(["Moved to win-back by you", "Their remaining main-sequence steps were dropped, and they started at win-back email 1.", null]);
+  });
+
+  test("the campaign's pause and resume", () => {
+    expect(say({ campaign, at, kind: "campaign_paused" })).toEqual(["Campaign paused", "Its calls left your list and its waits froze.", null]);
+    expect(say({ campaign, at, kind: "campaign_resumed" })).toEqual(["Campaign resumed", null, null]);
+  });
+});
+
+describe("a note's request id (review bot on 9daf7c0)", () => {
+  test("submitting the unchanged note again after an unanswered send reuses its request id, so it is stored once", () => {
+    const sent = { requestId: "r1", body: "Prefers mornings.", scope: "person" as const };
+    expect(nextNotePress(sent, "Prefers mornings.", "person", () => "r2")).toEqual(sent);
+    expect(nextNotePress(sent, "  Prefers mornings. ", "person", () => "r2")).toEqual(sent);
+  });
+  test("a changed note, or another scope, is a new note with a new id", () => {
+    const sent = { requestId: "r1", body: "Prefers mornings.", scope: "person" as const };
+    expect(nextNotePress(sent, "Prefers afternoons.", "person", () => "r2")).toEqual({ requestId: "r2", body: "Prefers afternoons.", scope: "person" });
+    expect(nextNotePress(sent, "Prefers mornings.", "company", () => "r2")).toEqual({ requestId: "r2", body: "Prefers mornings.", scope: "company" });
+    expect(nextNotePress(null, "Prefers mornings.", "person", () => "r2")).toEqual({ requestId: "r2", body: "Prefers mornings.", scope: "person" });
+  });
+});
+
+describe("a failed note send (verifier F1 on 4363270)", () => {
+  test("only a definite 4xx answer is a refusal; a network error or a 5xx is no answer, and the note may be stored", () => {
+    expect(noteSendFailure(new ApiRequestError(409, "This request id was already used for another note: send a new one."))).toBe("refused");
+    expect(noteSendFailure(new ApiRequestError(400, "Type a note first."))).toBe("refused");
+    expect(noteSendFailure(new ApiRequestError(500, "Something went wrong on the server."))).toBe("no_answer");
+    expect(noteSendFailure(new TypeError("Failed to fetch"))).toBe("no_answer");
+  });
+});

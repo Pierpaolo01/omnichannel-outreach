@@ -1,0 +1,327 @@
+import { describe, expect, test } from "vitest";
+import type { CampaignDefinition, SequenceView } from "../../shared/api.ts";
+import { EditorStore } from "./editorStore.ts";
+
+/**
+ * The editor's own rules (ADR 0003 1.1.1, invariants 6 and 7), at the store the page binds to:
+ * no answer replaces a draft newer than the one it answered, and a conflict stays shown until the
+ * user loads the saved version. Requests are held and released by hand.
+ */
+const def = (subject: string): CampaignDefinition => ({
+  timezone: "Europe/London",
+  callSkipLimitDays: 2,
+  emailPool: [],
+  tracks: [{ id: "t1", channel: "email", branch: "main", window: [{ day: 1, start: 9, end: 17 }], steps: [{ id: "s1", waitDays: 0, subject, body: "Hello.", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false }],
+});
+const view = (subject: string, version: number, launched = false): SequenceView => ({
+  campaignId: "c1",
+  definition: def(subject),
+  definitionVersion: version,
+  editedAt: null,
+  launchedAt: launched ? "2026-11-13T09:00:00.000Z" : null,
+  launch: { blockers: [], nothingToLaunch: false, canLaunch: true },
+  accounts: [],
+});
+const subjectOf = (s: EditorStore) => s.getSnapshot().draft.tracks[0]?.steps[0]?.subject;
+
+interface Held<T> {
+  resolve(value: T): void;
+  reject(error: Error): void;
+}
+
+function harness(initial: SequenceView = view("Stored", 1)) {
+  const puts: (Held<SequenceView> & { subject: string | undefined; version: number })[] = [];
+  const launches: Held<SequenceView>[] = [];
+  const loads: Held<SequenceView>[] = [];
+  const impacts: string[] = [];
+  let timer: (() => void) | null = null;
+  let version = 1;
+  const store = new EditorStore(initial, {
+    session: "page",
+    wait: () => Promise.resolve(),
+    put: (body) =>
+      new Promise((resolve, reject) => {
+        puts.push({ resolve, reject, subject: body.tracks[0]?.steps[0]?.subject, version: body.save.base });
+        if (body.impact !== undefined) impacts.push(body.impact);
+      }),
+    launch: () => new Promise((resolve, reject) => launches.push({ resolve, reject })),
+    load: () => new Promise((resolve, reject) => loads.push({ resolve, reject })),
+    setTimer: (run) => (timer = run),
+    clearTimer: () => (timer = null),
+  });
+  const type = (subject: string) => store.update((d) => ({ ...d, tracks: d.tracks.map((t) => ({ ...t, steps: t.steps.map((s) => ({ ...s, subject })) })) }));
+  const fire = () => {
+    const run = timer;
+    timer = null;
+    run?.();
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  /** Answers the oldest held save as the server would, accepting it. */
+  const accept = async () => {
+    const put = puts.shift();
+    put?.resolve(view(put.subject ?? "", ++version));
+    await settle();
+  };
+  const conflict = async () => {
+    puts.shift()?.reject(Object.assign(new Error("Changed elsewhere."), { code: "edit_conflict" }));
+    await settle();
+  };
+  return { store, type, fire, settle, accept, conflict, puts, launches, loads, impacts };
+}
+
+describe("no answer replaces a draft newer than the one it answered (invariant 6)", () => {
+  test("while a launch is pending, typing is refused, so the launch's answer never discards copy (council item 9)", async () => {
+    const h = harness();
+    h.type("Ready to launch");
+    const launched = h.store.launch();
+    await h.settle();
+    await h.accept();
+    expect(h.launches).toHaveLength(1);
+    expect(h.store.getSnapshot().pending).toBe("launch");
+    h.type("Typed while the launch is pending");
+    expect(subjectOf(h.store)).toBe("Ready to launch");
+    expect(h.store.getSnapshot().locked).toBe(true);
+    h.launches[0]!.resolve(view("Ready to launch", 2, true));
+    await launched;
+    expect([subjectOf(h.store), h.store.getSnapshot().pending]).toEqual(["Ready to launch", null]);
+    // Launched: open again for running edits (ticket 19), which wait for Apply.
+    expect(h.store.getSnapshot().locked).toBe(false);
+  });
+
+  test("while the saved version loads, typing is refused, so the load never erases copy typed after choosing it (re-check B12)", async () => {
+    const h = harness();
+    h.type("Stale tab's copy");
+    h.fire();
+    await h.settle();
+    await h.conflict();
+    const loading = h.store.loadStored();
+    expect(h.store.getSnapshot().pending).toBe("load");
+    h.type("Typed after choosing Load the saved version");
+    expect(subjectOf(h.store)).toBe("Stale tab's copy");
+    h.loads[0]!.resolve(view("Other tab's saved copy", 2));
+    await loading;
+    expect([subjectOf(h.store), h.store.inConflict, h.store.getSnapshot().pending, h.store.getSnapshot().locked]).toEqual(["Other tab's saved copy", false, null, false]);
+    // Editing carries on from the loaded version, saved from its revision.
+    h.type("After loading");
+    h.fire();
+    await h.settle();
+    expect(h.puts.map((p) => [p.subject, p.version])).toEqual([["After loading", 2]]);
+  });
+
+  test("an edit that makes the draft one that cannot be saved shows Not saved at once, never Saving…, and fixing it saves", async () => {
+    const h = harness();
+    h.store.update((d) => ({ ...d, tracks: d.tracks.map((t) => ({ ...t, window: [] })) }));
+    expect(h.store.getSnapshot().save).toEqual({ kind: "invalid", message: "Choose at least one sending day." });
+    h.fire();
+    await h.settle();
+    expect(h.puts).toHaveLength(0);
+    expect(h.store.getSnapshot().save.kind).toBe("invalid");
+    h.store.update((d) => ({ ...d, tracks: d.tracks.map((t) => ({ ...t, window: [{ day: 2, start: 9, end: 17 }] })) }));
+    expect(h.store.getSnapshot().save.kind).toBe("saving");
+  });
+
+  test("a save's answer replaces the draft only if no edit came after it", async () => {
+    const h = harness();
+    h.type("First");
+    h.fire();
+    await h.settle();
+    h.type("Second, typed while the first was in flight");
+    await h.accept();
+    expect(subjectOf(h.store)).toBe("Second, typed while the first was in flight");
+  });
+});
+
+describe("a conflict stays visible until the user resolves it (invariant 7)", () => {
+  test("typing after a conflict keeps the conflict and its way out, and sends nothing (council item 10, re-check B11)", async () => {
+    const h = harness();
+    h.type("Stale tab's copy");
+    h.fire();
+    await h.settle();
+    await h.conflict();
+    expect(h.store.getSnapshot().save.kind).toBe("conflict");
+    h.type("Keeps typing after the conflict");
+    h.fire();
+    await h.settle();
+    expect([h.store.getSnapshot().save.kind, subjectOf(h.store), h.puts.length]).toEqual(["conflict", "Keeps typing after the conflict", 0]);
+  });
+
+  test("a launch refused because the campaign changed elsewhere becomes the conflict state (council item 3)", async () => {
+    const h = harness();
+    const launched = h.store.launch();
+    await h.settle();
+    h.launches[0]!.reject(Object.assign(new Error("Changed elsewhere."), { code: "changed_elsewhere" }));
+    await expect(launched).rejects.toThrow("Changed elsewhere.");
+    expect([h.store.getSnapshot().save.kind, h.store.inConflict]).toEqual(["conflict", true]);
+  });
+});
+
+describe("the email pool follows the connected email inboxes only", () => {
+  test("an SMS number the engine knows never enters the email pool (merge of ticket 13a)", async () => {
+    const puts: CampaignDefinition[] = [];
+    const account = (id: string, channel: "email" | "sms") => ({ id, label: id, channel, healthy: true, capacity: 30, gapSeconds: 0, usedToday: 0, waiting: null });
+    new EditorStore({ ...view("Stored", 1), accounts: [account("inbox-a", "email"), account("+447700900001", "sms")] }, {
+      session: "page",
+      put: (body) => {
+        puts.push(body);
+        return new Promise(() => undefined);
+      },
+      launch: () => new Promise(() => undefined),
+      load: () => new Promise(() => undefined),
+      setTimer: () => null,
+      clearTimer: () => undefined,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(puts.map((p) => p.emailPool)).toEqual([["inbox-a"]]);
+  });
+});
+
+describe("the SMS pool follows the connected SMS numbers, in the same one pool sync (ticket 13b)", () => {
+  const account = (id: string, channel: "email" | "sms") => ({ id, label: id, channel, healthy: true, capacity: 30, gapSeconds: 0, usedToday: 0, waiting: null });
+  const withSms = (): CampaignDefinition => {
+    const d = def("Stored");
+    return { ...d, smsPool: [], tracks: [...d.tracks, { ...d.tracks[0]!, id: "t2", channel: "sms", steps: [{ ...d.tracks[0]!.steps[0]!, id: "m1", subject: "" }] }] };
+  };
+  const open = (accounts: ReturnType<typeof account>[], definition: CampaignDefinition) => {
+    const puts: CampaignDefinition[] = [];
+    new EditorStore({ ...view("Stored", 1), definition, accounts }, {
+      session: "page",
+      put: (body) => {
+        puts.push(body);
+        return new Promise(() => undefined);
+      },
+      launch: () => new Promise(() => undefined),
+      load: () => new Promise(() => undefined),
+      setTimer: () => null,
+      clearTimer: () => undefined,
+    });
+    return puts;
+  };
+
+  test("with an SMS track, the connected numbers are saved as its pool, once, with the email pool, and an inbox never enters it", async () => {
+    const puts = open([account("inbox-a", "email"), account("+447700900001", "sms")], { ...withSms(), emailPool: ["inbox-a"] });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(puts.map((p) => [p.emailPool, p.smsPool])).toEqual([[["inbox-a"], ["+447700900001"]]]);
+  });
+
+  test("with no SMS number connected (the running app), nothing is saved for the pool", async () => {
+    const puts = open([account("inbox-a", "email")], { ...withSms(), emailPool: ["inbox-a"] });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(puts).toEqual([]);
+  });
+});
+
+
+describe("a running campaign: changes stay on the page until the user applies them (ADR 0003 \"Ticket 19\", Q24)", () => {
+  test("typing saves nothing and leaving sends nothing; Apply sends the draft through the queue; Discard puts the stored one back", async () => {
+    const h = harness(view("Stored", 4, true));
+    expect(h.store.getSnapshot().locked).toBe(false);
+    h.type("Half typ");
+    h.fire();
+    h.store.leavePage();
+    await h.settle();
+    expect(h.puts).toHaveLength(0);
+    expect(h.store.getSnapshot()).toMatchObject({ unsaved: true, save: { kind: "idle" } });
+    await h.store.discard();
+    expect(subjectOf(h.store)).toBe("Stored");
+    expect(h.store.getSnapshot().unsaved).toBe(false);
+    h.type("Better subject");
+    const applying = h.store.apply({ body: JSON.stringify(h.store.previewBody()), digest: "d".repeat(64) });
+    await h.settle();
+    expect(h.store.getSnapshot()).toMatchObject({ locked: true, pending: "apply" });
+    expect(h.puts.map((p) => [p.subject, p.version])).toEqual([["Better subject", 4]]);
+    await h.accept();
+    await applying;
+    expect(h.store.getSnapshot()).toMatchObject({ locked: false, pending: null, unsaved: false, save: { kind: "saved" } });
+  });
+
+  test("Apply sends nothing when the draft is no longer the one its read was for, and the read's digest with it when it is (review bot on 7afa03d)", async () => {
+    const h = harness(view("Stored", 4, true));
+    h.type("Read for this");
+    const read = { body: JSON.stringify(h.store.previewBody()), digest: "e".repeat(64) };
+    h.type("Typed after the read");
+    await h.store.apply(read);
+    expect(h.puts).toHaveLength(0);
+    const fresh = { body: JSON.stringify(h.store.previewBody()), digest: "f".repeat(64) };
+    void h.store.apply(fresh);
+    await h.settle();
+    expect(h.puts.map((p) => p.subject)).toEqual(["Typed after the read"]);
+    expect(h.impacts).toEqual(["f".repeat(64)]);
+  });
+
+  test("after another tab wins, Discard loads the stored version, and the next Apply sends (review bot and verifier F5 on 7afa03d)", async () => {
+    const h = harness(view("Stored", 4, true));
+    const read = () => ({ body: JSON.stringify(h.store.previewBody()), digest: "a".repeat(64) });
+    h.type("Lost to another tab");
+    const first = h.store.apply(read());
+    await h.settle();
+    await h.conflict();
+    await first;
+    expect(h.store.getSnapshot().save.kind).toBe("conflict");
+    // Apply never does nothing silently: while the conflict stands it says why.
+    expect(await h.store.apply(read())).toEqual({ ok: false, message: expect.stringContaining("changed elsewhere") });
+    const discarding = h.store.discard();
+    expect(h.store.getSnapshot()).toMatchObject({ pending: "load", save: { kind: "conflict" } });
+    h.loads[0]!.resolve(view("The other tab's", 5, true));
+    await discarding;
+    expect([subjectOf(h.store), h.store.getSnapshot().save.kind, h.store.inConflict]).toEqual(["The other tab's", "idle", false]);
+    h.type("Carried on");
+    const second = h.store.apply(read());
+    await h.settle();
+    expect(h.puts.map((p) => [p.subject, p.version])).toEqual([["Carried on", 5]]);
+    await h.accept();
+    expect(await second).toEqual({ ok: true });
+  });
+
+  test("a page shown again from the back-forward cache sends nothing it was not told to apply (found by the generated save test, run 7025)", async () => {
+    const h = harness(view("Stored", 4, true));
+    h.type("Typed, not applied");
+    h.store.leavePage();
+    await h.store.restored();
+    await h.settle();
+    expect(h.puts).toHaveLength(0);
+  });
+
+  test("a draft the running campaign would refuse (a deleted message) says why and cannot be applied", async () => {
+    const h = harness(view("Stored", 4, true));
+    h.store.update((d) => ({ ...d, tracks: d.tracks.map((t) => ({ ...t, steps: [] })) }));
+    expect(h.store.getSnapshot().problems.join(" ")).toContain("cannot be deleted on a running campaign");
+    await h.store.apply({ body: JSON.stringify(h.store.previewBody()), digest: "d".repeat(64) });
+    expect(h.puts).toHaveLength(0);
+  });
+});
+
+describe("the LinkedIn pool follows the connected LinkedIn sessions, in the same one pool sync (ticket 24b)", () => {
+  const account = (id: string, channel: "email" | "sms" | "linkedin") => ({ id, label: id, channel, healthy: true, capacity: 0, gapSeconds: 0, usedToday: 0, waiting: null });
+  const withLinkedin = (): CampaignDefinition => {
+    const d = def("Stored");
+    const first = d.tracks[0]!.steps[0]!;
+    return { ...d, emailPool: ["inbox-a"], linkedinPool: [], tracks: [...d.tracks, { ...d.tracks[0]!, id: "li", channel: "linkedin", acceptWaitDays: 14, steps: [{ ...first, id: "i1", subject: "" }, { ...first, id: "i2", subject: "" }] }] };
+  };
+  const open = (accounts: ReturnType<typeof account>[], definition: CampaignDefinition) => {
+    const puts: CampaignDefinition[] = [];
+    new EditorStore({ ...view("Stored", 1), definition, accounts }, {
+      session: "page",
+      put: (body) => {
+        puts.push(body);
+        return new Promise(() => undefined);
+      },
+      launch: () => new Promise(() => undefined),
+      load: () => new Promise(() => undefined),
+      setTimer: () => null,
+      clearTimer: () => undefined,
+    });
+    return puts;
+  };
+
+  test("with a LinkedIn track, the simulated sessions are saved as its pool, once; neither an inbox nor a number enters it", async () => {
+    const puts = open([account("inbox-a", "email"), account("+447700900001", "sms"), account("linkedin:s1", "linkedin")], withLinkedin());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(puts.map((p) => p.linkedinPool)).toEqual([["linkedin:s1"]]);
+  });
+
+  test("with no LinkedIn session connected (the running app), nothing is saved for the pool", async () => {
+    const puts = open([account("inbox-a", "email")], withLinkedin());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(puts).toEqual([]);
+  });
+});

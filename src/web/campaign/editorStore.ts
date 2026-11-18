@@ -1,0 +1,348 @@
+/**
+ * The campaign editor's state, as one object the page binds to (useSequence.ts) and the generated
+ * save test drives directly (saveQueue.generated.test.ts): the draft and the last view the server
+ * sent, the save status, launch in flight, the conflict, the pool sync, leaving and coming back.
+ * Every write goes through the save queue (saveQueue.ts); ADR 0003 1.1.1 is the rule.
+ *
+ * Two rules of its own (ADR 0003 1.1.1, invariants 6 and 7):
+ * - No answer replaces a draft newer than the one it answered. One mechanism for every answer
+ *   (save, launch, load): each is asked against an edit number, the identity of the draft on the
+ *   page, and `answer` replaces the draft only if that number is still the newest. While a launch
+ *   or a load of the stored version is pending, authoring is locked, so the answer it waits for is
+ *   always for the draft on the page.
+ * - A conflict stays visible until the user resolves it, by loading the saved version, however
+ *   much they type meanwhile.
+ */
+import type { CampaignDefinition, SequenceView } from "../../shared/api.ts";
+import { definitionProblems } from "../../domain/sequence/definition.ts";
+import { SaveQueue, draftProblems, type SaveIdentity, type SaveOutcome, type SaveStatus } from "./saveQueue.ts";
+
+/**
+ * Why a draft can't be saved as it stands: the editor's own checks, and on a running campaign the boundary the save
+ * would refuse (ADR 0003 "Ticket 19": a deleted track or message, a restored one, a move between branches).
+ */
+export function problemsOf(draft: CampaignDefinition, view: SequenceView): string[] {
+  const own = draftProblems(draft);
+  if (view.launchedAt === null) return own;
+  return [...own, ...definitionProblems(draft, view.definition, { launched: true }).filter((p) => !own.includes(p))];
+}
+
+export interface EditorSnapshot {
+  readonly view: SequenceView;
+  readonly draft: CampaignDefinition;
+  readonly save: SaveStatus;
+  /** The draft differs from what the server accepted: launch waits until it is saved. */
+  readonly unsaved: boolean;
+  /** A launch, a load of the stored version, or applying changes to a running campaign is in flight: authoring is locked until it answers. */
+  readonly pending: "launch" | "load" | "apply" | null;
+  /**
+   * Editing is locked: a launch, a load or an apply is pending (since ticket 19 a running campaign is edited too). The one value
+   * both `update` and every authoring control read, so no control can stay enabled while its edit
+   * would be dropped (PR 41 review).
+   */
+  readonly locked: boolean;
+  readonly problems: readonly string[];
+}
+
+export interface EditorDeps {
+  /** One PUT: rejects with `NoAnswer`, or with an error carrying the server's `code`. */
+  put(body: CampaignDefinition & { save: SaveIdentity; impact?: string }, options: { readonly keepalive?: boolean; readonly signal?: AbortSignal }): Promise<SequenceView>;
+  /** The launch POST for the revision on the page; rejects with an error carrying the server's `code`. */
+  launch(definitionVersion: number): Promise<SequenceView>;
+  /** The stored sequence, for "Load the saved version". */
+  load(): Promise<SequenceView>;
+  setTimer(run: () => void, ms: number): unknown;
+  clearTimer(handle: unknown): void;
+  /** The queue's backoff between tries after no answer. */
+  wait?: (ms: number) => Promise<void>;
+  session?: string;
+  /** Deliberately broken saving, for the generated save test's faults only (ticket 16b). */
+  faults?: ReadonlySet<SaveFault>;
+}
+
+/**
+ * Faults the generated save test injects to prove it notices them (ticket 16b): a save whose body leaves
+ * out each phone track's declined path, or the win-back branch's tracks. Never set by the page.
+ */
+export type SaveFault = "declined_path_not_sent" | "win_back_tracks_not_sent" | "stale_win_back_copy" | "running_saved_as_typed" | "applied_body_not_previewed";
+
+function withFaults(definition: CampaignDefinition, faults: ReadonlySet<SaveFault> | undefined, previous: CampaignDefinition | null): CampaignDefinition {
+  if (!faults || faults.size === 0) return definition;
+  let tracks = definition.tracks;
+  // The branch's copy of the save before this one (council on aaf82b7).
+  if (faults.has("stale_win_back_copy") && previous) tracks = tracks.map((t) => (t.branch === "win_back" ? { ...t, steps: previous.tracks.find((p) => p.id === t.id)?.steps ?? t.steps } : t));
+  if (faults.has("win_back_tracks_not_sent")) tracks = tracks.filter((t) => t.branch !== "win_back");
+  if (faults.has("declined_path_not_sent")) tracks = tracks.map((t) => {
+    const without = { ...t };
+    delete without.declinedPath;
+    return without;
+  });
+  return { ...definition, tracks };
+}
+
+/** The connected email inboxes: the email pool follows them; the engine's SMS numbers are not inboxes. */
+export const emailInboxIds = (view: SequenceView): string[] => view.accounts.filter((a) => a.channel === "email").map((a) => a.id);
+/** The connected SMS numbers: the SMS pool follows them (ticket 13b). None in the running app, which has no SMS provider. */
+export const smsNumberIds = (view: SequenceView): string[] => view.accounts.filter((a) => a.channel === "sms").map((a) => a.id);
+
+/** The connected LinkedIn sessions: the LinkedIn pool follows them (ticket 24b). None in the running app, which has no session. */
+export const linkedinSessionIds = (view: SequenceView): string[] => view.accounts.filter((a) => a.channel === "linkedin").map((a) => a.id);
+
+/** How long after an edit its save is sent. */
+export const SAVE_DELAY_MS = 600;
+
+/** What Apply did: applied, or why nothing was sent, in words for the page. */
+export type ApplyOutcome = { readonly ok: true } | { readonly ok: false; readonly message: string };
+
+export class EditorStore {
+  private state: EditorSnapshot;
+  private readonly listeners = new Set<() => void>();
+  private readonly queue: SaveQueue;
+  private readonly deps: EditorDeps;
+  private timer: unknown = null;
+  /** The body of the last save sent, for the generated save test's `stale_win_back_copy` fault only. */
+  private lastSent: CampaignDefinition | null = null;
+  /** While an Apply is in flight: the digest of the read it was confirmed on, sent with the save as `impact`. */
+  private applyImpact: string | null = null;
+
+  constructor(initial: SequenceView, deps: EditorDeps) {
+    this.deps = deps;
+    this.state = { view: initial, draft: initial.definition, save: { kind: "idle" }, unsaved: false, pending: null, locked: false, problems: problemsOf(initial.definition, initial) };
+    this.queue = new SaveQueue({
+      read: () => ({ draft: this.state.draft, accountIds: emailInboxIds(this.state.view), smsNumberIds: smsNumberIds(this.state.view), linkedinSessionIds: linkedinSessionIds(this.state.view), version: this.state.view.definitionVersion }),
+      put: (definition, options, save) => {
+        const sent = withFaults(definition, deps.faults, this.lastSent);
+        this.lastSent = definition;
+        return deps.put({ ...sent, save, ...(this.applyImpact !== null ? { impact: this.applyImpact } : {}) }, options);
+      },
+      onStatus: (status) => this.set({ save: status, unsaved: status.kind !== "saved" && status.kind !== "idle" }),
+      // Saves land in order, so each accepted view is the newest; the draft only if no edit came after.
+      onAccepted: (view, seq) => {
+        this.answer(view, seq);
+        this.syncPool();
+      },
+      ...(deps.wait ? { wait: deps.wait } : {}),
+      ...(deps.session ? { session: deps.session } : {}),
+    });
+    this.syncPool();
+  }
+
+  getSnapshot = (): EditorSnapshot => this.state;
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+
+  /** The newest edit's number (the pool sync counts as one): the identity of the draft on the page. */
+  get edit(): number {
+    return this.queue.edit;
+  }
+
+  get inConflict(): boolean {
+    return this.queue.inConflict;
+  }
+
+  /** How many times the user has loaded the saved version (the queue's generation). */
+  get loads(): number {
+    return this.queue.loads;
+  }
+
+  private set(change: Partial<EditorSnapshot>): void {
+    const next = { ...this.state, ...change };
+    this.state = { ...next, problems: change.draft || change.view ? problemsOf(next.draft, next.view) : next.problems, locked: next.pending !== null };
+    for (const l of this.listeners) l();
+  }
+
+  /**
+   * An answer to something asked when the draft's edit number was `asked`: its view always, and its
+   * draft only if no edit came since. Returns whether the draft was replaced.
+   */
+  private answer(view: SequenceView, asked: number): boolean {
+    const current = asked === this.queue.edit;
+    this.set(current ? { view, draft: view.definition } : { view });
+    return current;
+  }
+
+  /** Runs a launch or a load with authoring locked; one at a time. */
+  private async locked(kind: "launch" | "load" | "apply", run: () => Promise<void>): Promise<void> {
+    if (this.state.pending !== null) return;
+    if (this.timer !== null) this.deps.clearTimer(this.timer);
+    this.timer = null;
+    this.set({ pending: kind });
+    try {
+      await run();
+    } finally {
+      this.set({ pending: null });
+    }
+  }
+
+  private launched(): boolean {
+    return this.state.view.launchedAt !== null;
+  }
+
+  /**
+   * An edit by the user. Ignored while a launch, a load or an apply is in flight. Before launch it is saved a moment
+   * later; on a running campaign it stays on the page until the user applies it (ADR 0003 "Ticket 19", Q24).
+   */
+  update(change: (draft: CampaignDefinition) => CampaignDefinition): void {
+    if (this.state.locked) return;
+    // Shown at once, so a change is never labelled saved while it waits; a conflict stays shown,
+    // now with an edit of its own that is not saved.
+    const now = this.state.save;
+    const draft = change(this.state.draft);
+    // Never "Saving…" for a draft that cannot be saved as it stands: nothing of it is sent.
+    const problems = problemsOf(draft, this.state.view);
+    const pending: SaveStatus = problems.length > 0 ? { kind: "invalid", message: problems.join(" ") } : this.launched() ? { kind: "idle" } : { kind: "saving" };
+    const save: SaveStatus = !this.queue.inConflict ? pending : now.kind === "conflict" ? { ...now, saved: false } : now;
+    this.set({ draft, unsaved: true, save });
+    // Once the new draft is readable: the queue records each number's draft, and the newest valid one.
+    this.queue.edited();
+    // Fault only (ticket 19): a running campaign's edit saved as it is typed, without Apply.
+    if (!this.launched() || this.deps.faults?.has("running_saved_as_typed")) this.schedule();
+  }
+
+  /**
+   * Applies the draft to a running campaign (ADR 0003 "Ticket 19"): through the same queue as every save, with
+   * authoring locked until it answers. A draft that cannot be saved as it stands sends nothing.
+   */
+  apply(confirmed: { readonly body: string; readonly digest: string }): Promise<ApplyOutcome> {
+    // Apply never does nothing silently (verifier F5 on 7afa03d): every way it sends nothing says why.
+    if (!this.launched()) return Promise.resolve({ ok: false, message: "This campaign has not launched: its changes are saved as you type." });
+    if (this.state.pending !== null) return Promise.resolve({ ok: false, message: "Another change is still on its way." });
+    if (this.state.problems.length > 0) return Promise.resolve({ ok: false, message: this.state.problems.join(" ") });
+    if (this.queue.inConflict) return Promise.resolve({ ok: false, message: "This campaign was changed elsewhere. Load the saved version, or discard your changes, to carry on." });
+    // Apply sends exactly the body its read was for (review bot on 7afa03d): a read of another draft authorizes nothing.
+    if (JSON.stringify(this.previewBody()) !== confirmed.body && !this.deps.faults?.has("applied_body_not_previewed")) {
+      return Promise.resolve({ ok: false, message: "What this does is being checked again for your latest change. Apply once it shows." });
+    }
+    let outcome: ApplyOutcome = { ok: true };
+    return this.locked("apply", async () => {
+      this.applyImpact = confirmed.digest;
+      try {
+        // Exactly the body the read was for, under a number of its own (council on 93bed86, item 11).
+        // The fault applies the draft on the page instead (the generated save test's invariant I must catch it).
+        const body = this.deps.faults?.has("applied_body_not_previewed") ? this.previewBody() : (JSON.parse(confirmed.body) as CampaignDefinition);
+        const saved = await this.queue.save({ body });
+        if (!saved.ok) outcome = { ok: false, message: saved.reason === "changed" ? "A newer change arrived while applying. Apply again." : saved.message };
+      } finally {
+        this.applyImpact = null;
+      }
+    }).then(() => outcome);
+  }
+
+  /**
+   * What applying the draft would send, built by the one function every save uses (`SaveQueue.bodyOf`): the editor asks
+   * the server what this body does, and Apply sends it with that read's digest.
+   */
+  previewBody(): CampaignDefinition {
+    return this.queue.bodyOf();
+  }
+
+  /**
+   * Sets aside a running campaign's unapplied changes. After another page's change won (a conflict), the stored version
+   * is loaded, which resolves it; otherwise the definition the page last had from the server is the draft again, and the
+   * queue starts from it (its status, `idle`, is the queue's own). Never hides a conflict (review bot on 7afa03d).
+   */
+  discard(): Promise<void> {
+    if (!this.launched() || this.state.locked) return Promise.resolve();
+    if (this.queue.inConflict) return this.loadStored();
+    this.set({ draft: this.state.view.definition, unsaved: false });
+    this.queue.loadedStored();
+    return Promise.resolve();
+  }
+
+  private schedule(): void {
+    if (this.timer !== null) this.deps.clearTimer(this.timer);
+    this.timer = this.deps.setTimer(() => {
+      this.timer = null;
+      void this.queue.save();
+    }, SAVE_DELAY_MS);
+  }
+
+  /** The debounce fires now (a test, or leaving the campaign inside the app). */
+  saveNow(): Promise<SaveOutcome> {
+    if (this.timer !== null) this.deps.clearTimer(this.timer);
+    this.timer = null;
+    if (this.launched()) return Promise.resolve({ ok: true });
+    return this.queue.save();
+  }
+
+  retrySave(): void {
+    void this.saveNow();
+  }
+
+  /** Leaving the page (`pagehide`): the newest draft goes at once, with a request that outlives it. */
+  leavePage(): void {
+    if (this.timer !== null) this.deps.clearTimer(this.timer);
+    this.timer = null;
+    // A running campaign's changes go only when the user applies them (Q24): leaving sends nothing.
+    if (this.launched()) return;
+    this.queue.sendNow();
+  }
+
+  /** Back from the back-forward cache (`pageshow` with `persisted`). */
+  restored(): Promise<SaveOutcome> {
+    // A running campaign's changes go only when the user applies them (Q24).
+    if (this.launched()) return Promise.resolve({ ok: true });
+    return this.queue.restored();
+  }
+
+  /** The browser is online again: a save waiting after no answer tries at once. */
+  online(): void {
+    this.queue.wake();
+  }
+
+  /** Leaving the campaign inside the app: a change still waiting is saved through the queue. */
+  dispose(): void {
+    if (this.timer !== null) void this.saveNow();
+  }
+
+  /**
+   * The pools follow the providers' accounts, each on its own channel: a difference from what is
+   * saved, for a channel with a live track, is saved as one edit (ADR 0003, ticket 13b).
+   */
+  private syncPool(): void {
+    const view = this.state.view;
+    if (view.launchedAt !== null) return;
+    const live = (channel: "email" | "sms" | "linkedin") => view.definition.tracks.some((t) => !t.removed && t.channel === channel);
+    const same = (a: readonly string[], b: readonly string[]) => [...a].sort().join("\n") === [...b].sort().join("\n");
+    const emailDiffers = live("email") && !same(view.definition.emailPool, emailInboxIds(view));
+    const smsDiffers = live("sms") && !same(view.definition.smsPool ?? [], smsNumberIds(view));
+    const linkedinDiffers = live("linkedin") && !same(view.definition.linkedinPool ?? [], linkedinSessionIds(view));
+    if ((!emailDiffers && !smsDiffers && !linkedinDiffers) || this.queue.inConflict) return;
+    this.queue.edited();
+    void this.queue.save();
+  }
+
+  /**
+   * Saves through the queue first, and launches only if that succeeded, and only the revision on
+   * the page. Authoring is locked until the answer. A refusal because the campaign changed
+   * elsewhere is the conflict state, with "Load the saved version".
+   */
+  launch(): Promise<void> {
+    return this.locked("launch", async () => {
+      const saved = await this.queue.save();
+      if (!saved.ok) {
+        throw new Error(saved.reason === "changed" ? "A newer change is still being saved. Launch again once it is saved." : `Your latest change isn’t saved, so nothing was launched. ${saved.message}`);
+      }
+      const asked = this.queue.edit;
+      try {
+        this.answer(await this.deps.launch(this.state.view.definitionVersion), asked);
+      } catch (error) {
+        if ((error as { code?: unknown }).code === "changed_elsewhere") this.queue.markConflict(error instanceof Error ? error.message : "Changed elsewhere.");
+        throw error;
+      }
+    });
+  }
+
+  /** After a conflict: the stored version replaces the draft. Authoring is locked until it arrives. */
+  loadStored(): Promise<void> {
+    return this.locked("load", async () => {
+      const asked = this.queue.edit;
+      if (!this.answer(await this.deps.load(), asked)) return;
+      this.queue.loadedStored();
+      this.syncPool();
+    });
+  }
+}

@@ -1,0 +1,106 @@
+import { describe, expect, test } from "vitest";
+import { launchCheck } from "../../domain/sequence/blockers.ts";
+import type { CampaignDefinition, TrackDefinition } from "../../shared/api.ts";
+import { blockedOnlyBy, describeBlocker, nothingBlocks } from "./blocker-wording.ts";
+
+/** Every launch blocker names its track and channel from the fact the server sends (ticket 13b, verifier B2). */
+const week = [{ day: 1, start: 9, end: 17 }];
+const track = (id: string, channel: "email" | "sms", body: string, subject = ""): TrackDefinition => ({
+  id,
+  channel,
+  branch: "main",
+  window: week,
+  start: { kind: "entry" },
+  removed: false,
+  steps: [{ id: `${id}-1`, waitDays: 0, subject: channel === "email" ? subject : "", body, threading: "new_subject", removed: false }],
+});
+const def = (tracks: TrackDefinition[], pools: { email?: string[]; sms?: string[] } = {}): CampaignDefinition => ({ timezone: "Europe/London", callSkipLimitDays: 2, emailPool: pools.email ?? ["inbox-a"], smsPool: pools.sms ?? ["+447700900001"], tracks });
+const senders = [
+  { id: "inbox-a", channel: "email" as const, healthy: true },
+  { id: "+447700900001", channel: "sms" as const, healthy: true },
+];
+const said = (d: CampaignDefinition, leads = [{}]) => launchCheck(d, leads, senders).blockers.map((b) => describeBlocker(b, d));
+
+describe("each blocker kind names its track and channel", () => {
+  test("empty copy: on an email track, an SMS track, and a second track of one channel", () => {
+    expect(said(def([track("e", "email", "", "Hi")])).map((w) => w.title)).toEqual(["The email track: Email 1 has no copy"]);
+    expect(said(def([track("m", "sms", "")])).map((w) => w.title)).toEqual(["The SMS track: Text 1 has no message"]);
+    expect(said(def([track("m1", "sms", "Hi."), track("m2", "sms", "")])).map((w) => w.title)).toEqual(["SMS track 2: Text 1 has no message"]);
+    expect(said(def([track("m", "sms", "")]))[0]!.actions).toEqual([{ label: "Write it", trackId: "m", stepId: "m-1" }]);
+  });
+
+  test("a merge field with no fallback: each message that uses it, with an action that opens it", () => {
+    const email = said(def([track("e", "email", "Hi {{first_name}}.", "Hi")]));
+    expect(email.map((w) => w.title)).toEqual(["First name has no fallback in Email 1 of the email track"]);
+    const sms = said(def([track("m", "sms", "Hi {{first_name}}.")]));
+    expect(sms.map((w) => w.title)).toEqual(["First name has no fallback in Text 1 of the SMS track"]);
+    expect(sms[0]!.actions).toEqual([{ label: "Add fallback", trackId: "m", stepId: "m-1" }]);
+    const second = said(def([track("m1", "sms", "Hi {{first_name|there}}."), track("m2", "sms", "Hi {{first_name}}.")]));
+    expect(second.map((w) => w.title)).toEqual(["First name has no fallback in Text 1 of SMS track 2"]);
+    const both = said(def([track("e", "email", "Hi {{first_name}}.", "Hi"), track("m", "sms", "Hi {{first_name}}.")]));
+    expect(both.map((w) => w.title)).toEqual(["First name has no fallback in Email 1 of the email track and Text 1 of the SMS track"]);
+    expect(both[0]!.actions.map((a) => a.label)).toEqual(["Add fallback: Email 1 of the email track", "Add fallback: Text 1 of the SMS track"]);
+  });
+
+  test("no connected sender: on an email track, an SMS track, and a second track of one channel", () => {
+    expect(said(def([track("e", "email", "Hi.", "Hi")], { email: [] })).map((w) => w.title)).toEqual(["The email track has no connected sender inbox"]);
+    expect(said(def([track("m", "sms", "Hi.")], { sms: [] })).map((w) => w.title)).toEqual(["The SMS track has no connected sender number"]);
+    expect(said(def([track("e1", "email", "Hi.", "Hi"), track("e2", "email", "Hi.", "Hi")], { email: [] })).map((w) => w.title)).toEqual([
+      "Email track 1 has no connected sender inbox",
+      "Email track 2 has no connected sender inbox",
+    ]);
+  });
+
+  test("an SMS track with no number says why from the provider's status, never fixed text (council on 10121d3, item 3)", () => {
+    const d = def([track("m", "sms", "Hi.")], { sms: [] });
+    const none = { provider: "none" as const, message: "", numbers: [] };
+    const some = { provider: "test-simulator" as const, message: "", numbers: [{ id: "+447700900001", label: "Simulated SMS (not a provider) +44 7700 900001", healthy: true, capacity: 30, usedToday: 0 }] };
+    const blocker = launchCheck(d, [{}], senders).blockers[0]!;
+    expect(describeBlocker(blocker, d, none).detail).toBe("It can’t send until a number is connected. No SMS provider is set up, so no number can be connected yet. Remove the track to launch without it.");
+    expect(describeBlocker(blocker, d, some).detail).toBe("It can’t send until a number is connected. The SMS provider has numbers, but none is in this campaign’s SMS senders. Remove the track to launch without it.");
+    expect(describeBlocker(blocker, d, null).detail).toBe("It can’t send until a number is connected. Remove the track to launch without it.");
+  });
+});
+
+describe("a LinkedIn track's blockers (ticket 24b)", () => {
+  const li = (body: string, note = "Hello"): TrackDefinition => ({
+    id: "li",
+    channel: "linkedin",
+    branch: "main",
+    window: week,
+    start: { kind: "entry" },
+    removed: false,
+    acceptWaitDays: 14,
+    steps: [
+      { id: "li-1", waitDays: 0, subject: "", body: note, threading: "new_subject", removed: false },
+      { id: "li-2", waitDays: 0, subject: "", body, threading: "new_subject", removed: false },
+    ],
+  });
+  const withPool = (tracks: TrackDefinition[], pool: string[]): CampaignDefinition => ({ ...def(tracks), linkedinPool: pool });
+  test("an empty first message is named by its role; an empty note blocks nothing", () => {
+    const d = withPool([li("", "")], ["linkedin:s1"]);
+    const w = launchCheck(d, [{}], [...senders, { id: "linkedin:s1", channel: "linkedin", healthy: true }]).blockers.map((b) => describeBlocker(b, d));
+    expect(w.map((x) => x.title)).toEqual(["The LinkedIn track: First message has no message"]);
+    expect(w[0]!.detail).toBe("Write it, or remove the message.");
+  });
+  test("no connected session: said in the existing blocker's words and the provider's own, with nothing about connecting one here", () => {
+    const d = withPool([li("Thanks.")], []);
+    const [w] = launchCheck(d, [{}], senders).blockers.map((b) => describeBlocker(b, d, null, { provider: "none", message: "No LinkedIn session is connected, so LinkedIn tracks cannot launch." }));
+    expect(w!.title).toBe("The LinkedIn track has no connected LinkedIn session");
+    expect(w!.detail).toBe("No LinkedIn session is connected, so LinkedIn tracks cannot launch. Remove the track to launch without it.");
+    expect(w!.detail).not.toMatch(/connect (one|a session)|until a session/i);
+  });
+});
+
+describe("what blocks launch, from the blockers the domain has (the council on 5a30b9f, item 3)", () => {
+  const instagram: TrackDefinition = { id: "ig", channel: "instagram", branch: "main", window: week, start: { kind: "entry" }, removed: false, senders: ["instagram:s1"], steps: [{ id: "ig-1", waitDays: 0, subject: "", body: "Hello.", threading: "new_subject", removed: false }] };
+  test("with no track: every blocker, a message-request track with no session chosen included", () => {
+    expect(blockedOnlyBy()).toBe("With a track, launch is blocked only by empty copy, a merge field with no fallback that a lead lacks, no connected sender, or an Instagram or a Facebook track with no sender session chosen.");
+  });
+  test("with tracks and nothing blocking: what holds, the chosen sessions only where a message-request track is", () => {
+    expect(nothingBlocks(def([track("t1", "email", "Hi", "Hello")]))).toBe("Every message has copy, every merge field has a fallback where a lead lacks it, and every email and SMS track has a sender.");
+    expect(nothingBlocks(def([track("t1", "email", "Hi", "Hello"), instagram]))).toBe(
+      "Every message has copy, every merge field has a fallback where a lead lacks it, every email, SMS and Instagram track has a sender, and every Instagram track has a sender session chosen.",
+    );
+  });
+});

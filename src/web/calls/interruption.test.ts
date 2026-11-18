@@ -1,0 +1,315 @@
+import { describe, expect, test } from "vitest";
+import type { NeedsAttention } from "../../shared/api.ts";
+import { attentionItems } from "./wording.ts";
+import { capacityItems, interruptionLine, noUsableChannelItem, providerWaitItems, sendingInterruptedItem } from "./interruption.ts";
+
+/**
+ * Today's one-line interruption notice (ticket 20b; spec: "sending was interrupted from X to Y; N sends rescheduled"),
+ * from GET /api/today's `interruption`, `date` and `userZone` of the one read. Expected lines are written out by hand.
+ */
+describe("the interruption line on Today", () => {
+  const zone = "Europe/Amsterdam";
+
+  test("an interruption within today: times only, in the user's zone", () => {
+    expect(interruptionLine({ from: "2026-11-15T08:10:00Z", to: "2026-11-15T09:45:00Z", rescheduled: 14 }, "2026-11-15", zone)).toBe(
+      "Sending was interrupted from 09:10 to 10:45; 14 sends rescheduled.",
+    );
+  });
+
+  test("across days: the date wherever it is not today, as the user's zone counts the day", () => {
+    // 22:30 UTC on the 14th is 23:30 in Amsterdam, still the 14th; 06:00 UTC on the 15th is 07:00 today.
+    expect(interruptionLine({ from: "2026-11-14T22:30:00Z", to: "2026-11-15T06:00:00Z", rescheduled: 3 }, "2026-11-15", zone)).toBe(
+      // Y is today, said so, so the line never reads as from 12:00 to 12:00 (council on 7622b8b).
+      "Sending was interrupted from Sat 14 Nov at 23:30 to today at 07:00; 3 sends rescheduled.",
+    );
+    // 23:30 UTC on the 14th is already the 15th in Amsterdam.
+    expect(interruptionLine({ from: "2026-11-14T23:30:00Z", to: "2026-11-15T06:00:00Z", rescheduled: 3 }, "2026-11-15", zone)).toBe(
+      "Sending was interrupted from 00:30 to 07:00; 3 sends rescheduled.",
+    );
+  });
+
+  test("a notice kept from an earlier day (question Q18's interim): both ends dated", () => {
+    expect(interruptionLine({ from: "2026-11-12T13:00:00Z", to: "2026-11-12T15:20:00Z", rescheduled: 2 }, "2026-11-15", zone)).toBe(
+      "Sending was interrupted from Thu 12 Nov at 14:00 to Thu 12 Nov at 16:20; 2 sends rescheduled.",
+    );
+  });
+
+  test("one send, and none", () => {
+    expect(interruptionLine({ from: "2026-11-15T08:10:00Z", to: "2026-11-15T08:40:00Z", rescheduled: 1 }, "2026-11-15", zone)).toBe(
+      "Sending was interrupted from 09:10 to 09:40; 1 send rescheduled.",
+    );
+    expect(interruptionLine({ from: "2026-11-15T08:10:00Z", to: "2026-11-15T08:40:00Z", rescheduled: 0 }, "2026-11-15", zone)).toBe(
+      "Sending was interrupted from 09:10 to 09:40; no sends rescheduled.",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Needs attention's ticket 20 entries (ticket 20b), from the reads' own lists. Fictitious names.
+
+const TODAY = "2026-11-15";
+const ZONE = "Europe/Amsterdam";
+const CLINICS = { id: "c1", name: "Clinics, Rotterdam" };
+const PHYSIO = { id: "c2", name: "Physiotherapy, Greater London" };
+const HARBOUR = { id: "co1", name: "Harbour Lane Physio" };
+const SAM = { id: "p1", name: "Sam Reed" };
+const NIA = { id: "p2", name: "Nia Cole" };
+
+const capacity = (enrollmentId: string, person: typeof SAM | null, campaign: typeof CLINICS, channel: "email" | "sms", resetsAt: string) => ({
+  enrollmentId,
+  campaignId: campaign.id,
+  person,
+  company: HARBOUR,
+  campaign,
+  trackId: "t1",
+  stepId: `s-${enrollmentId}-${channel}`,
+  channel,
+  dueAt: "2026-11-15T08:00:00Z",
+  accountIds: ["inbox-a"],
+  resetsAt,
+  action: null,
+  noAllowance: false,
+});
+
+describe("sending not running now, by the read's cause", () => {
+  test("not running: since when, what waits, and no link, since nothing on a page restarts it", () => {
+    expect(sendingInterruptedItem({ since: "2026-11-15T08:10:00Z", cause: "not_running", lastFailedRead: null, lastRoundFailedAt: null }, TODAY, ZONE)).toEqual({
+      key: "sending-interrupted",
+      tone: "crit",
+      title: "Sending is not running",
+      body: "No sending round has run since 09:10. While no round runs, due email and texts are not sent and due calls may not reach your list; nothing is dropped.",
+      action: null,
+    });
+  });
+
+  test("rounds failing: since when sending is interrupted and when the last round failed, never that every round did (council on 7622b8b)", () => {
+    // Interrupted since 09:00, a round ended at 09:10 while a provider was down, a round failed at 09:11.
+    expect(sendingInterruptedItem({ since: "2026-11-15T08:00:00Z", cause: "ticks_failing", lastFailedRead: null, lastRoundFailedAt: "2026-11-15T08:11:00Z" }, TODAY, ZONE)).toMatchObject({
+      title: "Sending is failing",
+      body: "Sending has been interrupted since 09:00, and the last sending round failed at 09:11. While rounds fail, due email and texts are not sent and due calls may not reach your list; nothing is dropped.",
+    });
+    // Dated when it began on another day.
+    expect(sendingInterruptedItem({ since: "2026-11-14T21:00:00Z", cause: "ticks_failing", lastFailedRead: null, lastRoundFailedAt: "2026-11-15T08:11:00Z" }, TODAY, ZONE).body).toBe(
+      "Sending has been interrupted since Sat 14 Nov at 22:00, and the last sending round failed at 09:11. While rounds fail, due email and texts are not sent and due calls may not reach your list; nothing is dropped.",
+    );
+  });
+
+  test("a provider not answering: the read that failed last, and which part of the round", () => {
+    expect(
+      sendingInterruptedItem({ since: "2026-11-15T08:10:00Z", cause: "providers_unreachable", lastFailedRead: { channel: "email", part: "observation", at: "2026-11-15T08:42:00Z" }, lastRoundFailedAt: null }, TODAY, ZONE),
+    ).toMatchObject({
+      title: "Sending is interrupted",
+      body: "Since 09:10 not every provider has answered; Instantly’s report of replies, bounces and sends last failed at 09:42. Due sends that depend on it wait; nothing is dropped.",
+    });
+    expect(sendingInterruptedItem({ since: "2026-11-15T08:10:00Z", cause: "providers_unreachable", lastFailedRead: { channel: "sms", part: "accounts", at: "2026-11-15T08:42:00Z" }, lastRoundFailedAt: null }, TODAY, ZONE).body).toBe(
+      "Since 09:10 not every provider has answered; the SMS provider’s list of numbers last failed at 09:42. Due sends that depend on it wait; nothing is dropped.",
+    );
+    expect(sendingInterruptedItem({ since: "2026-11-15T08:10:00Z", cause: "providers_unreachable", lastFailedRead: { channel: "email", part: "call", at: "2026-11-15T08:42:00Z" }, lastRoundFailedAt: null }, TODAY, ZONE).body).toBe(
+      "Since 09:10 not every provider has answered; a request to Instantly last failed at 09:42. Due sends that depend on it wait; nothing is dropped.",
+    );
+    expect(sendingInterruptedItem({ since: "2026-11-15T08:10:00Z", cause: "providers_unreachable", lastFailedRead: null, lastRoundFailedAt: null }, TODAY, ZONE).body).toBe(
+      "Since 09:10 not every provider has answered. Due sends that depend on a provider not answering wait; nothing is dropped.",
+    );
+  });
+});
+
+describe("sends waiting on a provider that is not answering", () => {
+  test("one entry per provider: the provider, since when, and how many sends", () => {
+    expect(providerWaitItems([{ channel: "email", since: "2026-11-15T08:10:00Z", sends: 12 }, { channel: "sms", since: null, sends: 1 }], TODAY, ZONE)).toEqual([
+      { key: "provider-email", tone: "crit", title: "Instantly isn’t answering", body: "It hasn’t answered since 09:10. 12 email sends wait on it; nothing is dropped." },
+      { key: "provider-sms", tone: "crit", title: "The SMS provider isn’t answering", body: "It hasn’t answered yet. 1 text waits on it; nothing is dropped." },
+    ]);
+  });
+});
+
+describe("leads waiting for sending capacity", () => {
+  test("one lead: named, linked to their record, with when the first account resets", () => {
+    expect(capacityItems([capacity("e1", SAM, CLINICS, "email", "2026-11-15T23:00:00Z")], TODAY, ZONE)).toEqual([
+      {
+        key: "capacity-c1",
+        tone: "pause",
+        title: "Sam Reed is waiting for sending capacity",
+        body: "In Clinics, Rotterdam, their due email waits: every inbox it may use is full for the day. The first resets on Mon 16 Nov at 00:00; nothing is dropped.",
+        action: { label: "Open record", href: "/leads/people/p1", ariaLabel: "Open Sam Reed’s record" },
+      },
+    ]);
+  });
+
+  test("one lead with two due emails: plural", () => {
+    expect(capacityItems([capacity("e1", SAM, CLINICS, "email", "2026-11-15T23:00:00Z"), { ...capacity("e1", SAM, CLINICS, "email", "2026-11-15T23:00:00Z"), stepId: "s2" }], TODAY, ZONE)[0]?.body).toBe(
+      "In Clinics, Rotterdam, their due emails wait: every inbox they may use is full for the day. The first resets on Mon 16 Nov at 00:00; nothing is dropped.",
+    );
+  });
+
+  test("a company lead links to the company record", () => {
+    expect(capacityItems([capacity("e1", null, CLINICS, "sms", "2026-11-15T20:00:00Z")], TODAY, ZONE)[0]).toMatchObject({
+      title: "Harbour Lane Physio is waiting for sending capacity",
+      body: "In Clinics, Rotterdam, their due text waits: every SMS number it may use is full for the day. The first resets at 21:00; nothing is dropped.",
+      action: { label: "Open record", href: "/leads/companies/co1", ariaLabel: "Open Harbour Lane Physio’s record" },
+    });
+  });
+
+  test("several leads: one entry per campaign, in the read's order, counting leads, not steps; the earliest reset", () => {
+    const items = capacityItems(
+      [
+        capacity("e1", SAM, PHYSIO, "email", "2026-11-15T23:00:00Z"),
+        capacity("e2", NIA, CLINICS, "email", "2026-11-15T23:00:00Z"),
+        capacity("e1", SAM, PHYSIO, "sms", "2026-11-15T20:00:00Z"),
+        capacity("e3", SAM, PHYSIO, "email", "2026-11-15T23:00:00Z"),
+      ],
+      TODAY,
+      ZONE,
+    );
+    expect(items.map((i) => i.key)).toEqual(["capacity-c2", "capacity-c1"]);
+    expect(items[0]).toEqual({
+      key: "capacity-c2",
+      tone: "pause",
+      title: "2 leads in Physiotherapy, Greater London are waiting for sending capacity",
+      // Two emails and a text: the steps are counted (council on 7622b8b).
+      body: "Their due emails and text wait: every inbox and SMS number they may use is full for the day. The first resets at 21:00; nothing is dropped.",
+      action: { label: "Open campaign", href: "/campaigns/c2/leads", ariaLabel: "Open Physiotherapy, Greater London" },
+    });
+  });
+});
+
+describe("leads left with no usable channel (question Q20's interim: they stay listed)", () => {
+  const ended = (enrollmentId: string, person: typeof SAM | null, endedAt: string, channels: NeedsAttention["noUsableChannel"][number]["channels"][number][]) => ({
+    enrollmentId,
+    campaignId: CLINICS.id,
+    person,
+    company: HARBOUR,
+    campaign: CLINICS,
+    endedAt,
+    channels,
+  });
+
+  test("one lead: why each channel cannot reach them, when it ended, and their record", () => {
+    expect(
+      noUsableChannelItem(
+        [ended("e1", SAM, "2026-11-14T09:00:00Z", [{ channel: "email", why: "bad", owners: [] }, { channel: "sms", why: "missing", owners: [] }, { channel: "call", why: "declined", owners: [] }])],
+        TODAY,
+        ZONE,
+      ),
+    ).toEqual({
+      key: "no-usable-channel",
+      tone: "end",
+      title: "No way was left to reach Sam Reed",
+      body: "In Clinics, Rotterdam, their outreach ended on Sat 14 Nov at 10:00, when no channel could reach them. Now their email address is marked wrong, they have no mobile number, and they have declined on a call.",
+      action: { label: "Open record", href: "/leads/people/p1", ariaLabel: "Open Sam Reed’s record" },
+    });
+  });
+
+  test("each reason the read can give, said once", () => {
+    const body = (channel: "email" | "sms" | "call", why: "missing" | "bad" | "declined" | "conversation_taken") => noUsableChannelItem([ended("e1", SAM, "2026-11-15T08:00:00Z", [{ channel, why, owners: [] }])], TODAY, ZONE)?.body;
+    expect(body("email", "missing")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now they have no email address.");
+    expect(body("sms", "bad")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now their mobile number is marked wrong.");
+    expect(body("call", "missing")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now they have no number to call.");
+    // Question Q7 answered: a mobile in another campaign's text conversation names that campaign, in the one wording.
+    expect(noUsableChannelItem([ended("e1", SAM, "2026-11-15T08:00:00Z", [{ channel: "sms", why: "conversation_taken", owners: [{ name: "Spring clinics", test: false, lead: null }] }])], TODAY, ZONE)?.body).toBe(
+      "In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now their mobile is in a text conversation with campaign Spring clinics on every number this campaign can use.",
+    );
+    expect(body("call", "bad")).toBe("In Clinics, Rotterdam, their outreach ended at 09:00, when no channel could reach them. Now every number to call is marked wrong.");
+  });
+
+  test("details restored by a later import (review bot on 487de7c): the ending is said as past and final, with no empty reason", () => {
+    expect(noUsableChannelItem([ended("e1", SAM, "2026-11-14T09:00:00Z", [])], TODAY, ZONE)).toMatchObject({
+      title: "No way was left to reach Sam Reed",
+      body: "In Clinics, Rotterdam, their outreach ended on Sat 14 Nov at 10:00, when no channel could reach them. Each channel this campaign uses could reach them now, but the ending is final.",
+    });
+  });
+
+  test("several: one entry, the most recent named, and a link to them in Leads", () => {
+    expect(noUsableChannelItem([ended("e2", NIA, "2026-11-15T08:00:00Z", [{ channel: "email", why: "missing", owners: [] }]), ended("e1", null, "2026-11-12T08:00:00Z", [{ channel: "email", why: "bad", owners: [] }])], TODAY, ZONE)).toEqual({
+      key: "no-usable-channel",
+      tone: "end",
+      title: "No way was left to reach 2 leads",
+      // The causes the read gives, from one table (council on 7622b8b).
+      body: "Their outreach ended when no channel could reach them. What stops a channel now: a missing detail or a detail marked wrong. The most recent is Nia Cole in Clinics, Rotterdam, at 09:00.",
+      action: { label: "Show them", href: "/leads?status=finished_no_usable_channel" },
+    });
+  });
+
+  test("none: no entry", () => {
+    expect(noUsableChannelItem([], TODAY, ZONE)).toBeNull();
+  });
+});
+
+describe("the order of Needs attention (ticket 20b): the prototype's, with the new entries beside their kind", () => {
+  test("calls first, then sending and providers, accounts, held work, capacity, anomalies, and leads with no way left last", () => {
+    const items = attentionItems(
+      {
+        overdueCallbacks: [],
+        stalledInboxes: [{ accountId: "inbox-b", holding: ["x"] }],
+        heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e9", trackId: "t1", channel: "email", reason: "unresolved", owners: [] }],
+        accountWaits: [{ accountId: "inbox-c", reason: "quota", until: null }],
+        senderProblems: [{ accountId: "sms-1", channel: "sms", label: "+31 97 0102 3344", problem: "disconnected" }],
+        heldCapacity: [{ accountId: "inbox-d", channel: "email", held: 1, capacity: 30, sentToday: 4, work: [] }],
+        anomalies: [{ what: "Something odd.", at: "2026-11-15T08:00:00Z" }],
+        waitingForCapacity: [capacity("e1", SAM, CLINICS, "email", "2026-11-15T23:00:00Z")],
+        noUsableChannel: [{ enrollmentId: "e2", campaignId: CLINICS.id, person: NIA, company: HARBOUR, campaign: CLINICS, endedAt: "2026-11-15T08:00:00Z", channels: [{ channel: "email", why: "missing", owners: [] }] }],
+        waitingOnProvider: [{ channel: "email", since: "2026-11-15T08:10:00Z", sends: 3 }],
+        waitingOnTransport: [],
+        // From the same read as the provider entries (council on 7622b8b).
+        sendingInterrupted: { since: "2026-11-15T08:10:00Z", cause: "providers_unreachable", lastFailedRead: null, lastRoundFailedAt: null },
+      },
+      { overdueCallbacks: [], userZone: ZONE, date: TODAY, carriedOver: 2, carriedOverLastDay: 0 },
+    );
+    expect(items.map((i) => i.key)).toEqual([
+      "carried-over",
+      "sending-interrupted",
+      "provider-email",
+      "sender-sms-1",
+      "wait-inbox-c",
+      "stalled-inbox-b",
+      "held-inbox-d",
+      "tracks-k1-unresolved-email",
+      "capacity-c1",
+      "anomaly-0",
+      "no-usable-channel",
+    ]);
+  });
+
+  test("a track waiting on another campaign's first text whose fate is not known yet says why (question Q7 answered, point 10)", () => {
+    const empty = { overdueCallbacks: [], stalledInboxes: [], heldTracks: [], accountWaits: [], senderProblems: [], heldCapacity: [], anomalies: [], waitingForCapacity: [], noUsableChannel: [], waitingOnProvider: [], waitingOnTransport: [], sendingInterrupted: null };
+    const items = attentionItems({ ...empty, heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e1", trackId: "sms", channel: "sms", reason: "sms_conversation_unsettled", owners: [{ name: "Spring clinics", test: false, lead: null }] }] }, { overdueCallbacks: [], userZone: ZONE, date: TODAY, carriedOver: 0, carriedOverLastDay: 0 });
+    // The lead and its campaign named, and linked to its record, where its row offers Skip (verifier on faac357, item 5).
+    expect(items.map((i) => [i.title, i.body, i.action?.href])).toEqual([
+      ["Pat Oneil is on hold in Clinics, London", "On hold because the first text from campaign Spring clinics to the same mobile, on every number this campaign can use, isn’t known to have gone or not yet. Nothing is dropped.", "/leads/people/p1"],
+    ]);
+  });
+
+  test("nothing in either read: no entry, so the page says nothing needs you", () => {
+    const empty = { overdueCallbacks: [], stalledInboxes: [], heldTracks: [], accountWaits: [], senderProblems: [], heldCapacity: [], anomalies: [], waitingForCapacity: [], noUsableChannel: [], waitingOnProvider: [], waitingOnTransport: [], sendingInterrupted: null };
+    expect(attentionItems(empty, { overdueCallbacks: [], userZone: ZONE, date: TODAY, carriedOver: 0, carriedOverLastDay: 0 })).toEqual([]);
+  });
+});
+
+describe("a notice states what is known and promises nothing (the re-check of ff01571)", () => {
+  const read = (fields: Partial<Parameters<typeof attentionItems>[0]>) =>
+    attentionItems(
+      { overdueCallbacks: [], stalledInboxes: [], heldTracks: [], accountWaits: [], senderProblems: [], heldCapacity: [], anomalies: [], waitingForCapacity: [], noUsableChannel: [], waitingOnProvider: [], waitingOnTransport: [], sendingInterrupted: null, ...fields },
+      { overdueCallbacks: [], userZone: ZONE, date: TODAY, carriedOver: 0, carriedOverLastDay: 0 },
+    );
+
+  test("an inbox rate-limited until noon: the provider's request and its end, never a time sending resumes", () => {
+    // Noon in the user's zone (UTC+1 in November).
+    const [item] = read({ accountWaits: [{ accountId: "inbox-b", reason: "rate_limited", until: "2026-11-15T11:00:00Z" }] });
+    expect(item?.body).toBe("Instantly asked this inbox to slow down until 12:00; nothing is dropped.");
+  });
+
+  test("no sentence on Needs attention or the interruption notice says a send will happen", () => {
+    const items = read({
+      stalledInboxes: [{ accountId: "inbox-b", holding: ["x"] }],
+      heldTracks: [{ person: { id: "p1", name: "Pat Oneil" }, company: { id: "c1", name: "Harbour Lane Physio" }, campaign: { id: "k1", name: "Clinics, London" }, enrollmentId: "e9", trackId: "t1", channel: "email", reason: "unresolved", owners: [] }],
+      accountWaits: [{ accountId: "inbox-c", reason: "quota", until: null }, { accountId: "inbox-e", reason: "rate_limited", until: "2026-11-15T12:00:00Z" }],
+      senderProblems: [{ accountId: "sms-1", channel: "sms", label: "+31 97 0102 3344", problem: "disconnected" }],
+      heldCapacity: [{ accountId: "inbox-d", channel: "email", held: 1, capacity: 30, sentToday: 4, work: [] }],
+      waitingForCapacity: [capacity("e1", SAM, CLINICS, "email", "2026-11-15T23:00:00Z")],
+      waitingOnProvider: [{ channel: "email", since: "2026-11-15T08:10:00Z", sends: 3 }, { channel: "sms", since: null, sends: 1 }],
+    });
+    const causes = (["not_running", "ticks_failing", "providers_unreachable"] as const).map((cause) => sendingInterruptedItem({ since: "2026-11-15T08:10:00Z", cause, lastFailedRead: null, lastRoundFailedAt: "2026-11-15T09:11:00Z" }, TODAY, ZONE));
+    for (const item of [...items, ...causes]) {
+      expect(item.body, item.key).not.toMatch(/resum|once it|until it|until a round|goes |they go|will |as soon as|comes back|starts again/i);
+    }
+  });
+});
