@@ -24,8 +24,9 @@ export const LINKEDIN_SEED = 24000;
 // Ticket 27 (ADR 0004 14.11 and 14.16 to 14.18): after ticket 25's merge and the draws for the review bot on 56030c4 and the
 // council on d6ad9f5, a greedy cover by cost of every behaviour below over offsets 0 to 50, keeping 10, 15, 46, 69, 73 and
 // 93 and the search's two seeds on 56030c4 (71 and 84, the record's errors): 4, 8, 16, 18, 23, 30, 35, 42, 44 and 49 (about
-// 180 seconds of runs on a developer machine).
-export const LINKEDIN_FIXED_SEEDS: readonly number[] = [4, 8, 10, 15, 16, 18, 23, 30, 35, 42, 44, 46, 49, 69, 71, 73, 84, 93];
+// 180 seconds of runs on a developer machine); and 3, which removes the first message before the choice once the contested
+// campaign was left to the contest's own draws.
+export const LINKEDIN_FIXED_SEEDS: readonly number[] = [3, 4, 8, 10, 15, 16, 18, 23, 30, 35, 42, 44, 46, 49, 69, 71, 73, 84, 93];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const LINKEDIN_FEATURES: readonly string[] = [
   "a-campaign-paused",
