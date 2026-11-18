@@ -94,7 +94,7 @@ test("a launched track with the fallback on: the wait, its end, the InMail, a re
   await test.step("Friday: the wait ended; Nia's InMail went and the invite stays open; Ola's was refused and her invite is to be withdrawn", async () => {
     await f.h.advanceTo(LI_MONDAY_8 + 4 * DAY + 4 * H);
     await at(page, f, `/leads/people/${nia}`);
-    await expect(page.getByText(/^No acceptance was recorded within the track’s wait, so the InMail went instead on Thu 5 Nov\./)).toBeVisible();
+    await expect(page.getByText(/^No acceptance was recorded within the track’s wait, so the InMail went instead on Thu 5 Nov, from Simulated LinkedIn \(not a session\) li-session-1\./)).toBeVisible();
     await expect(page.getByText("The connection invite sent from this campaign is still open on LinkedIn.", { exact: false })).toHaveCount(0);
     await shot(page, "07-record-inmail-sent");
     await linger(page);
