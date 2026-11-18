@@ -6,7 +6,7 @@ import { expiryLine, INMAIL_AT_THE_END, inmailLine, INVITE_HANDED, INVITE_STILL_
 
 /** The record's and Today's LinkedIn sentences, one per state of the read (ticket 24b; ADR 0004 section 9). */
 const ZONE = "Europe/London";
-const VIEW: LinkedinTrackView = { invite: null, note: null, connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalAsked: false, skipCause: null, withdrawalStuck: false, inviteOpen: false, pendingElsewhereSince: null, inmail: { on: false, state: null, work: null, sentAt: null, reportedAt: null } };
+const VIEW: LinkedinTrackView = { invite: null, note: null, connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalAsked: false, skipCause: null, withdrawalStuck: false, inviteOpen: false, pendingElsewhereSince: null, inmail: { on: false, state: null, work: null, sentAt: null, sentFrom: null, reportedAt: null } };
 const track = (linkedin: Partial<LinkedinTrackView> | null, fields: Partial<TrackProgressView> = {}): TrackProgressView => ({
   trackId: "li",
   channel: "linkedin",
@@ -147,7 +147,7 @@ describe("Activity's LinkedIn entries in words", () => {
 describe("the InMail fallback on the record (ticket 27, ADR 0004 14.7)", () => {
   const ZONE = "Europe/London";
   const REPORT = "2026-11-03T21:00:00.000Z";
-  const inm = (fields: Partial<LinkedinTrackView["inmail"]>): LinkedinTrackView["inmail"] => ({ on: true, state: null, work: null, sentAt: null, reportedAt: REPORT, ...fields });
+  const inm = (fields: Partial<LinkedinTrackView["inmail"]>): LinkedinTrackView["inmail"] => ({ on: true, state: null, work: null, sentAt: null, sentFrom: null, reportedAt: REPORT, ...fields });
   const track = (inmail: LinkedinTrackView["inmail"], finishReason: TrackProgressView["finishReason"] = null, more: Partial<LinkedinTrackView> = {}) => ({ channel: "linkedin" as const, finishReason, conversationOwners: [], linkedin: { ...VIEW, invite: "sent" as const, note: "none" as const, inviteOpen: true, ...more, inmail } });
 
   test("each state has its own sentence from its stored fact; the InMail is said as gone only once recorded sent; chosen promises nothing", () => {

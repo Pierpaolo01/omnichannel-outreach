@@ -188,6 +188,8 @@ export interface StepEnv {
    * of its stored state (council on cc9bf55, item 8).
    */
   readonly callRoomOn?: (day: number, self: SubjectState) => boolean;
+  /** The sender accounts' labels, by id, for a read that names the session a step went from (ADR 0004 14.7). */
+  readonly accountLabels?: Readonly<Record<string, string>>;
 }
 
 /**

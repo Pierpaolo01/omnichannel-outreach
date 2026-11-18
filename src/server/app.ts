@@ -664,9 +664,10 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
    */
   const withEnv = async <T>(at: number, reading: readonly SubjectState[], known: ReadonlyMap<string, SubjectState | null> | undefined, compute: (env: StepEnv) => T | Promise<T>): Promise<T> => {
     const light = await stepEnvOf(store.engine, at, reading, transport, known, false);
+    const accountLabels = await store.engine.accountLabels();
     const probe = { asked: false };
-    const first = await compute({ ...light, callRoomOn: () => ((probe.asked = true), true) });
-    return probe.asked ? compute(await stepEnvOf(store.engine, at, reading, transport, known)) : first;
+    const first = await compute({ ...light, accountLabels, callRoomOn: () => ((probe.asked = true), true) });
+    return probe.asked ? compute({ ...(await stepEnvOf(store.engine, at, reading, transport, known)), accountLabels }) : first;
   };
   // The read is this subject as the engine evaluates it at the read's instant (`previewAsOf`, the rule the controls' preview
   // already reads through: the engine's own `asOfAction`): a track

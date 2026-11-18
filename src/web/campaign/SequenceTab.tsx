@@ -14,7 +14,7 @@ import { Icon } from "../icons.tsx";
 import { campaignPath } from "../pages/CampaignPage.tsx";
 import { arrange, type ArrangeOperation } from "./arrangement.ts";
 import { whyNoSmsNumber } from "./sms-wording.ts";
-import { ENDS_AND_ASKS_WITHDRAWAL } from "./linkedin-wording.ts";
+import { ENDS_AND_ASKS_WITHDRAWAL, INMAIL_REPLACES } from "./linkedin-wording.ts";
 import {
   stepNounOf,
   WEEK,
@@ -1445,7 +1445,7 @@ function InmailFallbackControl({ track, locked, launched, onChange }: { track: T
       </label>
       <p id={hint} className="text-[12.5px] text-muted">
         {step
-          ? `When the wait ends, one InMail goes from the session that sent the invite, if that session reports Premium or Sales Navigator with an InMail credit free; otherwise ${ENDS_AND_ASKS_WITHDRAWAL}, as without it. The invite stays open on LinkedIn. The InMail takes the first message’s place: the follow-ups wait their days from it. It spends one of the session’s InMail credits and one of its messages for the day.`
+          ? `When the wait ends, one InMail goes from the session that sent the invite, if that session reports Premium or Sales Navigator with an InMail credit free; otherwise ${ENDS_AND_ASKS_WITHDRAWAL}, as without it. The invite stays open on LinkedIn. ${INMAIL_REPLACES}; the follow-ups wait their days from the InMail. It spends one of the session’s InMail credits and one of its messages for the day.`
           : `Off: when the wait ends, ${ENDS_AND_ASKS_WITHDRAWAL}.`}
         {launched ? " Switching it on or off reaches every lead whose InMail hasn’t gone yet." : ""}
       </p>

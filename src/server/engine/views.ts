@@ -117,7 +117,7 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
           finishReason: p?.finishReason ?? null,
           finishedAt: iso(p?.finishedWall ?? null),
           conversationOwners: conversationOwnersView(s, track.id),
-          linkedin: track.channel === "linkedin" ? linkedinTrackView(s, track.id) : null,
+          linkedin: track.channel === "linkedin" ? linkedinTrackView(s, track.id, env.accountLabels) : null,
           messageRequest: isMessageRequestChannel(track.channel) ? messageRequestTrackView(s, track.id, track.channel) : null,
           hold: heldReason(s, track.id, now),
           holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test, lead: o.lead })),
@@ -378,7 +378,7 @@ export function messageRequestTrackView(s: SubjectState, trackId: string, channe
   };
 }
 
-export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTrackView {
+export function linkedinTrackView(s: SubjectState, trackId: string, labels: Readonly<Record<string, string>> = {}): LinkedinTrackView {
   const p = s.tracks.find((x) => x.trackId === trackId);
   // The invite work that counts (item 8): the one known sent, else the latest still unsettled.
   const counting = invitingWork(s, trackId);
@@ -398,23 +398,26 @@ export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTra
     inviteOpen: inviteOpenOn(s, trackId),
     // While the track holds as pending elsewhere (every session it may use pending): the earliest any of them saw it.
     pendingElsewhereSince: iso(invitePendingUntil(s, trackId) === null ? null : earliest(Object.values(p?.connectionChecks ?? {}).flatMap((c) => (c.pendingSince === null ? [] : [c.pendingSince])))),
-    inmail: inmailView(s, trackId),
+    inmail: inmailView(s, trackId, labels),
   };
 }
 
 /** The InMail fallback's stored facts for a read (ADR 0004 14.7): the switch now, the expiry's judgment, the InMail's work and send. */
-function inmailView(s: SubjectState, trackId: string): LinkedinTrackView["inmail"] {
+function inmailView(s: SubjectState, trackId: string, labels: Readonly<Record<string, string>>): LinkedinTrackView["inmail"] {
   const track = s.campaign.definition.tracks.find((t) => t.id === trackId);
   const p = s.tracks.find((x) => x.trackId === trackId);
   const isInmail = (stepId: string) => (track ? linkedinStepKind(track, stepId) === "inmail" : false);
   const work = s.work.filter((w) => w.trackId === trackId && w.inmail === true && w.firstHandedWall !== null);
-  const sent = work.some((w) => w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null);
+  const sentWork = work.find((w) => w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null);
+  const sent = sentWork !== undefined;
   const result = s.results.find((r) => r.trackId === trackId && isInmail(r.stepId) && r.result === "sent");
   return {
     on: track ? inmailStepOf(track) !== null : false,
     state: p?.inmail ?? null,
     work: sent ? "sent" : work.some((w) => w.settled === null) ? "handed" : null,
-    sentAt: result ? new Date(result.atWall).toISOString() : null,
+    sentAt: result ? new Date(result.atWall).toISOString() : sentWork?.sentWall != null ? new Date(sentWork.sentWall).toISOString() : null,
+    // The session it went from, from the sent work's own account: a sentence about what went names it (ADR 0004 14.7).
+    sentFrom: sentWork ? (labels[sentWork.accountId] ?? sentWork.accountId) : null,
     reportedAt: p?.inmailReportedWall != null ? new Date(p.inmailReportedWall).toISOString() : null,
   };
 }

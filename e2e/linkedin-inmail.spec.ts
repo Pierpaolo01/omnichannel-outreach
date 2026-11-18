@@ -122,3 +122,16 @@ test("a launched track with the fallback on: the wait, its end, the InMail, a re
     await linger(page);
   });
 });
+
+test("on a running campaign, switching the fallback on says which leads it may reach, as a condition, and names the step InMail", async ({ page }) => {
+  // The council on d6ad9f5, item 5: leads still waiting for acceptance are ones the InMail may reach; never zero, never a promise.
+  const f = await fakeLinkedinApp("launched", "inmail-running-edit");
+  await at(page, f, `/campaigns/${f.campaign}?track=li`);
+  await page.getByRole("checkbox", { name: "Send an InMail if they don’t accept in time" }).check();
+  await page.getByLabel("InMail", { exact: true }).fill("Hi {{first_name|there}}, a short note about {{company}}.");
+  const panel = page.getByTestId("running-changes");
+  await expect(panel.getByText("LinkedIn track · InMail")).toBeVisible();
+  await expect(panel.getByText(/^\d+ leads? still waiting for acceptance will get the InMail if the invite is not accepted in time and your session can send one then/)).toBeVisible();
+  await expect(panel.getByText(/LinkedIn track · First message/)).toHaveCount(0);
+  await shot(page, "11-running-edit-switched-on");
+});

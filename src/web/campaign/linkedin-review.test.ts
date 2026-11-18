@@ -11,7 +11,7 @@ import { withheldExplanation } from "./withheld.ts";
 
 /** The council's first review of `dee365d` (ticket 24b): each screen sentence or snapshot that could say something untrue. */
 
-const VIEW: LinkedinTrackView = { invite: "sent", note: "with", connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalAsked: false, skipCause: null, withdrawalStuck: false, inviteOpen: true, pendingElsewhereSince: null, inmail: { on: false, state: null, work: null, sentAt: null, reportedAt: null } };
+const VIEW: LinkedinTrackView = { invite: "sent", note: "with", connection: null, connectedAt: null, acceptedAt: null, acceptedAfterFinish: false, withdrawal: null, withdrawalAsked: false, skipCause: null, withdrawalStuck: false, inviteOpen: true, pendingElsewhereSince: null, inmail: { on: false, state: null, work: null, sentAt: null, sentFrom: null, reportedAt: null } };
 const liTrack = (view: Partial<LinkedinTrackView>): TrackProgressView => ({ trackId: "li", channel: "linkedin", branch: "main", started: true, finishReason: null, finishedAt: null, conversationOwners: [], messageRequest: null, linkedin: { ...VIEW, ...view }, hold: null, holdOwners: [], nextStep: null, callTask: null, steps: [] });
 const control = (action: "stop" | "move_to_win_back"): AllowedControl => ({ action, allowed: true, statusAfter: "stopped_manually", skips: null, next: null, withProvider: 0, digest: `${action}|x|invite_open` });
 const lead = (controls: ControlView[], tracks: TrackProgressView[]): RecordLead => ({
@@ -56,7 +56,7 @@ describe("item 5: a running edit's wait, by the step's role", () => {
   });
   test("removing a LinkedIn track says a sent invite stays open", () => {
     const removed = { ...def, tracks: [{ ...def.tracks[0]!, removed: true }] };
-    expect(whatItDoes({ kind: "track_removed", trackId: "li", stepId: null, reaches: 0, skips: 2, inFlight: 0, untouched: 0 }, false, removed)).toContain("An invite already sent stays open on LinkedIn");
+    expect(whatItDoes({ kind: "track_removed", trackId: "li", stepId: null, reaches: 0, skips: 2, inFlight: 0, mayReach: 0, maySkip: 0, untouched: 0 }, false, removed)).toContain("An invite already sent stays open on LinkedIn");
   });
 });
 

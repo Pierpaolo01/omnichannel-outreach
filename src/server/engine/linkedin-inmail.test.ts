@@ -5,7 +5,10 @@ import { EngineHarness } from "../../../test/support/engine-harness.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { FakeSession } from "../../../test/support/fake-linkedin-port.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
-import type { CampaignMeasures, LeadSearchResult } from "../../shared/api.ts";
+import type { CampaignMeasures, EditImpactView, LeadSearchResult, TrackProgressView } from "../../shared/api.ts";
+import { whatItDoes } from "../../web/campaign/RunningChanges.tsx";
+import type { OutreachStatus } from "../../domain/outreach-status.ts";
+import { linkedinTrackLines } from "../../web/campaign/linkedin-wording.ts";
 
 /**
  * The InMail fallback (ticket 27, ADR 0004 section 14) through the real HTTP app, SQLite store and engine, against the
@@ -729,5 +732,119 @@ describe("an acceptance while the InMail is uncertain (council on d6ad9f5, item 
     expect(w.delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1", "m2", "m3"]);
     const claims = (await w.h.store.engine.subject(pat, w.h.clock))?.attempts.filter((a) => a.stepId === "im") ?? [];
     expect(claims.length).toBe(1);
+  });
+});
+
+/**
+ * The council on d6ad9f5, item 4: what went is said from the work's stored fact, whatever became of the track. The InMail
+ * goes, but its answer is lost; the lead is stopped, moved to win-back, marked replied or its track removed before a lookup
+ * confirms the send. The read and its sentence then say it went, from the session, never that it hasn't gone.
+ */
+describe("an InMail confirmed sent after its track stopped moving (council on d6ad9f5, item 4)", () => {
+  const winBack: TrackDefinition = { id: "wb", channel: "email", branch: "win_back", window: ALWAYS, steps: [{ id: "wb1", waitDays: 0, subject: "Still interested?", body: "A note, {{first_name|there}}.", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false };
+  /** Pat's InMail goes on Wednesday at 09:00 and its answer is lost; `between` runs before any lookup can confirm it. */
+  async function lost(between: (w: Awaited<ReturnType<typeof world>> & { pat: string; campaignId: string }) => Promise<void>, tracks: TrackDefinition[] = [linkedin(FALLBACK, OFFICE)]) {
+    const w = await world({ plan: "premium", credits: 1 });
+    // A fictitious email too, so a win-back email track can reach Pat.
+    const c = await w.campaign(tracks, [person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", linkedin_url: PAT, email: "pat@harbour.example" })]);
+    await w.h.advanceTo(MONDAY_9 + 2 * H);
+    w.h.linkedin.profiles.set(PAT, { loseAnswer: 1 });
+    await w.h.advanceTo(WEDNESDAY_0 + 9 * H + MIN);
+    expect(w.delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "im"]);
+    const pat = c.lead("Pat Oneil");
+    expect((await w.track(pat))?.inmail).toBe("chosen");
+    await between({ ...w, pat, campaignId: c.id });
+    await w.h.advanceTo(WEDNESDAY_0 + 3 * DAY);
+    const read = (await w.h.request<{ tracks: TrackProgressView[]; status: OutreachStatus }>("GET", `/api/enrollments/${pat}`)).body;
+    const li = read.tracks.find((t) => t.trackId === "li")!;
+    return { li, lines: linkedinTrackLines(li, read.status, "Europe/London") };
+  }
+  const expectWent = (r: Awaited<ReturnType<typeof lost>>) => {
+    expect(r.li.linkedin?.inmail).toMatchObject({ work: "sent", sentAt: "2026-11-04T09:00:00.000Z" });
+    expect(r.li.linkedin?.inmail.sentFrom).toMatch(/li-session-1/);
+    const said = r.lines.join(" ");
+    expect(said).toMatch(/the InMail went instead on Wed 4 Nov, from [^.]*li-session-1/);
+    expect(said).not.toMatch(/hasn’t gone/);
+  };
+
+  test("stopped, then moved to win-back, then the lookup confirms the send: the read says it went, from the session", async () => {
+    const r = await lost(async ({ h, pat }) => {
+      expect((await h.request("POST", `/api/enrollments/${pat}/controls`, { requestId: "stop", action: "stop" })).status).toBe(200);
+      expect((await h.request("POST", `/api/enrollments/${pat}/controls`, { requestId: "wb", action: "move_to_win_back" })).status).toBe(200);
+    }, [linkedin(FALLBACK, OFFICE), winBack]);
+    expectWent(r);
+  });
+
+  test("marked replied on LinkedIn, then the lookup confirms the send: the read says it went, from the session", async () => {
+    const r = await lost(async ({ h, pat }) => {
+      const status = (await h.request<{ status: string }>("GET", `/api/enrollments/${pat}`)).body.status;
+      expect((await h.request("POST", `/api/enrollments/${pat}/replies`, { requestId: "r-1", channel: "linkedin", expect: { status } })).status).toBe(200);
+    });
+    expectWent(r);
+  });
+
+  test("its track removed by a running edit, then the lookup confirms the send: the read says it went, from the session", async () => {
+    const r = await lost(async ({ h, campaignId }) => {
+      expect((await h.request("PUT", `/api/campaigns/${campaignId}/sequence`, definition([{ ...linkedin(FALLBACK, OFFICE), removed: true }, { ...winBack, branch: "main", id: "e1" }]))).status).toBe(200);
+    }, [linkedin(FALLBACK, OFFICE), { ...winBack, branch: "main", id: "e1", start: { kind: "after", trackId: "li", delayDays: 30 } }]);
+    expectWent(r);
+  });
+});
+
+/**
+ * The council on d6ad9f5, item 5: the running-edit preview is a confirmation, so it says what the save does. A lead still
+ * waiting for acceptance is one a switched-on InMail may reach, said as that condition; switched off, the same lead may not
+ * get one. A chosen InMail switched off before its handover is skipped, one handed over goes as it was, one sent is past.
+ */
+describe("the running-edit preview of the InMail fallback (council on d6ad9f5, item 5)", () => {
+  const OFF = FALLBACK.filter((s) => s.role !== "inmail");
+  const ON = FALLBACK;
+  const impactOf = async (h: EngineHarness, campaignId: string, steps: StepDefinition[]) => {
+    const read = await h.request<EditImpactView>("POST", `/api/campaigns/${campaignId}/sequence/impact`, { definition: definition([linkedin(steps, OFFICE)]) });
+    expect(read.status).toBe(200);
+    const change = read.body.changes.find((c) => c.stepId === "im");
+    expect(change).toBeDefined();
+    return change!;
+  };
+
+  test("switched on while a lead waits for acceptance: one lead it may reach, said as a condition, and the save sends it the InMail", async () => {
+    const { h, campaign, delivered } = await world();
+    const c = await campaign([linkedin(OFF, OFFICE)], [PEOPLE[0]!]);
+    await h.advanceTo(MONDAY_9 + DAY);
+    const change = await impactOf(h, c.id, ON);
+    expect(change).toMatchObject({ kind: "step_added", reaches: 0, mayReach: 1, untouched: 0 });
+    expect(whatItDoes(change, false)).toBe("1 lead still waiting for acceptance will get the InMail if the invite is not accepted in time and your session can send one then.");
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, definition([linkedin(ON, OFFICE)]))).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "im"]);
+  });
+
+  test("switched off while a lead waits for acceptance: one lead that may not get it, with what the end of the wait then does", async () => {
+    const { h, campaign } = await world();
+    const c = await campaign([linkedin(ON, OFFICE)], [PEOPLE[0]!]);
+    await h.advanceTo(MONDAY_9 + DAY);
+    const change = await impactOf(h, c.id, ON.map((s) => (s.role === "inmail" ? { ...s, removed: true } : s)));
+    expect(change).toMatchObject({ kind: "step_removed", maySkip: 1, skips: 0, untouched: 0 });
+    expect(whatItDoes(change, false)).toContain("won’t get an InMail: if the invite is not accepted in time, this track ends for them and the app asks LinkedIn to withdraw the invite");
+  });
+
+  test("switched off with the InMail chosen and not handed over: skipped; handed over: goes as it was; sent: past it", async () => {
+    const off = ON.map((s) => (s.role === "inmail" ? { ...s, removed: true } : s));
+    const chosen = await world();
+    const a = await chosen.campaign([linkedin(ON, OFFICE)], [PEOPLE[0]!]);
+    await chosen.h.advanceTo(WEDNESDAY_0 + 2 * H);
+    expect(await impactOf(chosen.h, a.id, off)).toMatchObject({ skips: 1, maySkip: 0, inFlight: 0, untouched: 0 });
+
+    const handed = await world();
+    const b = await handed.campaign([linkedin(ON, OFFICE)], [PEOPLE[0]!]);
+    await handed.h.advanceTo(MONDAY_9 + 2 * H);
+    handed.h.linkedin.profiles.set(PAT, { loseAnswer: 1 });
+    await handed.h.advanceTo(WEDNESDAY_0 + 9 * H + MIN);
+    expect(await impactOf(handed.h, b.id, off)).toMatchObject({ inFlight: 1, skips: 0, maySkip: 0 });
+
+    const sent = await world();
+    const d = await sent.campaign([linkedin(ON, OFFICE)], [PEOPLE[0]!]);
+    await sent.h.advanceTo(WEDNESDAY_0 + 10 * H);
+    expect(await impactOf(sent.h, d.id, off)).toMatchObject({ untouched: 1, skips: 0, maySkip: 0, inFlight: 0 });
   });
 });

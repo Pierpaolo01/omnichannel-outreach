@@ -86,6 +86,7 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
   if (!stored) return null;
   // As of the read's instant: what fell due since the worker's last tick is applied (nothing is written).
   const s = rules.asOfAction(stored, now, rules.evaluate);
+  const labels = await store.engine.accountLabels();
   return {
     id: run.id,
     running: s.subject.ended === null,
@@ -99,7 +100,7 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
     social: messageRequestRecord((ch) => run.contacts[ch]?.value ?? null),
     status: deriveStatus(s),
     stopReply: s.subject.stopReply?.channel ?? null,
-    linkedinTracks: s.tracks.filter((t) => s.campaign.definition.tracks.find((d) => d.id === t.trackId)?.channel === "linkedin").map((t) => ({ trackId: t.trackId, view: linkedinTrackView(s, t.trackId) })),
+    linkedinTracks: s.tracks.filter((t) => s.campaign.definition.tracks.find((d) => d.id === t.trackId)?.channel === "linkedin").map((t) => ({ trackId: t.trackId, view: linkedinTrackView(s, t.trackId, labels) })),
     mayStillSend: s.work.filter(maySend).length,
     steps: stepsOf(s, rules, now, env),
     // The mark's own rule on the stored run (it reads the run as of the action itself), as a lead's read says it (ticket 24b).

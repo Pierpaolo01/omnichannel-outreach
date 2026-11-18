@@ -546,6 +546,10 @@ export interface EditImpactChange {
   readonly skips: number;
   /** Leads whose affected step is with a provider now: it goes as it was handed. */
   readonly inFlight: number;
+  /** Leads waiting for acceptance whom a switched-on InMail reaches only if the invite is not accepted and the session can send one (14.8). */
+  readonly mayReach: number;
+  /** Leads waiting for acceptance whom a switched-off InMail would have reached under that same condition (14.8). */
+  readonly maySkip: number;
   /** Leads past it, finished with that track, in the other branch, or ended. */
   readonly untouched: number;
 }
@@ -657,7 +661,7 @@ export interface LinkedinTrackView {
    * the InMail's own work, `sent` once recorded sent, `handed` while with the session and not known to have gone; `sentAt`,
    * its send's instant once recorded.
    */
-  readonly inmail: { readonly on: boolean; readonly state: import("../domain/sequence/state.ts").InmailState | null; readonly work: "sent" | "handed" | null; readonly sentAt: string | null; /** The instant of the session's report the expiry judged on (14.5). */ readonly reportedAt: string | null };
+  readonly inmail: { readonly on: boolean; readonly state: import("../domain/sequence/state.ts").InmailState | null; readonly work: "sent" | "handed" | null; readonly sentAt: string | null; /** The session the InMail went from, by its label: from the sent work (14.7). */ readonly sentFrom: string | null; /** The instant of the session's report the expiry judged on (14.5). */ readonly reportedAt: string | null };
 }
 
 /**
