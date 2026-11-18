@@ -1275,6 +1275,55 @@ export const MIGRATIONS: readonly Migration[] = [
     `,
     data: (db) => addChannel(db, "facebook"),
   },
+  {
+    version: 27,
+    name: "the LinkedIn InMail fallback (ticket 27, ADR 0004 section 15): a track's InMail state, which message work is an InMail, and a session's InMail report",
+    sql: `
+      -- A track's InMail fallback, judged at the acceptance expiry and moving only forward (ADR 0004 15.3, 15.10).
+      ALTER TABLE track_progress ADD COLUMN inmail TEXT CHECK (inmail IS NULL OR inmail IN ('chosen', 'sent', 'accepted', 'no_plan', 'no_credit', 'stale_report', 'refused', 'switched_off', 'skipped_by_user'));
+      ALTER TABLE track_progress ADD COLUMN inmail_session TEXT;
+      -- The credit a track's InMail holds on its session, by when it was acquired (15.5); the report a judgment read; the
+      -- step the InMail replaces, named at the choice (council on 8b0c846, items 1, 2, 5, 7, 8).
+      ALTER TABLE track_progress ADD COLUMN inmail_hold_wall INTEGER;
+      ALTER TABLE track_progress ADD COLUMN inmail_reported_wall INTEGER;
+      ALTER TABLE track_progress ADD COLUMN inmail_replaces TEXT;
+      CREATE INDEX track_progress_inmail_holdings ON track_progress (inmail_session, inmail_hold_wall) WHERE inmail_hold_wall IS NOT NULL;
+      -- A session's InMail standing has a version of its own, beside the conversations' (key 'inmail:' and the session), moved
+      -- by the database in the same write as every fact the standing reads (15.5; the generated runs, seed 24024): a holding
+      -- acquired or released, a report, an InMail's work sent or settled. A cached evaluation or readiness of a subject whose
+      -- InMail is chosen remembers it, so another lead's release or a new report reaches it.
+      CREATE TRIGGER inmail_standing_progress_insert AFTER INSERT ON track_progress WHEN NEW.inmail_session IS NOT NULL
+      BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES ('inmail:' || NEW.inmail_session, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER inmail_standing_progress_update AFTER UPDATE OF inmail, inmail_session, inmail_hold_wall, finished_at ON track_progress
+      WHEN (OLD.inmail_session IS NOT NULL OR NEW.inmail_session IS NOT NULL) AND (NEW.inmail IS NOT OLD.inmail OR NEW.inmail_session IS NOT OLD.inmail_session OR NEW.inmail_hold_wall IS NOT OLD.inmail_hold_wall OR NEW.finished_at IS NOT OLD.finished_at)
+      BEGIN
+        INSERT INTO conversation_versions (recipient_key, seq) SELECT 'inmail:' || OLD.inmail_session, 1 WHERE OLD.inmail_session IS NOT NULL ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1;
+        INSERT INTO conversation_versions (recipient_key, seq) SELECT 'inmail:' || NEW.inmail_session, 1 WHERE NEW.inmail_session IS NOT NULL ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1;
+      END;
+      CREATE TRIGGER inmail_standing_report AFTER UPDATE OF inmail_plan, inmail_credits, inmail_reported_wall, healthy ON sender_accounts
+      WHEN NEW.inmail_plan IS NOT OLD.inmail_plan OR NEW.inmail_credits IS NOT OLD.inmail_credits OR NEW.inmail_reported_wall IS NOT OLD.inmail_reported_wall OR NEW.healthy IS NOT OLD.healthy
+      BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES ('inmail:' || NEW.id, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER inmail_standing_work AFTER UPDATE OF settled, sent_wall, first_handed_wall ON provider_work
+      WHEN NEW.inmail = 1 AND (NEW.settled IS NOT OLD.settled OR NEW.sent_wall IS NOT OLD.sent_wall OR NEW.first_handed_wall IS NOT OLD.first_handed_wall)
+      BEGIN INSERT INTO conversation_versions (recipient_key, seq) VALUES ('inmail:' || NEW.account_id, 1) ON CONFLICT(recipient_key) DO UPDATE SET seq = seq + 1; END;
+      CREATE TRIGGER track_progress_inmail_forward BEFORE UPDATE OF inmail ON track_progress
+      WHEN OLD.inmail IS NOT NULL AND NEW.inmail IS NOT OLD.inmail AND NOT (OLD.inmail = 'chosen' AND NEW.inmail IS NOT NULL)
+      BEGIN SELECT RAISE(ABORT, 'a track''s InMail state only moves forward'); END;
+      -- The store writes progress with INSERT OR REPLACE: judged against the row it would replace, before it is removed.
+      CREATE TRIGGER track_progress_inmail_forward_replace BEFORE INSERT ON track_progress
+      WHEN EXISTS (SELECT 1 FROM track_progress o WHERE o.subject_id = NEW.subject_id AND o.track_id = NEW.track_id
+        AND o.inmail IS NOT NULL AND NEW.inmail IS NOT o.inmail AND NOT (o.inmail = 'chosen' AND NEW.inmail IS NOT NULL))
+      BEGIN SELECT RAISE(ABORT, 'a track''s InMail state only moves forward'); END;
+      -- Which message work is an InMail: it spends a credit as well as one of the session's messages (ADR 0004 15.5).
+      ALTER TABLE provider_work ADD COLUMN inmail INTEGER NOT NULL DEFAULT 0 CHECK (inmail IN (0, 1) AND (inmail = 0 OR kind = 'message'));
+      ALTER TABLE attempts ADD COLUMN inmail INTEGER NOT NULL DEFAULT 0 CHECK (inmail IN (0, 1) AND (inmail = 0 OR action = 'message'));
+      -- A LinkedIn session's InMail standing, as it last reported it (ADR 0004 15.5): never invented, never cleared by a
+      -- listing that omits it.
+      ALTER TABLE sender_accounts ADD COLUMN inmail_plan TEXT CHECK (inmail_plan IS NULL OR inmail_plan IN ('premium', 'sales_navigator', 'none'));
+      ALTER TABLE sender_accounts ADD COLUMN inmail_credits INTEGER CHECK (inmail_credits IS NULL OR inmail_credits >= 0);
+      ALTER TABLE sender_accounts ADD COLUMN inmail_reported_wall INTEGER;
+    `,
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {

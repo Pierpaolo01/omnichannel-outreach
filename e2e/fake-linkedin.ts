@@ -59,6 +59,10 @@ const EMAIL_AFTER: TrackDefinition = {
   steps: [{ id: "em-1", waitDays: 0, subject: "Evening bookings at {{company}}", body: "Hi {{first_name|there}},\n\nA short note on evening booking for {{company}}.\n\nAlex", threading: "new_subject", removed: false }],
 };
 export const LINKEDIN_DEFINITION: CampaignDefinition = { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: [FAKE_INBOX], smsPool: [], linkedinPool: [SESSION_ID], tracks: [LINKEDIN_TRACK, EMAIL_AFTER] };
+/** The InMail fallback switched on (ticket 27): an InMail step right after the invite. */
+export const INMAIL_STEP: StepDefinition = { ...step("li-inmail", 0, "Hi {{first_name|there}}, we haven’t connected, so a short note: I help clinics like {{company}} fill evening bookings. Worth a look?"), role: "inmail" };
+export const INMAIL_TRACK: TrackDefinition = { ...LINKEDIN_TRACK, steps: [LINKEDIN_TRACK.steps[0]!, INMAIL_STEP, ...LINKEDIN_TRACK.steps.slice(1)] };
+export const INMAIL_DEFINITION: CampaignDefinition = { ...LINKEDIN_DEFINITION, tracks: [INMAIL_TRACK, EMAIL_AFTER] };
 
 /**
  * `fresh`: leads imported, no sequence (the canvas from empty). `ready`: the LinkedIn sequence, not launched, with the user's
@@ -69,7 +73,7 @@ export const LINKEDIN_DEFINITION: CampaignDefinition = { timezone: "Europe/Londo
  * withdrawal LinkedIn keeps answering unknown, so the run finished with its withdrawal stuck. `launched`: `running`, read on
  * Monday at 10:00, its first day.
  */
-export type LinkedinScenario = "fresh" | "ready" | "testing" | "test-stuck" | "launched" | "running" | "later";
+export type LinkedinScenario = "fresh" | "ready" | "testing" | "test-stuck" | "launched" | "running" | "later" | "inmail-ready" | "inmail";
 
 export interface FakeLinkedinApp {
   readonly url: string;
@@ -98,7 +102,8 @@ async function start(scenario: LinkedinScenario, allowances: Allowances): Promis
   const h = new EngineHarness({
     start: LI_MONDAY_8 - H,
     accounts: [{ id: FAKE_INBOX, capacity: 30, gapMs: MIN, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
-    linkedin: { sessions: [{ id: SESSION, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }] },
+    // The InMail scenarios' session reports Premium with three credits (ticket 27): what a session would report of itself.
+    linkedin: { sessions: [{ id: SESSION, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London", ...(scenario.startsWith("inmail") ? { inmail: { plan: "premium" as const, credits: 3 } } : {}) }] },
   });
   await h.tick();
   // The user's allowances for the simulated session (ADR 0004 1.2: no default). One note a month, so later invites go without it.
@@ -117,6 +122,21 @@ async function start(scenario: LinkedinScenario, allowances: Allowances): Promis
   const person = async (name: string) => (await rows()).find((r) => r.name === name)?.id ?? "";
   const enrollment = async (name: string, campaignId = campaign.id) => (await rows()).find((r) => r.name === name)?.enrollments.find((e) => e.campaign.id === campaignId)?.id ?? "";
   let second: string | null = null;
+  // Ola's settings refuse an InMail (ticket 27): the InMail scenarios' one refusal.
+  if (scenario.startsWith("inmail")) {
+    h.linkedin.profiles.set(PROFILES.ola, { refusesInmail: true });
+    await h.defineSequence(campaign.id, INMAIL_DEFINITION);
+    const contacts = await h.request("PUT", `/api/campaigns/${campaign.id}/test-contacts`, { email: "", mobile: "", linkedin: TEST_PROFILE });
+    if (contacts.status !== 200) throw new Error(`test profile refused: ${JSON.stringify(contacts.body)}`);
+    if (scenario === "inmail") {
+      h.clock = LI_MONDAY_8;
+      const launched = await h.launch(campaign.id);
+      if (launched.status !== 200) throw new Error(`launch refused: ${JSON.stringify(launched.body)}`);
+      // Wednesday noon: Pat accepted; Nia, Ola and Ivo still wait (the wait ends Thursday at midnight). The spec moves on.
+      await h.advanceTo(LI_MONDAY_8 + 2 * DAY + 4 * H);
+    }
+    return { url: await serveHarness(h), h, campaign: campaign.id, second, person, enrollment };
+  }
   if (scenario !== "fresh") await h.defineSequence(campaign.id, LINKEDIN_DEFINITION);
   if (scenario === "ready" || scenario === "testing" || scenario === "test-stuck") {
     const contacts = await h.request("PUT", `/api/campaigns/${campaign.id}/test-contacts`, { email: "", mobile: "", linkedin: TEST_PROFILE });

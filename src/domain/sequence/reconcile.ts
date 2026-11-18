@@ -94,7 +94,11 @@ export interface EditChange {
 }
 
 /** What one change does to one lead: it reaches work still ahead of them, skips work they had not reached, is with a provider now, or leaves them untouched. */
-export type LeadImpact = "reaches" | "skips" | "in_flight" | "untouched";
+/**
+ * `may_reach` / `may_skip` (the council on d6ad9f5, item 5): an InMail fallback switched on or off for a lead still waiting
+ * for acceptance, whom the InMail reaches only if the invite is not accepted and the session can send one then.
+ */
+export type LeadImpact = "reaches" | "may_reach" | "skips" | "may_skip" | "in_flight" | "untouched";
 
 /** Every change from `previous` to `next`, in the order of `next`'s tracks and steps, campaign-wide changes last. */
 export function changesBetween(previous: CampaignDefinition, next: CampaignDefinition): EditChange[] {
@@ -179,6 +183,10 @@ function impactOf(state: SubjectState, change: EditChange): LeadImpact {
     case "step_added":
     case "step_removed": {
       const stepId = change.stepId ?? "";
+      // The InMail fallback switched on or off (ADR 0004 15.8): an InMail is ahead of a lead only once the expiry chose it,
+      // so a lead still waiting for acceptance, the expiry not judged, is one it may reach: said as that condition.
+      const inmail = track.steps.find((s) => s.id === stepId)?.role === "inmail";
+      if (inmail && (change.kind === "step_added" || change.kind === "step_removed") && (p?.inmail ?? null) === null && (p?.connection ?? null) === null) return change.kind === "step_added" ? "may_reach" : "may_skip";
       if (p?.startedAt != null && p.nextStepId === stepId && inFlight(state, track.id)) return "in_flight";
       const ahead = p?.startedAt == null ? !state.results.some((r) => r.stepId === stepId) : stepsAhead(state, track).includes(stepId);
       if (!ahead) return "untouched";

@@ -1,10 +1,10 @@
 /** Read models for the HTTP interface, built from the engine's stored facts. */
 import type { SendChannelApi } from "../../shared/api.ts";
-import { stepNumber } from "../../domain/sequence/definition.ts";
+import { stepNumber, stepRoleOf } from "../../domain/sequence/definition.ts";
 import { isLive, markable } from "../../domain/sequence/attempt.ts";
 import { carriedInto, isListed, listedForDay, reasonOf } from "../../domain/sequence/calls.ts";
 import { callRecordView, dateOfDay } from "./call-views.ts";
-import { messageRequestStepKind, socialActionOf, socialStepKind } from "../../domain/sequence/definition.ts";
+import { allowanceOf, inmailStepOf, linkedinStepKind, messageRequestStepKind, socialActionOf, socialStepKind } from "../../domain/sequence/definition.ts";
 import { accountOfDetailId, isMessageRequestChannel, type MessageRequestChannel } from "../../domain/social-channels.ts";
 import { accountAvailable, claimRefusal, eligibleSessions, noAllowanceOnAnySession, heldReason, inheritedWork, readyItems, stalledAccounts, stepWhen, type StepEnv } from "../../domain/sequence/dispatch.ts";
 import { channelOfTrack, stepWhenView } from "./step-when-view.ts";
@@ -117,7 +117,7 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
           finishReason: p?.finishReason ?? null,
           finishedAt: iso(p?.finishedWall ?? null),
           conversationOwners: conversationOwnersView(s, track.id),
-          linkedin: track.channel === "linkedin" ? linkedinTrackView(s, track.id) : null,
+          linkedin: track.channel === "linkedin" ? linkedinTrackView(s, track.id, env.accountLabels) : null,
           messageRequest: isMessageRequestChannel(track.channel) ? messageRequestTrackView(s, track.id, track.channel) : null,
           hold: heldReason(s, track.id, now),
           holdOwners: unsettledOwnersOf(s, track.id, now).map((o) => ({ name: o.name, test: o.test, lead: o.lead })),
@@ -127,7 +127,9 @@ export function progressView(s: SubjectState, now: number, env: StepEnv = {}, wh
             const result = s.results.find((r) => r.stepId === st.id);
             return {
               stepId: st.id,
-              number: i + 1,
+              // A LinkedIn step by its role's numbering, the InMail named by its role (ADR 0004 15.9); other channels as before.
+              number: track.channel === "linkedin" ? stepNumber(track, st.id) : i + 1,
+              ...stepRoleOf(track, st.id),
               removed: st.removed,
               result: result?.result ?? null,
               calls: s.callAttempts
@@ -264,7 +266,9 @@ export async function needsAttention(
       const channel = channelOf(s, item.trackId);
       // LinkedIn too (council on dee365d, item 4), each session judged by the step's own kind of action (`forAction`).
       if (channel === undefined || channel === "call") continue;
-      const action = socialActionOf(socialStepKind(s.campaign.definition.tracks.find((t) => t.id === item.trackId) ?? { channel, steps: [] }, item.stepId));
+      const social = socialActionOf(socialStepKind(s.campaign.definition.tracks.find((t) => t.id === item.trackId) ?? { channel, steps: [] }, item.stepId));
+      // The allowance it waits on (ADR 0004 15.5): an InMail waits on the session's messages.
+      const action = social === null ? null : allowanceOf(social);
       const step = s.campaign.definition.tracks.find((t) => t.id === item.trackId)?.steps.find((x) => x.id === item.stepId);
       const base = { enrollmentId: id, trackId: item.trackId, stepId: item.stepId, channel, dueAt: new Date(item.dueWall).toISOString() };
       if (!transportAvailable(channel, step?.threading ?? "new_subject")) {
@@ -374,7 +378,7 @@ export function messageRequestTrackView(s: SubjectState, trackId: string, channe
   };
 }
 
-export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTrackView {
+export function linkedinTrackView(s: SubjectState, trackId: string, labels: Readonly<Record<string, string>> = {}): LinkedinTrackView {
   const p = s.tracks.find((x) => x.trackId === trackId);
   // The invite work that counts (item 8): the one known sent, else the latest still unsettled.
   const counting = invitingWork(s, trackId);
@@ -394,5 +398,29 @@ export function linkedinTrackView(s: SubjectState, trackId: string): LinkedinTra
     inviteOpen: inviteOpenOn(s, trackId),
     // While the track holds as pending elsewhere (every session it may use pending): the earliest any of them saw it.
     pendingElsewhereSince: iso(invitePendingUntil(s, trackId) === null ? null : earliest(Object.values(p?.connectionChecks ?? {}).flatMap((c) => (c.pendingSince === null ? [] : [c.pendingSince])))),
+    inmail: inmailView(s, trackId, labels),
+  };
+}
+
+/** The InMail fallback's stored facts for a read (ADR 0004 15.7): the switch now, the expiry's judgment, the InMail's work and send. */
+function inmailView(s: SubjectState, trackId: string, labels: Readonly<Record<string, string>>): LinkedinTrackView["inmail"] {
+  const track = s.campaign.definition.tracks.find((t) => t.id === trackId);
+  const p = s.tracks.find((x) => x.trackId === trackId);
+  const isInmail = (stepId: string) => (track ? linkedinStepKind(track, stepId) === "inmail" : false);
+  const work = s.work.filter((w) => w.trackId === trackId && w.inmail === true && w.firstHandedWall !== null);
+  const sentWork = work.find((w) => w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null);
+  const sent = sentWork !== undefined;
+  const result = s.results.find((r) => r.trackId === trackId && isInmail(r.stepId) && r.result === "sent");
+  return {
+    on: track ? inmailStepOf(track) !== null : false,
+    state: p?.inmail ?? null,
+    work: sent ? "sent" : work.some((w) => w.settled === null) ? "handed" : null,
+    // Whether any InMail work was ever handed over, whatever became of it (the verifier on f6bf9a3): a skip for an
+    // acceptance says so when it was.
+    handedOver: work.length > 0,
+    sentAt: result ? new Date(result.atWall).toISOString() : sentWork?.sentWall != null ? new Date(sentWork.sentWall).toISOString() : null,
+    // The session it went from, from the sent work's own account: a sentence about what went names it (ADR 0004 15.7).
+    sentFrom: sentWork ? (labels[sentWork.accountId] ?? sentWork.accountId) : null,
+    reportedAt: p?.inmailReportedWall != null ? new Date(p.inmailReportedWall).toISOString() : null,
   };
 }

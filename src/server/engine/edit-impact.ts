@@ -29,7 +29,7 @@ export async function editImpactView(store: EngineStore, rules: Rules, campaignI
   const problems = definitionProblems(draft, previous, { launched: row.launchedAt !== null });
   const { leads, accounts } = await store.launchInputs(campaignId);
   const changes = previous ? changesBetween(previous, draft) : [];
-  const counts = changes.map((change) => ({ ...change, reaches: 0, skips: 0, inFlight: 0, untouched: 0 }));
+  const counts = changes.map((change) => ({ ...change, reaches: 0, skips: 0, inFlight: 0, mayReach: 0, maySkip: 0, untouched: 0 }));
   const subjects = previous && row.launchedAt !== null ? await store.campaignLeadsUnder(campaignId, now, draft) : [];
   const leadsAfter: SubjectState[] = [];
   for (const { state, zoneUnderDraft } of subjects) {
@@ -43,6 +43,8 @@ export async function editImpactView(store: EngineStore, rules: Rules, campaignI
       if (impact === "reaches") c.reaches++;
       else if (impact === "skips") c.skips++;
       else if (impact === "in_flight") c.inFlight++;
+      else if (impact === "may_reach") c.mayReach++;
+      else if (impact === "may_skip") c.maySkip++;
       else c.untouched++;
     });
   }

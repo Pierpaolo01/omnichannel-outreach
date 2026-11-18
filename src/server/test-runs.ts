@@ -6,7 +6,7 @@
 import { stepWhen, type StepEnv } from "../domain/sequence/dispatch.ts";
 import { readWait } from "./engine/step-when-view.ts";
 import { isLive, maySend } from "../domain/sequence/attempt.ts";
-import { liveSteps, type TrackDefinition } from "../domain/sequence/definition.ts";
+import { stepNumber, type TrackDefinition } from "../domain/sequence/definition.ts";
 import { deriveStatus, progressOf, unsettledOwnersOf } from "../domain/sequence/progress.ts";
 import { heldReason } from "../domain/sequence/dispatch.ts";
 import type { EndReason, FinishReason, SubjectState } from "../domain/sequence/state.ts";
@@ -86,6 +86,7 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
   if (!stored) return null;
   // As of the read's instant: what fell due since the worker's last tick is applied (nothing is written).
   const s = rules.asOfAction(stored, now, rules.evaluate);
+  const labels = await store.engine.accountLabels();
   return {
     id: run.id,
     running: s.subject.ended === null,
@@ -99,7 +100,7 @@ async function runRead(store: OutreachStore, run: TestRunRecord, leads: TestRunT
     social: messageRequestRecord((ch) => run.contacts[ch]?.value ?? null),
     status: deriveStatus(s),
     stopReply: s.subject.stopReply?.channel ?? null,
-    linkedinTracks: s.tracks.filter((t) => s.campaign.definition.tracks.find((d) => d.id === t.trackId)?.channel === "linkedin").map((t) => ({ trackId: t.trackId, view: linkedinTrackView(s, t.trackId) })),
+    linkedinTracks: s.tracks.filter((t) => s.campaign.definition.tracks.find((d) => d.id === t.trackId)?.channel === "linkedin").map((t) => ({ trackId: t.trackId, view: linkedinTrackView(s, t.trackId, labels) })),
     mayStillSend: s.work.filter(maySend).length,
     steps: stepsOf(s, rules, now, env),
     // The mark's own rule on the stored run (it reads the run as of the action itself), as a lead's read says it (ticket 24b).
@@ -130,7 +131,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
     const label = trackLabel(def, track);
     const steps = track.steps.filter((st) => !st.removed || s.results.some((r) => r.stepId === st.id));
     const p = progressOf(s, track.id);
-    steps.forEach((step, i) => {
+    steps.forEach((step) => {
       const result = s.results.find((r) => r.stepId === step.id);
       const live = s.attempts.find((a) => a.stepId === step.id && isLive(a) && a.state !== "claimed");
       const task = s.callTasks.find((t) => t.stepId === step.id);
@@ -140,7 +141,7 @@ export function stepsOf(s: SubjectState, rules: CallViewRules, now: number, env:
         stepId: step.id,
         channel: track.channel,
         branch: track.branch,
-        name: track.channel === "call" ? (track.branch === "win_back" ? "Win-back call" : "Call") : stepTitle(label, track.channel, liveSteps(track).indexOf(step) + 1 || i + 1),
+        name: track.channel === "call" ? (track.branch === "win_back" ? "Win-back call" : "Call") : stepTitle(label, track.channel, stepNumber(track, step.id), step.role),
         track: label.label,
         taskId: task?.id ?? null,
         outcome: logged?.outcome ?? null,

@@ -104,10 +104,12 @@ export interface MessageMeasures {
 export interface LinkedinMeasures {
   readonly invitesSent: number;
   readonly invitesAccepted: number;
+  /** InMails the session reported sent, by the fallback (ADR 0004 15.6). Not among `messagesSent`. */
+  readonly inmailsSent: number;
   readonly messagesSent: number;
   readonly failed: number;
   readonly replies: number;
-  readonly fromTests: { readonly invitesSent: number; readonly invitesAccepted: number; readonly messagesSent: number; readonly failed: number; readonly replies: number };
+  readonly fromTests: { readonly invitesSent: number; readonly invitesAccepted: number; readonly inmailsSent: number; readonly messagesSent: number; readonly failed: number; readonly replies: number };
 }
 
 /**
@@ -189,7 +191,12 @@ export type StepWaitApi =
    * A LinkedIn step no session it may use has any allowance for, of the step's kind (council on dee365d, item 15): the
    * engine's `sending_capacity` with every such session's allowance zero or unset, so nothing resets it. No time.
    */
-  | "no_allowance";
+  | "no_allowance"
+  /**
+   * An InMail the acceptance expiry chose whose session cannot send it now by its own report (ADR 0004 15.3): `inmail` on
+   * the read says whether it no longer reports Premium or Sales Navigator, or has no credit free. No time.
+   */
+  | "inmail_unavailable";
 
 /**
  * When a pending step goes, as the engine decides it at the read's instant (`stepWhen`): ready (its time has come and nothing
@@ -202,7 +209,7 @@ export type StepWhenView =
   | { readonly kind: "at"; readonly at: string }
   /** `channel` names the step's channel where the reason depends on it (no transport). */
   /** `channel`: the track's, so a reason is worded in its channel's words (council on b21af02, item 1). */
-  | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel: TrackChannelApi; readonly until?: string }
+  | { readonly kind: "waits"; readonly why: StepWaitApi; readonly channel: TrackChannelApi; readonly until?: string; readonly inmail?: "no_plan" | "stale_report" | "no_holding" | "unbacked"; readonly reportedAt?: string }
   /**
    * A call not yet placed: the user's day (YYYY-MM-DD) it goes on the list, with no time of day; `today` when that is the
    * read's day; `now` when it is ready for the list (due, calling hours open today, room on today's list), with no instant promised.
@@ -224,6 +231,8 @@ export interface ControlStepView {
   readonly channel: TrackChannelApi;
   readonly branch: "main" | "win_back";
   readonly stepId: string;
+  /** A LinkedIn InMail fallback step, named by its role (ADR 0004 15.9). */
+  readonly role?: "inmail";
   /** Its place among the track's steps, from 1, and how many there are. */
   readonly number: number;
   readonly of: number;
@@ -537,6 +546,10 @@ export interface EditImpactChange {
   readonly skips: number;
   /** Leads whose affected step is with a provider now: it goes as it was handed. */
   readonly inFlight: number;
+  /** Leads waiting for acceptance whom a switched-on InMail reaches only if the invite is not accepted and the session can send one (15.8). */
+  readonly mayReach: number;
+  /** Leads waiting for acceptance whom a switched-off InMail would have reached under that same condition (15.8). */
+  readonly maySkip: number;
   /** Leads past it, finished with that track, in the other branch, or ended. */
   readonly untouched: number;
 }
@@ -599,6 +612,8 @@ export interface SendView {
 export interface StepProgressView {
   readonly stepId: string;
   readonly number: number;
+  /** A LinkedIn InMail fallback step, named by its role; its number then counts nothing (ADR 0004 15.9). */
+  readonly role?: "inmail";
   readonly removed: boolean;
   readonly result: "sent" | "skipped" | "failed" | null;
   readonly reason: string | null;
@@ -640,6 +655,13 @@ export interface LinkedinTrackView {
   readonly inviteOpen: boolean;
   /** An invite already pending on LinkedIn that this application did not send, first seen then (question Q42). */
   readonly pendingElsewhereSince: string | null;
+  /**
+   * The InMail fallback (ticket 27; ADR 0004 15.3), from stored facts: `on`, the track has a live InMail step now; `state`,
+   * what the acceptance expiry judged and what became of it (null before the expiry, or with the fallback off then); `work`,
+   * the InMail's own work, `sent` once recorded sent, `handed` while with the session and not known to have gone; `sentAt`,
+   * its send's instant once recorded.
+   */
+  readonly inmail: { readonly on: boolean; readonly state: import("../domain/sequence/state.ts").InmailState | null; readonly work: "sent" | "handed" | null; readonly sentAt: string | null; /** The session the InMail went from, by its label: from the sent work (15.7). */ readonly sentFrom: string | null; /** Any InMail work was handed over, whatever became of it. */ readonly handedOver: boolean; /** The instant of the session's report the expiry judged on (15.5). */ readonly reportedAt: string | null };
 }
 
 /**
@@ -1006,6 +1028,8 @@ export interface CopyPreview {
     readonly channel: SendChannelApi;
     /** Its number within its track: Email 2, Text 1. */
     readonly number: number;
+    /** A LinkedIn InMail fallback, named by its role (ADR 0004 15.9). */
+    readonly role?: "inmail";
     /** The day the projection sends it to this lead, counting launch day as day 1; null with `noDay` otherwise. */
     readonly day: number | null;
     /**
@@ -1045,7 +1069,7 @@ export interface CopyPreview {
 
 /** One line of a person's or company lead's timeline (GET /api/people/:id/activity). Newest first. */
 export type ActivityEntry = { readonly campaign: { readonly id: string; readonly name: string }; readonly at: string } & (
-  | ({ readonly channel: SendChannelApi; readonly track: TrackLabel } & (
+  | ({ readonly channel: SendChannelApi; readonly track: TrackLabel; /** A LinkedIn InMail, named by its role (ADR 0004 13.9). */ readonly role?: "inmail" } & (
       | {
           readonly kind: "sent";
           readonly stepNumber: number;

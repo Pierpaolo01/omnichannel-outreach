@@ -131,7 +131,33 @@ export interface TrackProgress {
    * holds for a settling period; a `pending` answer keeps when it was first seen (question Q42).
    */
   readonly connectionChecks?: Readonly<Record<string, ConnectionCheck>>;
+  /**
+   * The InMail fallback at the acceptance expiry (ADR 0004 15.3), moving only forward: `chosen` (the session was eligible, the
+   * InMail is the pending step), then `sent` once its send is recorded; or why it did not go, with the track on the
+   * withdrawal path: the session reported no Premium or Sales Navigator (`no_plan`) or had no credit free (`no_credit`) at
+   * the expiry, LinkedIn refused it for the recipient (`refused`), the user switched the fallback off before it went
+   * (`switched_off`) or skipped it (`skipped_by_user`). Absent or null: the expiry has not judged it (or the fallback was off).
+   */
+  readonly inmail?: InmailState | null;
+  /** The session the expiry judged eligible for the InMail: the track's own session (ADR 0004 15.3). */
+  readonly inmailSession?: string | null;
+  /**
+   * The credit this track's InMail holds on its session (ADR 0004 15.5): the instant it was acquired, by the expiry's choice or
+   * by a restart; null when it holds none (never acquired, or released by a named event).
+   */
+  readonly inmailHoldWall?: number | null;
+  /** The instant of the session's report the expiry's judgment read (15.5): said with every sentence of eligibility. */
+  readonly inmailReportedWall?: number | null;
+  /**
+   * The step the InMail replaces (council on 8b0c846, item 1), named once when the expiry chooses it: the first message by its
+   * place among every step of the track, removed ones included. Only it is ever skipped as `inmail_instead`.
+   */
+  readonly inmailReplaces?: string | null;
 }
+
+export type InmailState = "chosen" | "sent" | "accepted" | "no_plan" | "no_credit" | "stale_report" | "refused" | "switched_off" | "skipped_by_user";
+/** Why an InMail did not go and the track took the withdrawal path, as stored (ADR 0004 15.3). `accepted` connects instead. */
+export type InmailNotSent = Exclude<InmailState, "chosen" | "sent" | "accepted">;
 
 /** One session's connection check of a track's profile: its answer, when, and since when an invite was seen pending. */
 export interface ConnectionCheck {
@@ -157,8 +183,9 @@ export type EndedBy = "guard" | "claim_expired" | "quiesce" | "provider" | "look
 /**
  * `not_connected`: a LinkedIn message to someone no longer a connection (ADR 0004 Q37). `not_allowed`: a message-request
  * channel's platform does not let this session message this account (ADR 0004 13.3, Q44). Neither marks the address bad.
+ * `inmail_refused`: LinkedIn refused an InMail for this recipient (ADR 0004 15.3, Q55); the profile stays good.
  */
-export type RejectReason = "blocklisted" | "invalid_destination" | "payment_required" | "rate_limited" | "provider_skipped" | "not_connected" | "not_allowed";
+export type RejectReason = "blocklisted" | "invalid_destination" | "payment_required" | "rate_limited" | "provider_skipped" | "not_connected" | "not_allowed" | "inmail_refused";
 export type LookupAnswer = "sent" | "queued" | "not-sent" | "unknown";
 
 export interface RenderedCopy {
@@ -206,7 +233,7 @@ export interface Attempt {
   readonly retry: "none" | "wanted" | "wanted_after_not_sent" | "refused";
   readonly rejectReason: RejectReason | null;
   /** A social step's action, fixed at the claim with the transport (ADR 0004 2.1): the request is built from the attempt alone. */
-  readonly action?: "invite" | "message";
+  readonly action?: "invite" | "message" | "inmail";
 }
 
 /** How provider work settled (ADR 0003 4.2): the user's mark settles it too. */
@@ -252,6 +279,8 @@ export interface ProviderWork {
   readonly wentWall: number | null;
   /** A social step's action (ADR 0004 2.1), written at the claim: the allowance it counts on. Absent or null on email and SMS. */
   readonly kind?: "invite" | "message" | null;
+  /** Message work that is an InMail (ADR 0004 15.5): it spends a credit as well as a message, written at the claim. */
+  readonly inmail?: boolean;
   /**
    * An invite's note, decided in the handover transaction and never again (ADR 0004 section 4): `with` it went with its note,
    * `withheld` its note was not empty but the sender's note allowance was used, `none` its note was empty. Null until handed.
@@ -524,6 +553,10 @@ export interface AccountState {
   readonly kinds?: { readonly invite: Allowance; readonly message: Allowance };
   /** A LinkedIn account's note allowance this calendar month, in its reset zone (ADR 0004 section 4). */
   readonly notes?: Allowance;
+  /**
+   * A LinkedIn session's InMail standing (ADR 0004 15.5): its last report and the credits held on it. Absent on email and SMS.
+   */
+  readonly inmail?: InmailStanding;
   /** Today's room on its current reset day (0: none). */
   readonly capacity: number;
   /** Its room on any other reset day (council on PR 63): today's room can be less, never the daily limit. */
@@ -546,6 +579,23 @@ export interface AccountState {
   readonly reserved: number;
   /** Provider work holding in-flight places, across every subject: live attempts' work and unsettled work, once per key (`occupyingKeys`). */
   readonly inFlight: number;
+}
+
+/**
+ * A LinkedIn session's InMail standing (ADR 0004 15.5): its last report (`plan` null when it reported none), with the instant
+ * it was read, and the holdings that count against it, earliest acquired first (by acquisition, then subject and track).
+ */
+export interface InmailStanding {
+  readonly plan: "premium" | "sales_navigator" | "none" | null;
+  readonly credits: number;
+  readonly reportedWall: number | null;
+  readonly holdings: readonly InmailHolding[];
+}
+
+/** One credit held by a track's InMail (15.5): `key` is its subject and track. */
+export interface InmailHolding {
+  readonly key: string;
+  readonly acquiredWall: number;
 }
 
 export interface SubjectState {

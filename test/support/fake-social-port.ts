@@ -105,7 +105,10 @@ export class FakeSocialPort implements SendPort {
 
   handover(request: HandoverRequest): Promise<CallAnswer> {
     const now = this.now();
-    const action = request.action ?? "message";
+    // An InMail is LinkedIn's alone (ADR 0004 14): a message-request session is never asked for one.
+    const asked = request.action;
+    if (asked === "inmail") throw new Error("A message-request session is never asked for an InMail");
+    const action = asked ?? "message";
     this.handoverLog.push({ at: now, key: request.idempotencyKey, attemptId: request.attemptId, sender: request.sender, destination: request.destination, subjectId: request.subjectId, trackId: request.trackId, stepId: request.stepId, action, rendered: request.rendered });
     const script = this.script(request.destination);
     const refuse = (reason: "invalid_destination" | "rate_limited" | "not_allowed"): CallAnswer => {

@@ -85,7 +85,7 @@ describe("when a step goes, in one wording function (ADR 0003 \"Reads that say w
       campaign_not_launched: true, campaign_paused: true, lead_paused: true, callback: true, ended: true, with_provider: true, unresolved: true, render_failed: true,
       provider_skipped: true, no_thread: true, sms_conversation_unsettled: true, no_window: true, sender_unavailable: true, sending_capacity: true, call_capacity: true, on_call_list: true,
       no_transport: true, waiting_on_provider: true, reply_pending: true, no_destination: true, call_hours_closed: true, awaiting_acceptance: true, invite_pending_elsewhere: true,
-      sender_slot: true, sender_rate_limited: true, sender_waiting: true, no_allowance: true,
+      sender_slot: true, sender_rate_limited: true, sender_waiting: true, no_allowance: true, inmail_unavailable: true,
     };
     for (const why of Object.keys(reasons) as StepWaitApi[]) {
       const words = stepWhenPhrase({ kind: "waits", why, channel: "email" }, ZONE);

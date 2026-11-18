@@ -21,16 +21,26 @@ export const LINKEDIN_SEED = 24000;
 // seed of the mutation "no allowance reads as full for the day".
 // 10 (the review bot on 0922582): the removal of a started LinkedIn track, drawn since, changed what 8 and 93 go on to do; 10
 // reaches the two behaviours they no longer did (a pair released then invited by another, a second invite after a withdrawal).
-export const LINKEDIN_FIXED_SEEDS: readonly number[] = [5, 8, 10, 15, 18, 29, 46, 69, 73, 93];
+// Ticket 27 (ADR 0004 15.11 and 15.16 to 15.18): after ticket 25's merge and the draws for the review bot on 56030c4 and the
+// council on d6ad9f5, a greedy cover by cost of every behaviour below over offsets 0 to 50, keeping 10, 15, 46, 69, 73 and
+// 93 and the search's two seeds on 56030c4 (71 and 84, the record's errors): 4, 8, 16, 18, 23, 30, 35, 42, 44 and 49 (about
+// 180 seconds of runs on a developer machine); and 3, which removes the first message before the choice once the contested
+// campaign was left to the contest's own draws.
+export const LINKEDIN_FIXED_SEEDS: readonly number[] = [3, 4, 8, 10, 15, 16, 18, 23, 30, 35, 42, 44, 46, 49, 69, 71, 73, 84, 93];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const LINKEDIN_FEATURES: readonly string[] = [
   "a-campaign-paused",
   "a-campaign-resumed",
   "a-crash-between-the-handover-and-its-answer",
+  "a-credit-contested-by-a-stop",
   "a-deadline-checked-at-an-edit",
+  "a-follow-up-after-an-inmail",
   "a-lead-paused",
+  "a-lead-stopped-with-its-inmail-unsettled",
   "a-lead-resumed",
   "a-lead-stopped",
+  "a-lead-with-a-chosen-inmail-restarted",
+  "a-lead-with-a-chosen-inmail-stopped",
   "a-lost-answer-found-by-lookup",
   "a-message-after-acceptance",
   "a-message-to-an-existing-connection",
@@ -43,6 +53,13 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "a-removed-connection",
   "a-reply-mark-refused",
   "a-reply-marked",
+  "a-report-between-an-inmail-claim-and-its-handover:no_credit",
+  "a-report-between-an-inmail-claim-and-its-handover:no_plan",
+  "a-restart-after-another-took-a-credit",
+  "a-running-edit-before-the-choice:insert",
+  "a-running-edit-before-the-choice:remove",
+  "a-running-edit-while-an-inmail-is-chosen:remove",
+  "a-running-edit-while-an-inmail-is-chosen:reorder",
   "a-running-edit:insert",
   "a-running-edit:remove",
   "a-running-edit:reorder",
@@ -62,26 +79,64 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "a-stuck-withdrawal-marked-by-the-user",
   "a-third-session",
   "a-withdrawal-answered-unknown",
-  "a-withdrawal-found-it-accepted",
   "already-connected",
+  "an-acceptance-after-the-inmail-settled-unsent",
+  "an-acceptance-before-the-inmail-went",
+  "an-acceptance-while-the-inmail-was-uncertain",
   "an-answer-of-one-session",
   "an-edit-of-the-wait-while-waiting",
   "an-expiry-while-the-laptop-was-off",
+  "an-inmail-refused",
+  "an-inmail-sent",
+  "an-inmail-settled-unsent-on-a-stopped-lead",
+  "an-inmail-switched-off-before-it-went",
+  "an-inmail-text-edited",
+  "an-inmail-waiting-behind-earlier-holdings",
+  "an-inmail-waiting-for-a-credit",
+  "an-inmail-without-a-credit",
+  "an-inmail-without-a-plan",
   "an-invite-decided-over-several-sessions",
   "an-invite-expired",
   "an-invite-pending-elsewhere",
   "an-invite-without-its-note",
+  "chosen-inmails-beyond-the-credits",
   "connected-by-acceptance",
   "email-after-linkedin",
   "email-beside-linkedin",
+  "inmail-credits-returned",
+  "inmail-credits-spent-by-hand",
   "released-after-an-expiry",
   "sms-after-linkedin",
   "sms-beside-linkedin",
+  "the-fallback-switched-off",
+  "the-fallback-switched-off-early",
+  "the-fallback-switched-on",
   "the-laptop-was-off",
+  "the-withdrawal-path-after-an-inmail-refused",
+  "the-withdrawal-path-after-an-inmail-skipped_by_user",
+  "the-withdrawal-path-after-an-inmail-switched_off",
   "unresolved-marked-not-sent",
 ];
-/** Behaviours the runs can name that the fixed seeds do not reach, each pinned by an example test instead (`linkedin-review.test.ts`). */
-export const LINKEDIN_OTHER_FEATURES: readonly string[] = ["unresolved-marked-sent"];
+/**
+ * Behaviours the runs can name that no offset from 0 to 50 reaches, each pinned by a deterministic example test instead:
+ * - unresolved LinkedIn work marked sent (`linkedin-inmail.test.ts`, "marked sent instead"; `lifecycle.test.ts` for email);
+ * - a withdrawal that finds the invite accepted (`linkedin.test.ts`);
+ * - a switch-off while an InMail waits (`linkedin-inmail.test.ts`, "switched off while the InMail is chosen and not yet
+ *   handed over");
+ * - an InMail judged on a stale report, and the withdrawal path after it (`linkedin-inmail.test.ts`, "a session not read for
+ *   over a day at the expiry");
+ * - a message inserted before the replaced step while an InMail is chosen (`linkedin-inmail.test.ts`, "kept steps around
+ *   the replaced one").
+ * `sequence-runs-linkedin-registry.test.ts` requires these two lists to hold every name a run can report, each once.
+ */
+export const LINKEDIN_OTHER_FEATURES: readonly string[] = [
+  "a-running-edit-while-an-inmail-is-chosen:insert",
+  "a-withdrawal-found-it-accepted",
+  "an-inmail-on-a-stale-report",
+  "the-fallback-switched-off-while-an-inmail-waits",
+  "the-withdrawal-path-after-an-inmail-stale_report",
+  "unresolved-marked-sent",
+];
 /**
  * Invariant 29's fresh-engine comparison in `pnpm check` (a fresh engine per check doubles a run's engine work, and the
  * per-push set must fit CI's check job): after every FRESH_EVERY-th worker tick and after every tick that moved a
@@ -113,7 +168,7 @@ const reached = new Set<string>();
 
 export function linkedinChunks(): void {
   const offsets = FULL_SEARCH ? Array.from({ length: SEARCH_SEEDS }, (_, i) => i).filter(inShard) : [...LINKEDIN_FIXED_SEEDS];
-  describe(`generated LinkedIn runs keep L1 to L17 (${FULL_SEARCH ? "full search" : "fixed seeds"})`, () => {
+  describe(`generated LinkedIn runs keep L1 to L25 (${FULL_SEARCH ? "full search" : "fixed seeds"})`, () => {
     if (offsets.length === 0) test.skip("no seed of this run in this shard", () => undefined);
     // One case per seed, each with its own bound (verifier on f2824d4, item 11): a slow machine can fail one seed's case,
     // never starve the others of the time a shared case had left. The coverage below is still asserted over all of them.

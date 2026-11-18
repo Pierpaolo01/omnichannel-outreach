@@ -121,7 +121,7 @@ export interface MeasureRules {
   failedOrBounced(facts: MeasureFacts, channel: MessageChannel): Tally;
   replies(facts: MeasureFacts, channel: MessageChannel): Tally;
   /** LinkedIn (ADR 0004 section 8): invites sent and accepted, messages sent, failures and replies marked. */
-  linkedin(facts: MeasureFacts): { readonly invitesSent: Tally; readonly invitesAccepted: Tally; readonly messagesSent: Tally; readonly failed: Tally; readonly replies: Tally };
+  linkedin(facts: MeasureFacts): { readonly invitesSent: Tally; readonly invitesAccepted: Tally; readonly inmailsSent: Tally; readonly messagesSent: Tally; readonly failed: Tally; readonly replies: Tally };
   /** A message-request channel (ADR 0004 13.8): messages sent, failures and replies marked. */
   messageRequests(facts: MeasureFacts, channel: MessageRequestChannel): { readonly messagesSent: Tally; readonly failed: Tally; readonly replies: Tally };
   callsMade(facts: MeasureFacts): Tally;
@@ -162,6 +162,8 @@ export const MEASURE_RULES: MeasureRules = {
     return {
       invitesSent: each(sent.filter((a) => a.action === "invite")),
       invitesAccepted: tally(facts.acceptances ?? [], (a) => `${a.subjectId}\u0000${a.trackId}`),
+      // InMails apart from messages (ADR 0004 15.6): an InMail is message work, counted by what it was sent as.
+      inmailsSent: each(sent.filter((a) => a.action === "inmail")),
       messagesSent: each(sent.filter((a) => a.action === "message")),
       failed: tally(facts.failures.filter((f) => f.channel === "linkedin"), (m) => `${m.subjectId}\u0000${m.stepId}`),
       replies: each(repliedSubjects(facts, "linkedin")),
@@ -235,10 +237,11 @@ export function measuresOf(facts: MeasureFacts, overrides: Partial<MeasureRules>
     linkedin: {
       invitesSent: li.invitesSent.all,
       invitesAccepted: li.invitesAccepted.all,
+      inmailsSent: li.inmailsSent.all,
       messagesSent: li.messagesSent.all,
       failed: li.failed.all,
       replies: li.replies.all,
-      fromTests: { invitesSent: li.invitesSent.test, invitesAccepted: li.invitesAccepted.test, messagesSent: li.messagesSent.test, failed: li.failed.test, replies: li.replies.test },
+      fromTests: { invitesSent: li.invitesSent.test, invitesAccepted: li.invitesAccepted.test, inmailsSent: li.inmailsSent.test, messagesSent: li.messagesSent.test, failed: li.failed.test, replies: li.replies.test },
     },
     messageRequests: messageRequestRecord((ch) => {
       const m = rules.messageRequests(facts, ch);

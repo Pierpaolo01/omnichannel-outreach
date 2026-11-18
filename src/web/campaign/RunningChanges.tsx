@@ -11,6 +11,8 @@ import type { EditChangeKind } from "../../domain/sequence/reconcile.ts";
 import type { CampaignDefinition, EditImpactChange, EditImpactView, TrackDefinition } from "../../shared/api.ts";
 import { ApiRequestError, postJson } from "../api.ts";
 import { STEP_NOUN, liveSteps, trackTitle } from "./model.ts";
+import { linkedinStepKind, stepNumber, stepRoleOf } from "../../domain/sequence/definition.ts";
+import { ENDS_AND_ASKS_WITHDRAWAL } from "./linkedin-wording.ts";
 import type { SequenceEditor } from "./useSequence.ts";
 
 /** How often the read is taken again while changes wait to be applied: leads move on as the engine runs. */
@@ -71,7 +73,9 @@ function changeName(change: EditImpactChange, draft: CampaignDefinition, stored:
   const trackName = track ? trackTitle(def, track) : "A track";
   if (change.stepId === null || !track) return trackName;
   const index = liveSteps(track).findIndex((s) => s.id === change.stepId);
-  // "Email track · Email 2"; a LinkedIn step by its role, "LinkedIn track · First message" (ticket 24b).
+  // "Email track · Email 2"; a LinkedIn step by its stored kind and the shared numbering, "LinkedIn track · First message",
+  // "LinkedIn track · InMail" (ticket 24b; the council on d6ad9f5, item 5: an inserted InMail is not the first message).
+  if (track.channel === "linkedin") return `${trackName} · ${stepTitle({ branch: "main" }, "linkedin", stepNumber(track, change.stepId), stepRoleOf(track, change.stepId).role)}`;
   return `${trackName} · ${track.channel === "call" ? `${STEP_NOUN.call} ${index + 1}` : stepTitle({ branch: "main" }, track.channel, index + 1)}`;
 }
 
@@ -160,8 +164,7 @@ function reachWording(kind: EditChangeKind, paused: boolean): string {
  */
 export function stepWaitReach(change: Pick<EditImpactChange, "trackId" | "stepId">, draft: CampaignDefinition): string {
   const track = draft.tracks.find((t) => t.id === change.trackId);
-  const index = track ? liveSteps(track).findIndex((s) => s.id === change.stepId) : -1;
-  if (track?.channel === "linkedin" && index === 1) return "will wait the new time before it, counted from when they accept the invite, or from the connection your session already had";
+  if (track && change.stepId !== null && linkedinStepKind(track, change.stepId) === "first_message") return "will wait the new time before it, counted from when they accept the invite, or from the connection your session already had";
   return "will wait the new time before it, counted from their last message";
 }
 
@@ -171,6 +174,9 @@ export function whatItDoes(change: EditImpactChange, paused: boolean, draft?: Ca
   if (change.reaches > 0) parts.push(`${plural(change.reaches, "lead", "leads")} ${change.kind === "step_wait" && draft ? stepWaitReach(change, draft) : reachWording(change.kind, paused)}`);
   if (change.skips > 0) parts.push(`${plural(change.skips, "lead", "leads")} not there yet will skip it`);
   if (change.inFlight > 0) parts.push(`${plural(change.inFlight, "lead has", "leads have")} it with the provider now, so it goes as it was`);
+  // The InMail fallback switched on or off for leads still waiting for acceptance: a condition, never a promise (15.8).
+  if (change.mayReach > 0) parts.push(`${plural(change.mayReach, "lead", "leads")} still waiting for acceptance will get the InMail if the invite is not accepted in time and your session can send one then`);
+  if (change.maySkip > 0) parts.push(`${plural(change.maySkip, "lead", "leads")} still waiting for acceptance won’t get an InMail: if the invite is not accepted in time, ${ENDS_AND_ASKS_WITHDRAWAL}`);
   if (change.untouched > 0) {
     if (change.trackId === null) parts.push(`${plural(change.untouched, "lead has", "leads have")} ended`);
     else parts.push(`${plural(change.untouched, "lead is", "leads are")} past it or finished${removal && change.kind === "track_removed" ? ", and keep what they started" : ""}`);

@@ -506,7 +506,9 @@ function Preview({ campaignId, editor, leads, horizonDays }: { campaignId: strin
     const parts: string[] = [];
     if (live.some((t) => t.channel === "email")) parts.push(l.email ? `Email to ${l.email}.` : "No email, so the email track is skipped for them.");
     if (live.some((t) => t.channel === "sms")) parts.push(l.mobile ? "Texts to their own mobile." : l.kind === "company" ? "A company lead is never texted, so the SMS track is skipped." : "No mobile of their own, so the SMS track is skipped for them.");
-    if (live.some((t) => t.channel === "linkedin")) parts.push(l.linkedin ? "A connection invite to their LinkedIn profile, then messages once they accept." : l.kind === "company" ? "A company lead has no member profile, so the LinkedIn track is skipped." : "No LinkedIn profile, so the LinkedIn track is skipped for them.");
+    // With the InMail fallback on, the InMail path is said too (council on 8b0c846, item 6).
+    const fallback = live.some((t) => t.channel === "linkedin" && t.steps.some((s) => s.role === "inmail" && !s.removed));
+    if (live.some((t) => t.channel === "linkedin")) parts.push(l.linkedin ? (fallback ? "A connection invite to their LinkedIn profile, then messages once they accept; if they haven’t accepted when the wait ends, an InMail instead, when your session can send one, then the follow-ups." : "A connection invite to their LinkedIn profile, then messages once they accept.") : l.kind === "company" ? "A company lead has no member profile, so the LinkedIn track is skipped." : "No LinkedIn profile, so the LinkedIn track is skipped for them.");
     for (const c of MESSAGE_REQUEST_CHANNELS) {
       if (!live.some((t) => t.channel === c)) continue;
       const name = SOCIAL_CHANNELS[c].name;
@@ -634,9 +636,10 @@ function PreviewMessage({ s, def, named, horizonDays, entry }: { s: CopyPreview[
   // An Instagram message too (ticket 25): no subject, a message bubble.
   const sms = s.channel === "sms" || isSocialChannel(s.channel);
   const linkedin = s.channel === "linkedin";
-  const invite = linkedin && s.number === 1;
+  const inmail = s.role === "inmail";
+  const invite = linkedin && s.number === 1 && !inmail;
   // A step of the win-back branch is named for it, as the shared label says (ticket 16c): "Win-back email 1".
-  const noun = stepTitle(trackLabel(def, { id: s.trackId, channel: s.channel }), s.channel, s.number);
+  const noun = stepTitle(trackLabel(def, { id: s.trackId, channel: s.channel }), s.channel, s.number, s.role);
   return (
     <li className="overflow-hidden rounded-field border border-line">
       <div className="flex items-center justify-between gap-3 border-b border-line bg-raised px-3.5 py-2 text-[13px]">
@@ -660,10 +663,11 @@ function PreviewMessage({ s, def, named, horizonDays, entry }: { s: CopyPreview[
               </p>
             )}
             <p className={`whitespace-pre-wrap text-ink-2 [overflow-wrap:anywhere] ${sms ? "w-fit max-w-[42ch] rounded-[14px_14px_14px_4px] bg-raised px-3 py-2 shadow-[inset_0_0_0_1px_var(--color-line)]" : ""}`}>
-              <Segments segments={s.body} empty={invite ? "No note: the invite goes without one." : `No copy yet. Launch is blocked until this ${linkedin ? "message" : sms ? "text" : "email"} has copy.`} />
+              <Segments segments={s.body} empty={invite ? "No note: the invite goes without one." : `No copy yet. Launch is blocked until this ${inmail ? "InMail" : linkedin ? "message" : sms ? "text" : "email"} has copy.`} />
             </p>
             {invite && <p className="mt-2 text-[13px] text-muted">The note goes while the session’s note allowance for the month lasts; after that, the invite goes without it.</p>}
-            {linkedin && s.number === 2 && <p className="mt-2 text-[13px] text-muted">Sent once they accept the invite, or after its wait if your session is already connected to them.</p>}
+            {linkedin && s.number === 2 && !inmail && <p className="mt-2 text-[13px] text-muted">Sent once they accept the invite, or after its wait if your session is already connected to them.{track?.steps.some((x) => x.role === "inmail" && !x.removed) ? " Not sent if the InMail goes instead." : ""}</p>}
+            {inmail && <p className="mt-2 text-[13px] text-muted">Sent only if they haven’t accepted when the wait ends and your session reports Premium or Sales Navigator with an InMail credit free then. It spends one of the session’s InMail credits.</p>}
             {s.missing.length > 0 && (
               <p className="mt-2 text-[13px] font-medium text-crit">
                 This lead has no {s.missing.map(fieldLabel).join(" or ")} and the field has no fallback, so this {linkedin ? (invite ? "invite" : "message") : sms ? "text" : "email"} can’t be sent to them.

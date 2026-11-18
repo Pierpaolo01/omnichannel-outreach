@@ -80,7 +80,7 @@ export function endingDetail(ending: TestRunEnding, run: RunFacts): string {
 }
 
 /** The failure reasons a step's result can carry (the engine's words), each said for itself (council on dee365d, item 13). */
-const FAILURE_REASONS = ["invalid address", "invalid number", "profile unreachable", "not connected", "account unreachable", "not allowed"] as const;
+const FAILURE_REASONS = ["invalid address", "invalid number", "profile unreachable", "not connected", "account unreachable", "not allowed", "inmail refused"] as const;
 type FailureReason = (typeof FAILURE_REASONS)[number];
 const isFailureReason = (r: string | null): r is FailureReason => (FAILURE_REASONS as readonly (string | null)[]).includes(r);
 
@@ -97,6 +97,9 @@ export function failureWords(row: Pick<TestStepRow, "channel" | "reason">): stri
     // Q37's interim: the connection is gone, and the profile is still the person's; it is not marked wrong.
     case "not connected":
       return "no longer connected on LinkedIn, so the message couldn’t go";
+    // The InMail fallback (ADR 0004 15.3): LinkedIn refused the InMail for the recipient; the profile is not marked wrong.
+    case "inmail refused":
+      return "LinkedIn refused the InMail for your test profile";
     // A message-request channel's two refusals (ADR 0004 13.3, Q44), in the step's own channel's name.
     case "account unreachable":
       return "account not reachable";
@@ -228,5 +231,8 @@ const SKIPPED_BECAUSE: Readonly<Record<string, string>> = {
   interested: "Skipped: you logged Interested",
   // LinkedIn (ticket 24b): the invite skipped for an existing connection; a step its track left when the wait ran out.
   already_connected: "Skipped: your session is already connected to your test profile",
+  // The InMail fallback (ticket 27): the first message the InMail took the place of; the InMail when you accepted first.
+  inmail_instead: "Skipped: the InMail went instead",
+  accepted: "Skipped: you accepted the test invite before the InMail went",
 
 };

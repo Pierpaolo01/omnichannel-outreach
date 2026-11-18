@@ -47,11 +47,12 @@ export function stepNoun(track: Pick<TrackLabel, "branch">, channel: SendChannel
 }
 
 /**
- * A LinkedIn step's role by its number among the track's live steps, counted from 1 (ADR 0004 3.1): the engine's
- * `linkedinStepKind` decides it by position, and a test holds the two equal at every position. Reads give a step's number
- * (`stepNumber`), never its kind, so the screens name the step from it.
+ * A LinkedIn step's role (ADR 0004 3.1, 15.9): an InMail step by its role, which reads carry with the step; any other by its
+ * number among the track's live steps that are not InMail steps, counted from 1 (`stepNumber`), as the engine's
+ * `linkedinStepKind` decides it. A test holds the two equal at every position, with the fallback on and off.
  */
-export const LINKEDIN_STEP_KIND_AT = (number: number): "invite" | "first_message" | "follow_up" => (number <= 1 ? "invite" : number === 2 ? "first_message" : "follow_up");
+export const LINKEDIN_STEP_KIND_AT = (number: number, role?: "inmail"): "invite" | "inmail" | "first_message" | "follow_up" =>
+  role === "inmail" ? "inmail" : number <= 1 ? "invite" : number === 2 ? "first_message" : "follow_up";
 
 /**
  * A message-request step's role by its number among the track's live steps (ADR 0004 13.3): the engine's
@@ -63,22 +64,26 @@ export const MESSAGE_REQUEST_STEP_KIND_AT = (number: number): "message_request" 
  * What one step is called in a title (ticket 24b): "Email 2", "Text 1", "Win-back email 1"; a LinkedIn step by its role,
  * "Connection invite", "First message", "Follow-up 1" (CONTEXT.md's "connection invite"), "Win-back first message".
  */
-export function stepTitle(track: Pick<TrackLabel, "branch">, channel: SendChannelApi, number: number): string {
+export function stepTitle(track: Pick<TrackLabel, "branch">, channel: SendChannelApi, number: number, stepRole?: "inmail"): string {
   if (channel !== "linkedin" && !isMessageRequestChannel(channel)) return `${stepNoun(track, channel)} ${number}`;
+  const kind = LINKEDIN_STEP_KIND_AT(number, stepRole);
   const role = isMessageRequestChannel(channel)
     ? MESSAGE_REQUEST_STEP_KIND_AT(number) === "message_request"
       ? "Message request"
       : `Follow-up ${number - 1}`
-    : LINKEDIN_STEP_KIND_AT(number) === "invite"
+    : kind === "invite"
       ? "Connection invite"
-      : LINKEDIN_STEP_KIND_AT(number) === "first_message"
-        ? "First message"
-        : `Follow-up ${number - 2}`;
+      : kind === "inmail"
+        ? "InMail"
+        : kind === "first_message"
+          ? "First message"
+          : `Follow-up ${number - 2}`;
   return track.branch === "win_back" ? `Win-back ${role.charAt(0).toLowerCase()}${role.slice(1)}` : role;
 }
 
 /** A label's first word lower case mid-sentence, but "SMS" and "LinkedIn" keep their capitals. */
-export const lowerLabel = (label: string): string => ([...PROPER].some((w) => label.startsWith(w)) ? label : label.charAt(0).toLowerCase() + label.slice(1));
+/** "InMail" keeps its capitals too (ADR 0004 13.9). */
+export const lowerLabel = (label: string): string => ([...PROPER, "InMail"].some((w) => label.startsWith(w)) ? label : label.charAt(0).toLowerCase() + label.slice(1));
 
 /** A track's name inside a sentence: "the email track", "the SMS track", "email track 2", "SMS track 2", "the phone track", "the win-back SMS track". */
 export function trackPhrase(def: CampaignDefinition, track: Pick<TrackDefinition, "id" | "channel">): string {

@@ -143,6 +143,19 @@ describe("the invite, the acceptance and the messages (ADR 0004 3.3)", () => {
     expect(delivered(PAT).map((d) => d.action)).toEqual(["invite"]);
   });
 
+  // Pinned here since ticket 27's draws (the generated runs' fixed seeds no longer reach it): `a-withdrawal-found-it-accepted`.
+  test("the withdrawal asked after the expiry finds the invite accepted meanwhile: recorded as accepted first, no message", async () => {
+    const { h, campaign, delivered } = await world();
+    // The first withdrawal answers unknown; they accept five minutes after the wait ended; the next ask finds it accepted.
+    h.linkedin.profiles.set(PAT, { withdrawUnknown: 1, acceptAfterMs: Date.parse("2026-11-04T00:05:00Z") - MONDAY_9 });
+    const c = await campaign([linkedin("li", [invite(), step("m1", 0, "Thanks.")], 2)]);
+    await h.advanceTo(Date.parse("2026-11-04T02:00:00Z"));
+    expect(h.linkedin.withdrawalLog.map((w) => w.answer)).toEqual(expect.arrayContaining(["unknown", "already_accepted"]));
+    const t = (await h.store.engine.subject(c.lead("Pat Oneil"), h.clock))?.tracks.find((x) => x.trackId === "li");
+    expect(t).toMatchObject({ finishReason: "invite_not_accepted", inviteWithdrawal: "accepted_first" });
+    expect(delivered(PAT).map((d) => d.action)).toEqual(["invite"]);
+  });
+
   test("an acceptance the platform reports after the deadline, of an acceptance after it, connects nothing", async () => {
     const { h, campaign, delivered } = await world();
     h.linkedin.profiles.set(PAT, { acceptAfterMs: 3 * DAY });
@@ -282,5 +295,21 @@ describe("the running app presents no LinkedIn integration (ADR 0004 1.1)", () =
     const launched = await h.launch(c.id);
     expect(launched.status).toBe(409);
     expect(JSON.stringify(launched.body)).toContain("no connected LinkedIn session");
+  });
+});
+
+describe("a pending invitation at a message's pre-send check (council on 8b0c846, item 3)", () => {
+  test("the connection removed, then an invitation pending: the follow-up is not handed over, as on the integration tip", { timeout: 120_000 }, async () => {
+    const { h, campaign, delivered } = await world();
+    h.linkedin.profiles.set(PAT, { acceptAfterMs: 20 * H });
+    const c = await campaign([linkedin("li", [invite(), step("m1", 0, "Thanks for connecting."), step("m2", 2, "Following up.")])]);
+    await h.advanceTo(MONDAY_9 + 2 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1"]);
+    // They remove the connection, and an invitation to them is pending from elsewhere: the session answers "pending".
+    h.linkedin.profiles.set(PAT, { connectionRemoved: true, pendingElsewhere: true });
+    await h.advanceTo(MONDAY_9 + 6 * DAY);
+    expect(h.linkedin.handoverLog.filter((x) => x.destination === PAT).map((x) => x.stepId)).toEqual(["inv", "m1"]);
+    const t = (await h.store.engine.subject(c.lead("Pat Oneil"), h.clock))?.tracks.find((x) => x.trackId === "li");
+    expect(t?.finishReason).toBeNull();
   });
 });

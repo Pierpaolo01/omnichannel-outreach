@@ -338,3 +338,32 @@ describe("a running campaign's identities (ADR 0003 \"Ticket 19\", the boundary)
     expect(definitionIssues(base, marked, { launched: true }).map((i) => i.kind)).toEqual(["restored", "restored"]);
   });
 });
+
+describe("the InMail fallback in the definition (ticket 27, ADR 0004 15.2)", () => {
+  const li = (steps: StepDefinition[]): TrackDefinition => ({ id: "li", channel: "linkedin", branch: "main", window: [{ day: 1, start: 9, end: 17 }], steps, start: { kind: "entry" }, removed: false, acceptWaitDays: 3 });
+  const plain = (id: string, body = "Hi.") => step(id, { subject: "", body, threading: "new_subject" });
+  const inmail = (id = "im", body = "An InMail.") => ({ ...plain(id, body), role: "inmail" as const });
+  const kinds = (def: CampaignDefinition) => definitionIssues(def).map((i) => i.kind);
+  const base = { emailPool: [], linkedinPool: ["linkedin:s1"] };
+
+  test("off by default; on with one InMail step right after the invite; it is not one of the messages a track needs", () => {
+    expect(kinds(definition({ ...base, tracks: [li([plain("inv"), plain("m1")])] }))).toEqual([]);
+    expect(kinds(definition({ ...base, tracks: [li([plain("inv"), inmail(), plain("m1")])] }))).toEqual([]);
+    expect(kinds(definition({ ...base, tracks: [li([plain("inv"), inmail()])] }))).toEqual(["linkedin_steps"]);
+  });
+
+  test("refused: two InMail steps, one out of place, one on another channel, a step that changes role", () => {
+    expect(kinds(definition({ ...base, tracks: [li([plain("inv"), inmail(), inmail("im2"), plain("m1")])] }))).toContain("inmail_twice");
+    expect(kinds(definition({ ...base, tracks: [li([plain("inv"), plain("m1"), inmail()])] }))).toContain("inmail_position");
+    expect(kinds(definition({ tracks: [emailTrack({ steps: [step("s1", { threading: "new_subject", role: "inmail" })] })] }))).toContain("inmail_not_linkedin");
+    const before = definition({ ...base, tracks: [li([plain("inv"), plain("x"), plain("m1")])] });
+    const after = definition({ ...base, tracks: [li([plain("inv"), { ...plain("x"), role: "inmail" }, plain("m1")])] });
+    expect(definitionIssues(after, before).map((i) => i.kind)).toContain("step_role_changed");
+  });
+
+  test("an InMail with no text blocks launch as empty copy; an empty invite note does not", () => {
+    const session = { id: "linkedin:s1", channel: "linkedin" as const, healthy: true };
+    const check = launchCheck(definition({ ...base, tracks: [li([plain("inv", ""), inmail("im", " "), plain("m1")])] }), [{}], [session]);
+    expect(check.blockers.map((b) => b.message)).toEqual(["The InMail fallback has no message."]);
+  });
+});

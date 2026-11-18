@@ -140,3 +140,11 @@ function undoTo(count: number): string {
   statements.push("PRAGMA foreign_keys = ON;", `DELETE FROM schema_migrations WHERE version > ${count};`);
   return statements.join("\n");
 }
+
+/**
+ * The InMail fallback's migration (ticket 27), found by its name, so a renumber at merge time changes nothing here (council
+ * on 8b0c846, item 4; renumbered 25 to 26 when ticket 25 merged first). Its undo is computed like ticket 25's: the schema
+ * taken back to what every migration before it makes.
+ */
+export const INMAIL_VERSION = MIGRATIONS.find((m) => m.name.startsWith("the LinkedIn InMail fallback"))!.version;
+export const UNDO_INMAIL = undoTo(INMAIL_VERSION - 1);

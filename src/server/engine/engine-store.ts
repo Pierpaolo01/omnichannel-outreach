@@ -73,6 +73,11 @@ export interface SenderAccountConfig {
   /** Why the provider says it cannot send, when not healthy, in the provider's own words (such as Instantly's "sending_off"). */
   readonly problem?: string | null;
   readonly resetZone: string;
+  /**
+   * A LinkedIn session's InMail standing, as the session reported it with this listing (ADR 0004 15.5); null: a report the
+   * store cannot hold (read as no plan). Absent: no report with this listing, so the last one stands.
+   */
+  readonly inmail?: { readonly plan: "premium" | "sales_navigator" | "none"; readonly credits: number } | null;
   /** What a message-request session reports of itself (ADR 0004 13.5); absent on every other channel. */
   readonly socialKind?: SocialSenderKind;
 }
@@ -103,6 +108,12 @@ export function storableAccount<T extends SenderAccountConfig>(reported: T, chan
     whole(r["dailyLimit"], 0) &&
     whole(r["k"], 1) &&
     (r["gapMs"] === null || whole(r["gapMs"], 1));
+  // A session's InMail report that is not a known plan and a whole number of credits is read as none (ADR 0004 15.5): an
+  // InMail never goes on a report the engine cannot read.
+  const inmail = r["inmail"];
+  const report = inmail as { plan?: unknown; credits?: unknown } | null | undefined;
+  const readable = inmail === undefined || inmail === null || (report !== null && typeof report === "object" && ["premium", "sales_navigator", "none"].includes(String(report.plan)) && whole(report.credits, 0));
+  if (!readable) return storableAccount({ ...reported, inmail: null }, channel);
   if (valid) return reported;
   return {
     ...reported,
@@ -429,7 +440,8 @@ export interface EngineStore {
   /** Reply events pending correlation. */
   pendingReplies(): Promise<ReplyEvent[]>;
 
-  upsertAccounts(accounts: readonly SenderAccountConfig[]): Promise<void>;
+  /** `now`: when the listing was read, the instant a LinkedIn session's InMail report is stored with (ADR 0004 15.5). */
+  upsertAccounts(accounts: readonly SenderAccountConfig[], now?: number): Promise<void>;
   /** Marks unhealthy every account of `channel` its port no longer reports: it is disconnected. */
   disconnectUnlisted(channel: SendChannel, listed: readonly string[]): Promise<void>;
   /** Every SMS conversation binding of a mobile (E.164), from any number, oldest first (ADR 0003 4.5). */

@@ -112,7 +112,7 @@ The pending step after a sent invite is the first message, with **no due time** 
 | The pre-send check answers `not_connected` | The handover goes on as ADR 0003 5.5 says. |
 | The invite is sent (observed, by lookup, or the user's "mark sent") | The `sent` result, the lead touched (ADR 0003 1.3: it was reached), and `accept_by` resolved from the send point. The first message waits for acceptance. |
 | Acceptance observed, at platform time `t` | If the track is unfinished, awaiting acceptance, and `leadAt(t) < accept_by`: `connection = accepted` at that point, and the first message resolved from it. Otherwise it is recorded as a fact (the measure counts it) and changes nothing: a finished track never restarts (ADR 0003 invariant 6). An acceptance reported for work not yet recorded as sent first records the invite's send at `t` (it was sent if it was accepted), then the acceptance. |
-| Lead time reaches `accept_by` with no connection | The **acceptance expiry**, in evaluation (2.6), before the next steps: with the fallback off (always, until ticket 27), `invite_withdrawal = wanted` and the track finishes `invite_not_accepted` at `accept_by` (lead time and the wall instant it stood at), so what waits on it starts after its delay from then. The lead's other tracks carry on; the endings are checked after it (ADR 0003 2.1). |
+| Lead time reaches `accept_by` with no connection | The **acceptance expiry**, in evaluation (2.6), before the next steps: with the fallback off, or on with a session not eligible (section 15), `invite_withdrawal = wanted` and the track finishes `invite_not_accepted` at `accept_by` (lead time and the wall instant it stood at), so what waits on it starts after its delay from then. The lead's other tracks carry on; the endings are checked after it (ADR 0003 2.1). |
 | The worker's withdrawal pass | For each track with `invite_withdrawal = wanted`, not asked within `SETTLING`, the port's `withdrawInvite` with the invite's work: `withdrawn` sets `withdrawn`; `already_accepted` sets `accepted_first` and records the acceptance as a fact; `unknown` is asked again a settling period later. Asked while the lead is held or ended too: withdrawing sends nothing to the prospect. |
 | A message is sent | As any step: its successor resolves from the send. |
 | A message refused `not_connected` | The track finishes `failed_bad_destination`, the profile not marked bad (Q37). |
@@ -125,7 +125,7 @@ ADR 0003's holds apply unchanged. A pause or a stop freezes lead time, so it fre
 
 ### 3.5 Where the InMail fallback attaches (ticket 27)
 
-The acceptance expiry is one rule, `inviteExpired(state, track, now)` in `progress.ts`, swappable as a `Rules` entry. Today it withdraws and finishes. Ticket 27 adds the track's `inmailFallback` switch and an InMail step kind: with the fallback on and an eligible sender, the same rule leaves the track running with the InMail as the pending step, due at once (its kind decided by position, after the invite), and the first message and follow-ups after it, so they follow the InMail as the decision says. The withdrawal of the invite is then ticket 27's to state. Nothing in 3.1 to 3.4 changes.
+The acceptance expiry is one rule, `inviteExpired(state, track, now)` in `progress.ts`, swappable as a `Rules` entry. Today it withdraws and finishes. Ticket 27 adds the track's `inmailFallback` switch and an InMail step kind: with the fallback on and an eligible sender, the same rule leaves the track running with the InMail as the pending step, due at once (its kind decided by position, after the invite), and the first message and follow-ups after it, so they follow the InMail as the decision says. The withdrawal of the invite is then ticket 27's to state; section 13 states it. Nothing in 3.1 to 3.4 changes.
 
 The second attachment point is the connection gate, `rules.connectionGate(track, stepId, progress)` in `progress.ts`: the one test of whether a step must wait for a connection, read by the due-time resolution (3.2) and by handover predicate 19. Today it holds every LinkedIn step after the invite until a connection is stored. Ticket 27 must make it let through the InMail step (which goes to a person who is not a connection) and nothing else: the first message and follow-ups stay gated, so a fallback never sends a connection message to a stranger (council on b21af02, item 9).
 
@@ -238,15 +238,15 @@ Each must be killed by a recorded seed in `pnpm check`, failing the invariant it
 | an acceptance applied as a reply | L6 | 0 |
 | the note allowance ignored (every invite carries its note) | L7 | 0 |
 | the expiry finishes the track at the instant evaluated, not at its deadline (the laptop off across a deadline shows it) | L8 | 10 |
-| `connected` ignored, by the connection check (taken as clear) and by the pre-send check | L9 | 1 |
+| `connected` ignored, by the connection check (taken as clear) and by the pre-send check | L9 | 2 (1 until ticket 27's fifth stream) |
 | the expiry ends the lead instead of finishing the track | L10 | 0 |
 | the connection gate covers only the first message | L2 | 24 |
 | a LinkedIn pair owned by another subject is ignored (in evaluation, the connection check, the account choice and the handover, and the session's "pending" for the owner's own invite with it) | L11 | 10 |
 | a reply marked where nothing reached the person | L12 | 0 |
 | a taken LinkedIn pair is held, not skipped | L13 | 11 |
-| a pending invitation from elsewhere is sent again | L1 | 0 |
+| a pending invitation from elsewhere is sent again | L1 | 6 (0 until ticket 27's fifth stream) |
 | a removed connection marks the profile bad | L14 | 16 |
-| a withheld release (the release rule leaves every pair taken) | L15 | 0 |
+| a withheld release (the release rule leaves every pair taken) | L15 | 11 (0 until ticket 27's fifth stream) |
 | an edited wait keeps the old deadline | L8 | 6 |
 | a binding lookup ignores the channel (the LinkedIn session taken from any pair the subject owns) | L13 here (the invite waits for ever on the SMS number); L16 in the SMS track runs, seed 3 from their SEED | 11 |
 | a check's result is stored for the track, not the session (and asked of the first healthy session only) | L17 | 2 |
@@ -601,6 +601,324 @@ As 13.12, for Facebook: no Facebook session is connected and no test profile is 
 
 Nothing in the engine, the server, the store's code, the reply-action parser or the request schemas changed: they took Facebook from the registry, as the scratch proof of 13.2 found.
 
+## 15. The InMail fallback (ticket 27)
+
+Written by the ticket 27 implementer before the code, 17 November 2026. It attaches at the two points 3.5 names, `inviteExpired` and `connectionGate`, and changes nothing in sections 1 to 12 for a track with the fallback off. Product source: the decision's LinkedIn point 3 ("If the invite isn't accepted within a configurable wait, the track can send an InMail fallback. This is switched on per track and needs a Premium/Sales Navigator sender with credits. The DM follow-ups then follow the InMail. Otherwise the invite is withdrawn and the LinkedIn track ends for that lead.") and ticket 27's criteria. The research: an InMail reaches a person who is not a connection, needs an eligible paid plan and available credits, and the recipient's own settings can refuse it; a plan is no evidence that every profile is reachable.
+
+### 15.1 The rule in one paragraph
+
+A LinkedIn track may carry one **InMail step**, placed right after the invite; the track's fallback is on exactly while that step is live. At the acceptance expiry, with the fallback on, the track's session is judged once, by its own report: Premium or Sales Navigator with a credit free. If it is eligible, the InMail becomes the pending step, due at the deadline, and the invite is left open; the track's first message is not sent, and its follow-up messages follow the InMail after their waits, counted from the InMail's send. If it is not eligible, or the fallback is off, the track does what it did before: the invite is to be withdrawn and the track finishes `invite_not_accepted`, with the reason the InMail did not go stored on the track. A recipient LinkedIn refuses an InMail for is a failure with its own stored cause, after which the track takes the same withdrawal path. Nothing else changes: acceptance is not a reply, replies are marked by the user, and every other rule of the engine applies to the InMail as to any LinkedIn step.
+
+### 15.2 Where it is configured
+
+- **Per LinkedIn track, beside the acceptance wait**, as a step of its own role: `StepDefinition.role = "inmail"` (absent on every other step). The track's fallback is on exactly while it has a live InMail step; the inspector's switch adds that step or removes it. *Why one fact:* a separate switch beside a stored text would be two facts that could disagree (a switch on with no step, a step with the switch off); the step is what the engine runs, so it is the switch.
+- **Off by default.** A new LinkedIn track has no InMail step; a definition saved before ticket 27 has none, so every existing track reads as off.
+- **The validator** (ADR 0003 7.1) refuses: an InMail step on a track of another channel (`inmail_not_linkedin`); more than one live InMail step (`inmail_twice`); a live InMail step anywhere but directly after the invite among the live steps (`inmail_position`); a subject on it (as on every LinkedIn step); a step that changes its role between saves (`step_role_changed`: a step's role is fixed with its id, so results and work recorded for it keep their meaning). A running track's InMail may be switched on (a new InMail step inserted after the invite) or off (its step removed); a removed InMail step stays removed, and switching on again inserts a new one.
+- **No text is a launch blocker.** A live InMail step with an empty body meets launch blocker 1 (empty copy), as a message step does. *Why:* the invite's empty note is allowed because a plain invite is a LinkedIn choice; an InMail with no text sends nothing a person can read, so a switched-on fallback without text is a mistake to fix, not a choice.
+- **Its wait** is not read: the InMail is due at the acceptance deadline (15.3). The editor offers no wait for it. **It has no subject** (question Q53).
+
+### 15.3 What happens at expiry
+
+`inviteExpired(state, trackId, now)` (3.3) is the one rule, unchanged in where it runs. It now asks two things, in this order:
+
+1. **Is the fallback on?** A live InMail step on the track, with no result. If not: as before (`invite_withdrawal = wanted`, finish `invite_not_accepted` at the deadline). Stored cause: none (`inmail` null).
+2. **Is the track's session eligible now, by its own report?** The session is the track's own: the invite's sender, the session of the pair (`linkedinSessionOf`). An InMail never goes from another session: the pair is the conversation (ADR 0004 Q41), and an InMail from another session would open a second one. Eligible means (15.5) the session's last report says Premium or Sales Navigator and it has at least one credit free. If not: the withdrawal path above, with the cause stored (`inmail = no_plan` or `no_credit`), so the record says why the InMail did not go.
+
+If both hold, the track **does not finish**: `inmail = chosen`, `inmail_session` = the session, and the InMail is the pending step, due at the deadline in lead time (`accept_by`, its wall instant `accept_by_wall`), so it goes at the next window opening, by the existing claim and handover. Its claim and handover are any LinkedIn step's: the window, the pacing slot, the in-flight bound, the allowance, the priority (a touched lead, so a follow-up's priority).
+
+**The invitation when the InMail goes: left open, not withdrawn** (question Q50). The decision pairs withdrawal with the track ending ("Otherwise the invite is withdrawn and the LinkedIn track ends"); with the fallback the track does not end, and nothing in the decision says to withdraw. An open invite costs nothing the user has set and may still be accepted; withdrawing first would be one change in this rule. The read says the invite stays open, with the existing sentence's facts (`inviteOpenOn`).
+
+**Once, at the expiry.** The judgment is made at the expiry and stored; it is not made again. *Why:* the decision makes the InMail the consequence of "not accepted within the wait", so the wait's end is the moment; judging again later would let a session's report a week later undo or redo what the expiry decided. After `chosen`, an InMail that cannot be claimed because its session lost its credit or its plan (the user spent credits by hand, a plan ended) waits, said with its reason and no time (`inmail_unavailable`), as a step waits for an allowance; the user can switch the fallback off, which reaches it (15.8).
+
+**At most one InMail per lead and session.** The InMail is one step of one track, with one result; a non-retryable transport (2.2) never repeats a call; an unknown answer is looked up and, if the lookup cannot tell, held for the user's mark (ADR 0003 5.3), never sent again under a new key. A second campaign cannot InMail the person from the same session: the pair is the first subject's (Q41).
+
+**After the InMail.** Its send (observed, by lookup, or the user's mark) is recorded as any step's, and in the same write:
+- `inmail = sent`;
+- the step the InMail replaces, live with no result, gets the result `skipped`, reason `inmail_instead`, at the InMail's send point. **The InMail replaces the track’s first message as the sequence stands when the wait ends, and no later edit changes which** (the inspector's words, `INMAIL_REPLACES`): the first live message step after the invite that is not the InMail, named at the choice (`inmail_replaces`). A LinkedIn track keeps a first message, so there is always one. *Why:* the decision has "the DM follow-ups" follow the InMail and the ticket "one InMail and then the track's DM follow-ups"; the first message is the message for a person who accepted (question Q52);
+- the next follow-up resolves from the InMail's send point with its own wait. With no follow-up, the track completes.
+
+**An acceptance.** Before the expiry: as before, the InMail never goes (`remainingSteps` passes over an InMail step until the expiry chose it), and the first message follows the connection. After the expiry chose the InMail and **before its work is handed over** (no work, or only a claim): the InMail is not sent; its claim is withdrawn, it gets the result `skipped`, reason `accepted`, and the track connects at the acceptance's point, so the first message follows with its wait (question Q56). *Why:* a person who has accepted is a connection, to whom a message goes for nothing; a credit is not spent on them. After the InMail's work is handed over or sent: the acceptance is recorded as a fact (the measure counts it) and changes nothing; the follow-ups go as scheduled.
+
+**A refusal.** LinkedIn may refuse an InMail for the recipient (their settings, or a profile InMail cannot reach): the port answers `rejected` with reason `inmail_refused`. The InMail gets the result `failed`, reason `inmail refused`; the profile is not marked bad (it is still theirs); `inmail = refused`; and the track takes the withdrawal path at the refusal's instant: `invite_withdrawal = wanted`, finish `invite_not_accepted`. *Why:* the InMail was the only way on; without it the decision's "Otherwise" holds (question Q55). `invalid_destination` on an InMail is the existing bad-profile rule; `rate_limited` the existing account-level wait.
+
+**A user's skip of a pending InMail** takes the withdrawal path at the skip's instant (`inmail = skipped_by_user`): nothing else could make the track's messages due.
+
+### 15.4 The connection gate
+
+`rules.connectionGate(track, stepId, progress)` (3.5) decides, per step kind:
+
+| Step | Passes when |
+| - | - |
+| invite | always (as before) |
+| InMail | `connection` is null and `inmail = chosen` |
+| first message | `connection` is set (as before), or `inmail = sent` (a step promoted to this place by an edit after the InMail; the replaced one was skipped at the InMail's send; 15.15) |
+| follow-up | `connection` is set, or `inmail = sent` |
+
+So a follow-up after an InMail goes without a connection, and nothing else does: no first message without a connection, no InMail before the expiry chose it or after a connection, no follow-up after an InMail not known sent. Handover predicate 19 and the due-time resolution read this one function, as before.
+
+### 15.5 Eligibility, credits and allowances
+
+**The session's report.** A LinkedIn session reports, with its account listing, its InMail standing: `inmail: { plan: "premium" | "sales_navigator" | "none", credits: n }`, by its own reading of the account. The engine stores the last report with its instant (`sender_accounts.inmail_plan`, `inmail_credits`, `inmail_reported_wall`, migration 25). A session that reports none is not eligible. The engine invents no plan and no credit count; the running app's port lists no session (1.1), so no session is ever eligible there.
+
+**A credit is held by a named piece of work** (council on `8b0c846`, items 2, 7 and 8: three failures of counts that did not record who holds what). The work is a track's InMail; its holding is stored on the track (`track_progress.inmail_hold_wall`, the instant it was acquired; migration 25), with the session it is held on (`inmail_session`).
+
+- **Acquired** in one transaction that reads the session's latest report and every holding on that session. It is acquired by the expiry when it chooses the InMail, and by a lead restarted with its InMail chosen and no holding. A holding is acquired only while the session reports Premium or Sales Navigator, its report is fresh (below), and `credits − counted holdings ≥ 1`. The transaction is an evaluation's write, refused when the standing of a session it acquired on has changed since its snapshot (`inmailJudgedSessions`), and decided again.
+- **Counted** while the InMail has not gone, and after it has gone until a report later than its send includes it. A holding the report has absorbed no longer counts.
+- **Released**, by these named events only: the InMail refused; settled not sent with the track on the withdrawal path; cancelled by an acceptance; the fallback switched off; the user's skip; the track finishing without the InMail having gone; the lead stopped or ended. A holding whose InMail may have gone (handed over and unsettled) is kept through a stop, since that credit may be spent.
+- **A restart acquires again.** It never takes back what another lead now holds. With no credit free it waits, with its reason (`no_holding`) and no time.
+- **Backed.** The session's counted holdings are ranked by acquisition, then by subject and track: the earliest first. A holding is backed while its rank is below the credits the session reports now. When a report falls below the holdings, the latest acquired lose their backing first and wait (`unbacked`). When credits return, they are backed again in the same order. So with `c` credits reported and `n` InMails held, `min(c, n)` are backed: never more, and never fewer for want of sharing.
+- **One function** (`inmailBacking`) answers, for a track's InMail: `backed`, `no_holding`, `no_plan`, `stale_report` or `unbacked`. Dispatch's selection of sessions (`eligibleSessions`), the handover's predicate and every read that explains an InMail's wait all derive from it.
+- **The handover re-reads.** The handover transaction loads the session's latest report and holdings and checks the backing again (predicate 20). A claim whose credit is no longer backed, because of a report of zero, a lost plan or a later report, is withdrawn and waits. Never more InMails are handed over than the credits reported at the handover.
+
+**The report's age** (council on `8b0c846`, item 5). A report is fresh for `INMAIL_REPORT_MAX_AGE`, 24 hours (question Q58), from the instant it was read. A session not read for longer, because it was signed out, is not judged eligible on its old report:
+- at the expiry, if the session is signed out, the track takes the withdrawal path with the cause `stale_report`; if it is signed in (the report is old only because the application was not running), the expiry waits for the next sync's report (seed 24018);
+- after the choice, the InMail waits (`stale_report`).
+
+The instant of the report a judgment used is stored with it (`track_progress.inmail_reported_wall`). Every sentence that says eligibility or its lack says it as of that report: "as your session last reported on {day}".
+
+**The allowance table**, extending section 6:
+
+| Action | Spends | From | Given back |
+| - | - | - | - |
+| InMail | one of the session's **messages per day** (an InMail is a message the session sends) | its claim, as any step's reservation; for good once handed and sent or unsettled | when refused, or withdrawn unsent |
+| InMail | one **credit**, by the session's report: a holding acquired by the expiry's choice, or by a restart | the choice (a holding), counted until a report after the InMail's send includes it | by the named release events above (LinkedIn spends no credit on an InMail that did not go) |
+| Follow-up after an InMail | one message per day, as any message | as before | as before |
+
+No InMail allowance of its own is added (question Q54): the messages per day are the user's guard on how much a session sends, and the credits are LinkedIn's own limit, reported. **A credit is never spent on a retry of an unknown answer without the lookup**: the transport is non-retryable (2.2), so an unknown answer is looked up one settling period later and, if still unknown, held for the user's mark (5.3); the uncertain work keeps its reservation of the message and the credit meanwhile.
+
+### 15.6 Ownership, replies, test runs, measures
+
+- **Ownership** of the (session, profile) pair is unchanged. An InMail is LinkedIn work on the pair: sent, it makes the conversation known and holds the pair for good (`bindingUnsent` already keeps a pair with any work sent); refused, it settles not sent, and the withdrawn invite then releases the pair as before. Nothing new is read by the ownership query: the InMail's work is a `provider_work` row of kind `message`, whose columns the triggers already watch. `inmail` and `inmail_session` on `track_progress` are not read by the ownership rule and so are not in `CONVERSATION_INPUTS`.
+- **Replies.** A reply marked by hand stops the lead as now. An InMail handed over is LinkedIn work that reached the person, so the mark is allowed after it (Q39's rule reads work of every kind).
+- **Test runs** include the fallback, to the user's own test profile, from the real session, by the same rule. The acceptance wait is not cut short (Q40), so a test reaches the InMail only if the user leaves the test invite unaccepted for the track's whole wait. The InMail spends a real credit of the session; the Test run tab says so while the fallback is on. The follow-ups after it use the minute waits.
+- **Measures** gain **InMails sent** (InMail attempts sent) for LinkedIn, beside invites sent, invites accepted and messages sent; a refused InMail counts as failed. Messages sent count message steps only, not InMails. Nothing claims delivery or reading.
+
+### 15.7 Reads
+
+- A pending InMail chosen by the expiry, waiting on time: its earliest instant, as any step; ready when its time has come; `inmail_unavailable` (with its cause) when its session cannot take it now.
+- A lead waiting for acceptance on a track with the fallback on reads as before, and the record adds what happens at the end of the wait: "If they haven't accepted by then, an InMail goes instead, if your session can send one then."
+- The InMail sent: "No acceptance was recorded within the track’s wait, so the InMail went instead on {day}, from {session}." then, while the track moves on from it, "The first message isn’t sent; the follow-ups wait their days from the InMail." and, while the read says it is open, "The invite stays open on LinkedIn." From the InMail's sent work (its send and its account's label), whatever the track's state since: a track finished, stopped, won back or removed before the send was confirmed still says what went (the council on `d6ad9f5`, item 4). Handed over and unknown: the existing "handed to the provider; it isn't known yet whether it went".
+- The expiry without the InMail: the existing sentence plus why: "…the InMail fallback didn't go: your session doesn't report Premium or Sales Navigator" / "…had no InMail credit free" / "LinkedIn refused the InMail for this person" / "you switched the fallback off before it went" / "you skipped it", then the withdrawal's state.
+- The first message skipped: "Not sent: the InMail went instead."
+- `stepWhen`, `holdWait`, `dependentStateOf`, `finishedStateOf`, the step role and every wording switch take the new kind, wait and causes through their `never` checks.
+
+### 15.8 Running edits
+
+The spec's rule: an edit reaches what has not been sent. By the lead's state:
+
+| Lead | Switch on (an InMail step inserted) | Switch off (the InMail step removed) | InMail text changed |
+| - | - | - | - |
+| Invite not sent yet, or waiting for acceptance | At its expiry it takes the InMail, by 15.3 | At its expiry the invite is withdrawn and the track ends | Its InMail, if it goes, has the new text |
+| Past expiry, track finished (fallback was off or not eligible) | Nothing: a finished track never restarts (ADR 0003 invariant 6) | Nothing | Nothing |
+| Past expiry, InMail chosen, not handed over (claimed or not) | (already on) | The InMail is not sent: its claim is withdrawn and the track takes the withdrawal path at the edit's instant, `inmail = switched_off` | The new text, by the existing rule that copy is rendered at the handover |
+| InMail handed over or sent | (already on) | Nothing changes: it was sent, or may have been; the follow-ups go | Nothing: it was rendered at its handover |
+
+The edit preview names the change by the step's stored kind and the shared numbering ("LinkedIn track · InMail"), and counts each lead by the row it is in. A lead still waiting for acceptance is one the InMail **may** reach: "N leads still waiting for acceptance will get the InMail if the invite is not accepted in time and your session can send one then"; switched off, "won’t get an InMail: if the invite is not accepted in time, this track ends for them and the app asks LinkedIn to withdraw the invite". A chosen InMail switched off before its handover is skipped; one handed over goes as it was; one sent is past (the council on `d6ad9f5`, item 5). The digest the save checks pins the draft, which carries the switch.
+
+### 15.9 Step kinds
+
+`linkedinStepKind` returns `invite`, `inmail`, `first_message` or `follow_up`. An InMail step is known by its role, never its position; the other steps are named by their position among the live steps that are not InMail steps, so switching the fallback on or off renames no other step. `SocialAction` gains `inmail`, whose allowance bucket is the message bucket (15.5). The shared step titles (`LINKEDIN_STEP_KIND_AT`, `stepTitle`) take the step's role, and every exhaustive mapping of kinds and wording takes `inmail` through its `never` check.
+
+### 15.10 Store
+
+Migration 25:
+- `track_progress.inmail` (`chosen`, `sent`, `accepted` (an acceptance came before the InMail was handed over), `no_plan`, `no_credit`, `refused`, `switched_off`, `skipped_by_user`), `inmail_session`; a trigger refuses a move other than null → any, `chosen` → any but null and `chosen`;
+- `provider_work.inmail` and `attempts.inmail` (0 or 1; 1 only with kind or action `message`): which message work is an InMail;
+- `sender_accounts.inmail_plan`, `inmail_credits`, `inmail_reported_wall`: the session's last report; an account sync that reports none leaves them as they were (a report is a fact of the session, never cleared by a listing that omits it).
+
+`StepDefinition.role` is stored with the definition (JSON); no column.
+
+### 15.11 Invariants (L18 to L25) and the generated runs
+
+Asserted after every event by the LinkedIn generated runs, on the simulated provider's own logs:
+
+18. **L18 At most one InMail per lead and session**, on the handover log.
+19. **L19 None while the fallback is off**: an InMail is handed over only for a track the record knows had a live InMail step at its expiry and at the handover.
+20. **L20 None before the expiry**: handed over only at or after the record's own deadline (L8's arithmetic).
+21. **L21 None after an acceptance**: never handed over after an acceptance of that track's invite was reported, nor for a track connected before its deadline.
+22. **L22 None from an ineligible session or with no credit**: at each InMail handover, the record's own count of the session's scripted plan and credits (its report, less the InMails the record saw handed and not refused since) had a credit free; and every expiry the record judges eligible with the fallback on chose the InMail, every one it judges not eligible withdrew (no silent treatment of every session or recipient as reachable).
+23. **L23 Follow-ups only after an InMail known sent**: every message to a profile the session is not connected to follows an InMail the provider delivered from that session to that profile; the first message never follows an InMail.
+24. **L24 A refused InMail ends the track and asks the withdrawal**, and marks no profile bad.
+25. **L25 An edit of the switch reaches only what has not gone**: after the fallback is switched off, no InMail is handed over for a lead whose InMail was not yet handed over; an InMail handed over before it is unaffected and its follow-ups still go.
+
+L3 (nothing after a marked reply) covers the InMail and its follow-ups, and invariant 29 keeps running.
+
+**Generated.** In a share of runs (from a stream of its own, so runs drawn without it are unchanged): the fallback switched on for the LinkedIn track, with InMail text; each session's report drawn as Premium, Sales Navigator, none or unreported, with credits from 0 to 3; profiles that refuse InMail; acceptances drawn before, after and never; the report's credits dropping (the user spending credits by hand) at a drawn instant; edits of the switch on and off at drawn instants, and of the InMail's text. **The record** keeps its own model: each session's report and its own credit count, each track's InMail state by its own reading of the deadline, acceptances and refusals, and predicts the expiry's choice from them.
+
+**Mutations, one per invariant**, each killed by a recorded seed in `pnpm check` (the seeds are recorded in 15.13 as built):
+- the InMail chosen again after it was sent (a second InMail) — L18;
+- the fallback read as on for every LinkedIn track — L19;
+- the InMail due at the invite's send, not the deadline — L20;
+- an acceptance ignored once the InMail is chosen — L21;
+- eligibility ignored (every session taken as Premium with credits) — L22;
+- the gate lets follow-ups through after the InMail is chosen, not sent — L23;
+- a refused InMail leaves the track running — L24;
+- switching off ignored for a chosen InMail — L25.
+
+### 15.12 Questions for the principal
+
+Numbered on from Q50 (ticket 25 uses Q43 to Q49). Each names what is built meanwhile.
+
+- **Q50. The invite when the InMail goes.** *Built:* left open; only the withdrawal path withdraws an invite. Withdrawing it before the InMail is one change in `inviteExpired`.
+- **Q51. A session not eligible at the expiry.** The decision's "needs a Premium/Sales Navigator sender with credits. … Otherwise the invite is withdrawn" and the ticket's "With fallback off retain withdrawal/end behavior". *Built:* judged once at the expiry by the session's report; not Premium or Sales Navigator, or no credit free, takes the withdrawal path with the cause shown. The alternative is to wait, with the reason and no time, until the session can send one (a plan bought, credits renewed): one change in the same rule. An InMail already chosen whose session later loses its credit waits, with its reason.
+- **Q52. The first message after an InMail.** *Built:* the InMail takes its place; the follow-ups follow the InMail. The alternative sends the first message too, after its wait.
+- **Q53. An InMail's subject.** LinkedIn's InMail form has a subject line; whether a session can send one without it is unverified. *Built:* text only. A subject field on the InMail step is one change in the definition and the inspector.
+- **Q54. An InMail allowance of its own.** *Built:* none; an InMail spends one of the session's messages per day and a credit. A separate daily InMail allowance (with no default, as every allowance) is one more bucket.
+- **Q55. A refused InMail.** *Built:* the track takes the withdrawal path; the profile is not marked bad.
+- **Q56. An acceptance after the wait ended, before the InMail went.** *Built:* the InMail is not sent and the first message follows the connection. The alternative sends the InMail anyway.
+- **Q57. A test run reaching the InMail spends a real credit.** *Built:* included, as the ticket asks, and said on the Test run tab while the fallback is on.
+- **Q58. How old a session's report may be before eligibility is not judged on it.** A session reports with every listing while it is signed in; signed out, it reports nothing, and its last report stands. *Built:* 24 hours (`INMAIL_REPORT_MAX_AGE`). An expiry on an older report of a signed-out session takes the withdrawal path (`stale_report`); of a signed-in session, it waits for the next sync. A chosen InMail waits until a fresh report backs it. Every sentence of eligibility says the report's day. A shorter or longer age is one constant.
+
+### 15.13 Unverified
+
+Verified on the simulated provider only. Unverified until a Premium or Sales Navigator session is connected and a test profile designated (#28):
+- that a session can report its plan and its credits, how current that report is, and what it says for each of Premium Career, Business, Sales Navigator (whose InMails are sent from Sales Navigator, research);
+- that a session can send an InMail, how LinkedIn answers when a recipient cannot receive one, and whether a credit is spent on any answer but a send;
+- whether LinkedIn lets the session send follow-up messages in an InMail thread before the recipient answers or connects (a refusal would be `not_connected`, failing the track as Q37's rule does, and the read says so);
+- the real test run of the fallback.
+
+### 15.14 As built (17 November 2026)
+
+- **Code.** `definition.ts`: `StepDefinition.role`, `inmailStepOf`, the step kind `inmail` (by role; the other steps by position among the steps that are not InMail steps), `SocialAction` `inmail` and `allowanceOf`, the validator's four refusals. `progress.ts`: `inviteExpired` with the fallback, `inmailNotSent` (the withdrawal path with its stored cause), `inmailStanding` (the one eligibility test), the gate per kind, `remainingSteps` (an InMail is ahead only once chosen), the InMail's send, an acceptance before it, its refusal, a switch-off in `alignPending`. `dispatch.ts`: `sessionsFor` selects for an InMail only its eligible session, and the reads' `inmail_unavailable` (`inmailUnavailable`) derive from that selection. The engine's pre-send check lets an InMail past its own invite's `pending` and holds it on `connected`.
+- **Store.** Migration 25. `provider_work.inmail` and `attempts.inmail` mark InMail work, while `kind` and `action` stay `message`, the allowance it spends. A session's report is stored by the account sync (`upsertAccounts` with the listing's instant). `AccountState.inmail` carries the reported credits, the InMails spent since the report, and the InMails committed by chosen tracks.
+- **Reads and screens.**
+  - `LinkedinTrackView.inmail`, `StepWhenView.inmail`, `StepProgressView.role`, `ControlStepView.role`, `ActivityEntry.role`, and the copy preview's `role`.
+  - `LinkedinMeasures.inmailsSent`.
+  - The inspector's switch and text (`InmailFallbackControl`).
+  - The record's `inmailLine` and `INMAIL_AT_THE_END`, Activity's reasons, the Test run tab's sentence and rows, and Copy for a lead.
+- **Found by the generated runs and fixed** (seed 24018): with the first message skipped while the lead waited, the walk had passed the InMail's position. So the pending-step alignment moved a chosen InMail to the next follow-up, which the gate then held for ever. A chosen InMail now stays ahead whatever was resolved after its position. The regression test is through HTTP ("a first message skipped while waiting for acceptance").
+- **Found in the record and fixed:**
+  - An edit at the deadline's own instant comes after that tick's judgment (24006).
+  - A session's credits are as its last report says: a signed-out session reports nothing (24016).
+  - An edit of the wait after the judgment moves nothing (24016).
+  - An InMail sent in the judging tick is not counted against its own judgment (24024).
+- **The generated runs.**
+  - The fallback is drawn from a third stream: the switch on at the start, sessions' reports, recipients that refuse, the switch toggled, the InMail's text edited, and credits spent by hand.
+  - A fourth stream draws a switch-off early in the run, and one while a chosen InMail waits to go.
+  - The first two streams are unchanged, and every earlier mutation is still killed at its recorded seed.
+  - Fixed seeds 4, 7, 16 and 24 join `pnpm check`: an InMail sent, a follow-up after it, and its text edited. "A withdrawal that finds the invite accepted", which the fixed seeds no longer reach, is pinned by an example test (`linkedin.test.ts`).
+  - Behaviours the fixed seeds do not reach are pinned by example tests (`linkedin-inmail.test.ts`): a skipped InMail, and an InMail waiting for a credit.
+  - Mutation seeds, found over offsets 0 to 29: L18 24, L19 16, L20 7, L21 18, L22 0, L23 24, L24 18, L25 7.
+- **No change for the fallback off, email, SMS or calls.** `scripts/no-inmail-digest.ts` gives the same digest on the tip `5c43963` and on this branch: `284e00a5982d36894e10ae87757f6773886c12fa3b40a26639284c6ae9869781`. That run is a LinkedIn track without the fallback, then email: 12 handovers, 11 deliveries, 2 acceptances, 4 withdrawals, 25 checks and 1 refusal. `scripts/no-social-digest.ts` still gives `eb4141e8…3708`.
+
+### 15.15 The review bot on `b49a71b`
+
+Three defects, each reproduced first as a failing test through HTTP (`linkedin-inmail.test.ts`, "the review bot on b49a71b"):
+
+1. **A running edit after the InMail stalled the follow-ups.** The edit removed the replaced first message, so the next follow-up read as the first message by position, and the gate held it for a connection. *Changed:* the gate lets a step that reads as the first message through once an InMail is known sent (15.4). The first message the InMail replaced was already skipped at the InMail's send, so a step promoted to that position by an edit is a follow-up the user kept.
+2. **An acceptance after a refused InMail did not connect the track.** The InMail had been refused for a limit, and the invite was accepted before the retry. Any InMail work that had been handed over stopped the skip, so the track was neither connected nor able to send. *Changed:* only InMail work that may have gone (unsettled, or sent) stops the skip. Work that was refused, or settled not sent, does not.
+3. **Two concurrent expiries could commit the same last credit.** The evaluation's version guard did not cover the shared InMail standing. *Changed:* an evaluation that judges an InMail also requires the standing of each session it judged to be unchanged at the write (`inmailJudgedSessions`). Otherwise it is discarded and decided again on fresh state, which covers a new report too.
+
+**Fixing the class:** every decision that reads state another subject can change now names that state in the write's guard.
+
+### 15.16 The council on `8b0c846`
+
+Each item was reproduced first through HTTP, in `linkedin-inmail.test.ts` ("credits held by named work", "the step the InMail replaces is named when it is chosen") and `linkedin.test.ts` (item 3). Every one of those tests fails on `8b0c846`.
+
+1. **The step the InMail replaces is named once, at the choice** (`track_progress.inmail_replaces`). It was the first message by its place among every step of the track, removed ones included; 15.18 corrects that to the first live message at the choice. Only that step is ever skipped as `inmail_instead`, and only if it is live with no result. The gate reads the same fact. Before, the send took whichever live step read as the first message, so a follow-up the user kept after removing the first message was skipped. This is the other side of 15.15 item 1. *Class:* a fact read at two moments is stored at the first one.
+2. **Items 2, 7 and 8 are one design: a credit is held by a named piece of work** (15.5, rewritten). Before, three places counted credits afresh from counts that did not record who holds what:
+   - two chosen InMails sharing one credit deadlocked (item 2);
+   - a restart restored a commitment it had not acquired (item 7);
+   - a handover ignored a report that came after its claim (item 8).
+3. **A pending invitation stops every step but the InMail and the follow-ups after it, as on the integration tip.** Since 15.3, a `pending` answer from the pre-send check had stopped invites only, so a message to a removed connection with an invitation pending was handed over and refused. Reproduced against the tip first: the tip stops it, `8b0c846` did not. The digest's world `scripts/no-inmail-digest.ts` now scripts the case, and its digest is equal on the tip and here.
+4. **The undo helper derives the migration's version by name**, and the upgrade is tested on a lead the tip left waiting for acceptance (`test/fixtures/upgrade/tip-5c43963-linkedin-waiting.sql`, written by the tip's own code). After the upgrade, its expiry takes the withdrawal path with the fallback null.
+5. **The report's age** (15.5, question Q58).
+6. **Wording.** A chosen InMail is said as chosen and not gone; the next step's line says why it waits. Copy for a lead mentions the InMail path while the fallback is on.
+7. **The open invite is said only while the read says it is open** (`inviteOpen`). An acceptance after the InMail is said on its own line.
+
+8. **The record fixes the replaced message from its own model** (item 10). The record keeps its own copy of each LinkedIn track's steps through the edits it sends, and names the replaced message from that copy as it stood when the expiry chose the InMail. So the engine and the record each fix the step once, independently. A reorder after the send, `[inv, im, m1, m2, m3]` to `[inv, im, m2, m1, m3]`, then reads `m2` as kept, not as the first message.
+9. **The inspector says the app asks LinkedIn to withdraw the invite** (item 11): one phrase, `ENDS_AND_ASKS_WITHDRAWAL`, in each of the four sentences. It never says the invite is withdrawn.
+10. **Evidence capture waits for animations to settle either way** (item 12): `Promise.allSettled`, since a cancelled animation rejects its `finished` promise.
+
+**What the new draws found, fixed here, each with a regression test through HTTP that fails without its fix:**
+- **Seed 24024 (invariant 29):** a restarted lead waiting for a credit was cached as settled, so a new report giving a credit did not reach it, where a fresh engine acquired and sent at once. *Changed:* a session's InMail standing now has a version, moved by the database in the same write as every fact the standing reads: a holding acquired or released, a track finishing, a report or the session's health, an InMail's work handed, sent or settled (key `inmail:` plus the session, in `conversation_versions`; four triggers in migration 25). A cached evaluation or readiness of a subject with a chosen InMail, or waiting at its expiry, remembers it. A report's aging is a horizon. Test: "a restarted lead waiting for a credit acquires one a new report gives, with no change to its own record".
+- **Seed 24018 (L22):** after the laptop was off over a deadline, a user's action ran the expiry before the first sync, on a report old only because the app had not run, and judged it stale. *Changed:* an old report from a session still signed in defers the judgment to the next sync, which reads a new report. Only a signed-out session is judged `stale_report` (15.5, Q58). Test: "a user action before the first sync does not judge the expiry on the old report of a signed-in session; the next tick does".
+- **The record's own error (seed 24024 again, L22 at the handover):** a report and a handover at the same instant. The simulated provider now orders its report and handover logs with one sequence, and the record judges a handover by the last report before it.
+
+**The generated runs** draw, from a fourth stream:
+- a running edit of the messages while an InMail is chosen (the first message removed, a message added, two reordered), only in a campaign where no switch-off is drawn;
+- a lead with its InMail chosen stopped while another lead on its session is chosen or waiting for its deadline. In a share of runs the session's credits are then set to one, and the lead is restarted a minute after the other lead's choice, before its InMail can go;
+- the session's report changed between an InMail's claim and its handover (no credit, or no plan), with credits returning a day later.
+
+A fifth stream builds, in 30% of runs, a contested credit. The first session reports two credits; the first campaign has the fallback on, a weekday morning window and people who neither accept nor refuse. The other draws on that campaign and session are made and then set aside, so the streams stay put. In these runs, InMails chosen at a deadline wait together, and a stop and restart meets a credit another lead holds. In half of them the first message is removed once an InMail there is chosen. Those InMails go when the morning window opens, so at the send the first live message is a follow-up the user kept. Before this draw, the mutation of item 1 was killed only through the record's error at seed 24024 (below), and by no offset from 0 to 50 once that error was fixed.
+
+New invariants, asserted by the record:
+- **L22 at the handover:** an InMail is handed over only on a report read by then that has a plan and a credit free.
+- **L23's other side:** every follow-up the user kept goes.
+- **L26:** with `c` credits reported and `n` InMails chosen on a session, `min(c, n)` go; none waits for want of sharing while a credit is free.
+- **L27:** a restart never takes a credit back from a lead that chose while it was stopped.
+
+Mutations, with seeds recorded in `linkedin-mutations.ts`:
+- "the replaced step is found among the live steps at the handover" (L23);
+- "a restart restores a commitment without acquiring" (L27);
+- "the handover does not re-read the report" (L22).
+
+**Seeds after the draws** (offsets from 24000, searched over 0 to 50 on 17 November 2026). With the new streams, every InMail mutation was searched again, since the earlier seeds no longer drew the same runs:
+
+| Mutation | Invariant | Seed |
+|---|---|---|
+| an InMail sent is sent again | L18 | 5 (0 before 15.17) |
+| a switched-off InMail is still sent | L19 | 16 |
+| the InMail goes before the expiry | L20 | 0 |
+| an acceptance does not stop the InMail | L21 | 18 |
+| every session taken as eligible for InMail | L22 | 3 (7 before 15.17) |
+| the first message goes after the InMail | L23 | 5 (0 before 15.17) |
+| a refused InMail leaves the track running | L24 | 42 |
+| a switch-off does not reach a chosen InMail | L25 | 16 |
+| the replaced step is found among the live steps at the handover | L23 | 0 |
+| a restart restores a commitment without acquiring | L27 | 93 (0 before 15.17) |
+| the handover does not re-read the report | L22 | 18 |
+| a step moved before the replaced step is not sent (15.17) | L23 | 40 |
+| a holding settled unsent on a stopped lead is kept (15.17) | L26 | 7 |
+
+`LINKEDIN_FIXED_SEEDS` is now a greedy cover by cost of every behaviour the runs name over offsets 0 to 50, keeping 15, 46, 69, 73 and 93: 4, 8, 15, 16, 18, 30, 32, 42, 46, 50, 69, 73 and 93. With the new draws, 24 and 29 alone took over two minutes; the new set takes about two minutes in all. A switch-off while an InMail waits is reached by no offset from 0 to 50, so it is pinned by its example test ("switched off while the InMail is chosen and not yet handed over") and listed in `LINKEDIN_OTHER_FEATURES`.
+
+The removal changes offsets 0 and 1, the contested runs that draw it. Three earlier mutations were killed only there, and are now killed at seeds found by the same search: "`connected` ignored" (L9) at 2, "a pending invitation from elsewhere is sent again" (L1) at 6, and "a withheld release" (L15) at 11 (10.3's table).
+
+**The record's own errors, found on offsets 0 to 50 and fixed in the record:**
+- **Seeds 24044 and 24049 (L8 at an edit of the wait):** the record checked the deadline of a lead whose reply had been marked. That lead's clock stopped with it, so the record skips ended leads there, as its check after the drain already did.
+- **Seed 24024 (L23's other side):** a skip drawn for a lead waiting for acceptance was not noted among the record's skips, so two messages the user skipped read as kept. Every skip is now noted.
+
+### 15.17 The search and the review bot on `56030c4`, and ticket 25's merge
+
+**The search** failed on two seeds, both the record's errors, each fixed in the record and added to the fixed seeds:
+- **Seed 24071 (L13, L15):** a chosen InMail's room is its own session's messages per day; the record took the whole pool, and read the lead as still awaiting acceptance. With no credit and no room both true, the read names the credit first. An InMail's open invite (Q50) is a held conversation, not one being withdrawn, so the pair it holds grounds another lead's skip.
+- **Seed 24084 (L12):** a handover committed before a crash, which the session never received, is handed with its outcome untold to the application: the reply mark it allows is right.
+
+It also emitted a behaviour name registered nowhere. **Every name a run can report is now a typed list** (`LINKEDIN_EMITTED`): a name not in it fails the typecheck, and a unit test with no run requires the list to equal the two registries.
+
+**B. A step moved before the replaced one is sent.** The step walk's cursor is the last step resolved by something that happened to it. The skip the InMail's send writes on the replaced step (`inmail_instead`) stops that step only, and never stands for the steps an edit placed before it (`remainingSteps`). The step replaced is still named once, at the choice (item 1 of 15.16). Tests through HTTP: a follow-up moved before the replaced step, a message inserted before it, a step removed in front of it, the replaced step moved to the end, each after the choice; the same reorder at the choice's own instant, before the choice (then the first message at the choice is the one replaced) and after the InMail went. A test run ends at any edit (ADR 0003), so no step can move around a test's replaced step; unedited, its follow-ups go. The runs' reorder while an InMail is chosen moves the first follow-up in front of the first message. Mutation: "a step moved before the replaced step is not sent" (L23).
+
+**C. A holding settled unsent is released, whoever settles it.** Every transition that settles work (a lookup's answer, a provider's refusal or late answer, a confirmed withdrawal, the user's mark, a claim that expires, at store open too) ends at `attend`, which now releases the holding of a finished track or an ended lead (stopped, replied, won back onto another branch) once nothing its InMail holds may have gone (`releaseSettledHolds`). A running or paused lead's chosen InMail still owes its send, so it keeps its holding; sent work keeps it until a report absorbs it. Tests through HTTP: the bot's reproduction, ending with the next lead's InMail taking the credit; restarted before the mark (the lead's InMail goes, the next finds none); marked sent instead (held until the next report). The runs draw, in contested runs, an InMail answered unknown with nothing sent, its lead stopped at the handover and the work marked not sent once unresolved; L26 is also checked during the run (at least `min(free, n)` of the `n` chosen InMails backed, the record's free credits net of InMail work still uncertain), and L22's count of committed credits leaves out a stopped lead's settled work. Mutation: "a holding settled unsent on a stopped lead is kept" (L26).
+
+**The same faults elsewhere in LinkedIn.** None:
+- *A synthetic result as a cursor:* the only other synthetic step results are the invite's "already connected" skip (position 0) and the InMail's "accepted" skip, which the validator keeps right after the invite. Neither can stand before a kept step. The invitation withdrawal writes no step result.
+- *Something held by work and not released once a stopped lead's work settles:* a session's reservations are counted from unsettled work, so they free themselves as it settles; a pair whose work all ended not sent is released in every write the engine makes (`releaseUnsent`), whatever the lead's state.
+
+**Ticket 25's merge** (`b4e2e8c`). This migration is now 26, its undo computed like ticket 25's from the migrations before it, and its upgrade fixture written by `b4e2e8c`'s own code. What the merge changed for the InMail:
+- an InMail is LinkedIn's only: the action exists only on a LinkedIn step (`linkedinStepKind`), and the simulated message-request port refuses to be asked for one;
+- a claim is not a handover: the InMail's read counts as handed only work with a handover time, so a claimed InMail never handed says it has not gone, and holds its credit only through the choice's holding;
+- LinkedIn's fixed session and the pacing from tracks with leads running on it carry over unchanged to the InMail, which goes from the track's own session;
+- the runs' draw "remove a started track before a lead's first claim" holds with the InMail fallback on, on the fixed seeds and offsets 0 to 50.
+
+The draws for B and C change offsets 0, 5, 7, 13, 14, 23, 32, 40, 44, 49, 84 and others of the contested runs; four InMail mutations killed only at 0 or 7 were searched again (the table in 15.16). B's reorder is drawn in contested runs without the removal, from a stream of its own, so the fifth stream's draws stay put.
+
+Both no-change digests are equal on `b4e2e8c` and here (the simulated provider's own `seq` field, a test double's, is left out of the first).
+
+### 15.18 The council's last pass on `d6ad9f5`
+
+1. **The replaced step is the first message at the choice** (blocking). `d6ad9f5` picked it by its place among every step, removed ones included, so a first message removed while the lead waited was "replaced" and the next message, by then the track's first message, went after the InMail; a removal and a reorder before the choice gave opposite results. The rule now, in the inspector's words: the InMail replaces the track’s first message as the sequence stands when the wait ends, and no later edit changes which (15.3). Tests through HTTP, each saying exactly which steps went and which was replaced: the first message removed before the choice; removed and a new one added in its place (a removed step cannot come back on a running campaign); a message inserted before it; every message removed (refused: a LinkedIn track keeps a first message); a test run of a sequence whose first message was removed. The record names the replaced step from its own live model at the choice; the runs draw, from a stream of their own, the first message removed or a message inserted before it while a lead waits. Mutation: "the replaced step picked by place, removed steps included" (L23).
+2. **An acceptance that came while the InMail was uncertain applies when its work settles not sent** (blocking). `recordAcceptance` only stored it, since work that may have gone stops the skip, and nothing revisited it, so the InMail stayed pending for a connection and every check before sending answered `connected` and looped. One transition now overtakes a chosen InMail for a connection (`skipInmailForConnection`: claims withdrawn, the InMail skipped as `accepted`, its credit released, the track connected), used by an acceptance, by `attend` when the work settles not sent by any transition (a provider's late answer, the user's mark, a confirmed withdrawal, a claim that expires at store open), and by a `connected` answer at the InMail's own check, in the handover's write. Sent and still-uncertain work and finished tracks keep it from applying. Tests through HTTP in both orders, with a stop and restart between (the unresolved mark is the engine's: it has no HTTP route yet, an earlier ticket's gap), and the connected check. LinkedIn's lookup does not settle "not sent" (its transport does not treat it as final), so the tests settle by the mark. The runs draw, in contested runs, an acceptance before or after the mark of an InMail answered unknown; the record's L13 requires, from its own logs, that the InMail is no longer the pending step once both have happened. Mutation: "an acceptance recorded while the InMail was uncertain is not applied when it settles unsent" (L13).
+3. **The record's own InMail judgment.** L15's "is the invite being withdrawn" and L13's "is the InMail pending" no longer read the engine's stored state: the record judges, from its own switches, acceptances, reports, credits, refusals and the withdrawals the session was asked for, whether the expiry left the invite open for an InMail and whether that InMail has been handed over. When the read says the InMail waits on a credit, the record's count must agree (fewer credits free than InMails pending on the session). It found no disagreement on the fixed seeds or offsets 0 to 50.
+4. **What went is said from the work.** An InMail confirmed sent after its track stopped moving (stopped and won back, marked replied, or its track removed) said "It hasn't gone", read from the track's `chosen`. The sentence now reads the sent work, names the session from that work's account, and keeps the follow-up clause only where the track moved past the InMail. The invite's sentences already read its work (`invitingWork`). Tests through HTTP for the three lifecycles.
+5. **The running-edit preview** counts a lead still waiting for acceptance as one the InMail may reach (switched on) or may not (switched off), said as that condition, and names the step by its stored kind (15.8). Tests on the read and through the screen.
+
+### 15.19 The review bot and the verifier on `f6bf9a3`, and ticket 26's merge
+
+- **An acceptance recorded while the InMail was uncertain applies before the pending step is aligned** (review bot, blocking). `attend` ran `alignPending` first, so an edit made while the work was uncertain (the fallback switched off) ended the track on the withdrawal path before the acceptance took effect, and the person who accepted got no messages. The acceptance now applies first, by the same transition (15.18 item 2). Tests through HTTP: switched off after the acceptance and settled by the mark, by the session's late definite refusal, and across a stop and restart; switched off before the acceptance; and the whole track removed. The four switch-off cases fail without the change.
+- **The skip's sentence after an acceptance during uncertain work** (verifier). It said "before any InMail was handed over" where one had been. When the skipped InMail has work with a handover time, the record now says that an InMail was handed over, that it is confirmed it wasn't sent, and that they accepted; the earlier sentence only when no InMail work was handed over. The Test run tab's "you accepted the test invite before the InMail went" and Activity's "No InMail: they accepted the invite before it went" stay true either way.
+- **Ticket 26's merge** (`c633f73`): this migration is 27, its upgrade fixture written by `c633f73`'s own code, and this section is 15 (ticket 26 took 14).
+
 ## The review of `194fc44` (council, review bot and verifier, 16 November 2026)
 
 Fifteen items, each reproduced first as a failing test through HTTP (`src/server/engine/linkedin-review.test.ts`) unless it says otherwise.
@@ -758,4 +1076,4 @@ Fifteen items, each reproduced as a failing test first (`src/server/linkedin-scr
 - **ADR 0003.** `TrackChannel` and the account channel gain `linkedin`; `FinishReason` gains `invite_not_accepted`; `StepWait` gains `awaiting_acceptance`; a reply's channel gains `linkedin` (a mark only). Its section 11's "Social tracks" line is replaced by this ADR. Its question numbers continue here.
 - **ADR 0001.** A LinkedIn profile is a contact fact of a person read from the import, not a `contact_details` row: it is never matched on, merged or searched. Its bad mark is kept by key.
 - **Tickets 25 and 26** are section 13: one shared message-request channel, with Instagram worked through and Facebook one entry in each of 13.2's mappings.
-- **Ticket 27** attaches at `inviteExpired` (3.5).
+- **Ticket 27** attaches at `inviteExpired` (3.5); section 15.

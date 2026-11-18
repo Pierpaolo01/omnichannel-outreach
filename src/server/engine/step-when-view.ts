@@ -55,6 +55,7 @@ export function stepWaitApi(why: StepWait): StepWaitApi {
     case "call_hours_closed":
     case "awaiting_acceptance":
     case "invite_pending_elsewhere":
+    case "inmail_unavailable":
       return why;
     default: {
       const unhandled: never = why;
@@ -76,6 +77,8 @@ export function stepWhenView(when: StepWhen, now: number, today: number, channel
         why: at ? readWait(when.why, at.state, at.trackId, now) : stepWaitApi(when.why),
         channel: when.channel ?? channel,
         ...(when.until !== undefined ? { until: new Date(when.until).toISOString() } : {}),
+        ...(when.inmail !== undefined ? { inmail: when.inmail } : {}),
+        ...(when.reportedAt != null ? { reportedAt: new Date(when.reportedAt).toISOString() } : {}),
       };
     case "ready":
       return { kind: "ready" };

@@ -25,9 +25,11 @@ export interface BlockerWording {
 const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const and = (items: readonly string[]): string => (items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1) ?? ""}`);
 /** A step's title in its track, which the sentence names beside it: "Email 2", "Text 1", a LinkedIn step by its role ("First message"). */
-const stepName = (track: TrackDefinition | undefined, number: number): string => {
+const stepName = (track: TrackDefinition | undefined, number: number, stepId?: string): string => {
   const channel = track?.channel ?? "email";
-  return channel === "call" ? `${STEP_NOUN.call} ${number}` : stepTitle({ branch: "main" }, channel, number);
+  // The InMail fallback by its role (ADR 0004 15.9), from the step the blocker names.
+  const role = track?.steps.some((s) => s.id === stepId && s.role === "inmail") ? ("inmail" as const) : undefined;
+  return channel === "call" ? `${STEP_NOUN.call} ${number}` : stepTitle({ branch: "main" }, channel, number, role);
 };
 const channelOf = (track: TrackDefinition | undefined): TrackDefinition["channel"] => track?.channel ?? "email";
 
@@ -38,7 +40,7 @@ export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition, sms: 
   if (b.kind === "missing_merge_field") {
     const places = b.uses.map((u) => {
       const track = trackOf(u.trackId);
-      return { ...u, text: `${stepName(track, u.stepNumber)} of ${named(track)}` };
+      return { ...u, text: `${stepName(track, u.stepNumber, u.stepId)} of ${named(track)}` };
     });
     const field = fieldLabel(b.field);
     return {
@@ -52,11 +54,12 @@ export function describeBlocker(b: LaunchBlocker, def: CampaignDefinition, sms: 
   const channel = track ? channelOf(track) : b.kind === "no_sender" && (b.channel === "sms" || isSocialChannel(b.channel)) ? b.channel : "email";
   const name = capitalise(named(track));
   if (b.kind === "empty_copy") {
-    const noun = stepName(track, b.stepNumber);
+    const noun = stepName(track, b.stepNumber, b.stepId);
     const what = b.part === "subject" ? `${noun} has no subject` : `${noun} has no ${channel === "email" ? "copy" : "message"}`;
+    const inmail = track?.steps.some((s) => s.id === b.stepId && s.role === "inmail") === true;
     return {
       title: `${name}: ${what}`,
-      detail: b.part === "subject" ? "Give it a subject, or let it continue the thread." : `Write it, or remove the ${channel === "sms" ? "text" : isSocialChannel(channel) ? "message" : "email"}.`,
+      detail: b.part === "subject" ? "Give it a subject, or let it continue the thread." : inmail ? "Write it, or switch the InMail fallback off." : `Write it, or remove the ${channel === "sms" ? "text" : isSocialChannel(channel) ? "message" : "email"}.`,
       actions: [{ label: "Write it", trackId: b.trackId, stepId: b.stepId }],
     };
   }

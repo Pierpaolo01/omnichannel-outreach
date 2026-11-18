@@ -201,6 +201,7 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
   const [linkedin, setLinkedin] = useState(tab.contacts.linkedin ?? "");
   // The test profile is asked for while the sequence has a LinkedIn track, or one is saved (ticket 24b).
   const asksLinkedin = editor.view.definition.tracks.some((t) => !t.removed && t.channel === "linkedin") || tab.contacts.linkedin !== null;
+  const inmailOn = editor.view.definition.tracks.some((t) => !t.removed && t.channel === "linkedin" && t.steps.some((s) => s.role === "inmail" && !s.removed));
   // The test account of each message-request channel likewise (ticket 25; ADR 0004 13.8), one field per channel the sequence
   // has a track on, or one is saved for: driven by the registry, so a new channel needs no code here.
   const socialId = useId();
@@ -387,6 +388,8 @@ function Contacts({ campaignId, tab, editor, onChange, presses }: { campaignId: 
       <p className="text-[14px] text-ink-2">
         Sends every step of the current sequence to you, in order, from the real sender accounts. Each wait is cut to about a minute
         {asksLinkedin ? ", except the wait for you to accept the LinkedIn invite on your test profile, which you do by hand" : ""}.
+        {/* The InMail fallback in a test (ticket 27; ADR 0004 15.6): reached only by leaving the invite unaccepted. */}
+        {inmailOn ? " With the InMail fallback on, the test reaches the InMail only if you leave the test invite unaccepted for the whole wait; the InMail then spends one of your session’s InMail credits." : ""}
       </p>
       {/* Where a test run with such a channel's steps starts: what the app cannot tell about its test contact (ADR 0004 14.3). */}
       {MESSAGE_REQUEST_CHANNELS.filter((c) => MESSAGE_REQUEST_TEST_CONTACT_LIMIT[c] !== null && editor.view.definition.tracks.some((t) => !t.removed && t.channel === c)).map((c) => (

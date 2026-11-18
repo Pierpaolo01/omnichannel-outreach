@@ -71,7 +71,7 @@ const lower = lowerLabel;
 const capital = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
 
 /** A step a control names, inside a sentence: "email 2 of 3", "text 1 of 2 on SMS track 2", "win-back email 1 of 2", "the call". */
-export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "number" | "of">): string {
+export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "number" | "of"> & { readonly role?: "inmail" }): string {
   const on = step.track.several ? ` on ${lower(step.track.label)}` : "";
   switch (step.channel) {
     case "call":
@@ -86,6 +86,8 @@ export function stepPhrase(step: Pick<ControlStepView, "channel" | "track" | "nu
         const unhandled: never = step.channel;
         throw new Error(`A step on a channel with no name: ${String(unhandled)}`);
       }
+      // The InMail fallback keeps its capitals: "the InMail" (ADR 0004 15.9).
+      if (step.channel === "linkedin" && step.role === "inmail") return `${step.track.branch === "win_back" ? "the win-back InMail" : "the InMail"}${on}`;
       const title = lower(stepTitle(step.track, step.channel, step.number));
       return `${title.startsWith("follow-up") ? title : `the ${title}`}${on}`;
     }
@@ -160,9 +162,31 @@ export function stepWaitWords(why: StepWaitApi, channel: TrackChannelApi): strin
       return "waiting for them to accept the LinkedIn invite";
     case "invite_pending_elsewhere":
       return "on hold: an invite to them is already pending on LinkedIn that this application didn’t send";
+    // ADR 0004 15.3: the InMail the wait's end chose, whose session can't send it now by its own report. No time.
+    case "inmail_unavailable":
+      return "waiting: your LinkedIn session can’t send an InMail now";
     default: {
       const unhandled: never = why;
       throw new Error(`A reason a step waits with no words: ${String(unhandled)}`);
+    }
+  }
+}
+
+/** Why a chosen InMail can't go now, as of its session's latest report (ADR 0004 15.5); none promises when it will. */
+function inmailUnavailableWords(cause: NonNullable<Extract<StepWhenView, { kind: "waits" }>["inmail"]>, reportedAt: string | undefined, userZone: string): string {
+  const asOf = reportedAt ? ` (as your session last reported on ${dateIn(userZone, reportedAt)})` : "";
+  switch (cause) {
+    case "no_plan":
+      return `waiting: your LinkedIn session doesn’t report Premium or Sales Navigator${asOf}, so the InMail can’t go`;
+    case "stale_report":
+      return `waiting: your LinkedIn session hasn’t reported for over a day${reportedAt ? ` (its last report was on ${dateIn(userZone, reportedAt)})` : ""}, so no InMail goes on it`;
+    case "no_holding":
+      return `waiting for an InMail credit to be free on your LinkedIn session${asOf}: other leads’ InMails hold its credits`;
+    case "unbacked":
+      return `waiting: your LinkedIn session reports fewer InMail credits${asOf} than InMails chosen before this one`;
+    default: {
+      const unhandled: never = cause;
+      throw new Error(`An InMail wait with no words: ${String(unhandled)}`);
     }
   }
 }
@@ -182,6 +206,7 @@ export function stepWhenPhrase(when: StepWhenView, userZone: string): string {
     case "waits":
       // The day an acceptance wait ends is a fact of the read, said as when the wait ends, never as when a send goes (ADR 0004 9).
       if (when.why === "awaiting_acceptance" && when.until !== undefined) return `${stepWaitWords(when.why, when.channel)}; the wait ends ${dateIn(userZone, when.until)}`;
+      if (when.why === "inmail_unavailable" && when.inmail !== undefined) return inmailUnavailableWords(when.inmail, when.reportedAt, userZone);
       return stepWaitWords(when.why, when.channel);
     // A call goes on the list on a day, never at a time of day (council on 178de98, item 3).
     case "call_day":

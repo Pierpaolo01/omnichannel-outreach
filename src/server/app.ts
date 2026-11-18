@@ -72,6 +72,8 @@ const stepBody = requestObject({
   body: z.string().max(STEP_BODY_MAX),
   threading: z.enum(["new_subject", "continue_thread"]),
   removed: z.boolean().default(false),
+  /** A LinkedIn track's InMail fallback step (ADR 0004 15.2); the validator checks where it may be. */
+  role: z.literal("inmail").optional(),
 });
 const trackBody = requestObject({
   id: z.string().trim().min(1).max(100),
@@ -112,8 +114,10 @@ function definitionFromBody(fields: Omit<z.infer<typeof definitionBody>, "save" 
   return {
     ...rest,
     ...(linkedinPool !== undefined ? { linkedinPool } : {}),
-    tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, acceptWaitDays, senders, ...t }) => ({
+    tracks: fields.tracks.map(({ declinedPath, callSkipLimitDays, acceptWaitDays, senders, steps, ...t }) => ({
       ...t,
+      // A step's role only when it has one, so a definition with none stores exactly as before (ADR 0004 15.2).
+      steps: steps.map(({ role, ...st }) => ({ ...st, ...(role !== undefined ? { role } : {}) })),
       ...(declinedPath ? { declinedPath } : {}),
       ...(callSkipLimitDays !== undefined ? { callSkipLimitDays } : {}),
       ...(acceptWaitDays !== undefined ? { acceptWaitDays } : {}),
@@ -660,9 +664,10 @@ export function createApp({ store, now, newId, engine: givenEngine, emailProvide
    */
   const withEnv = async <T>(at: number, reading: readonly SubjectState[], known: ReadonlyMap<string, SubjectState | null> | undefined, compute: (env: StepEnv) => T | Promise<T>): Promise<T> => {
     const light = await stepEnvOf(store.engine, at, reading, transport, known, false);
+    const accountLabels = await store.engine.accountLabels();
     const probe = { asked: false };
-    const first = await compute({ ...light, callRoomOn: () => ((probe.asked = true), true) });
-    return probe.asked ? compute(await stepEnvOf(store.engine, at, reading, transport, known)) : first;
+    const first = await compute({ ...light, accountLabels, callRoomOn: () => ((probe.asked = true), true) });
+    return probe.asked ? compute({ ...(await stepEnvOf(store.engine, at, reading, transport, known)), accountLabels }) : first;
   };
   // The read is this subject as the engine evaluates it at the read's instant (`previewAsOf`, the rule the controls' preview
   // already reads through: the engine's own `asOfAction`): a track

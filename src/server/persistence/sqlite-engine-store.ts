@@ -11,7 +11,7 @@ import { emptyDefinition, poolOf, type CampaignDefinition, type ConversationChan
 import { callableOnDay, skipDeadlineOf, skipLimitOf } from "../../domain/sequence/calls.ts";
 import { bindingUnsent, deriveStatus, releaseUnsentBindings } from "../../domain/sequence/progress.ts";
 import { maySend, occupyingKeys } from "../../domain/sequence/attempt.ts";
-import type { ConversationCause, ImportedAddress, LeadFacts, LinkedinSkipCause } from "../../domain/sequence/state.ts";
+import type { ConversationCause, ImportedAddress, InmailStanding, InmailState, LeadFacts, LinkedinSkipCause } from "../../domain/sequence/state.ts";
 import type {
   AccountState,
   Attempt,
@@ -282,7 +282,7 @@ export class SqliteEngineStore implements EngineStore {
           atWall: num(r, "at_wall"),
         })),
         attempts: rows(
-          `SELECT a.subject_id, e.kind, a.track_id, a.step_id, a.state, a.action, w.sent_wall, s.channel FROM engine_subjects e JOIN attempts a ON a.subject_id = e.id
+          `SELECT a.subject_id, e.kind, a.track_id, a.step_id, a.state, CASE WHEN a.inmail = 1 THEN 'inmail' ELSE a.action END AS action, w.sent_wall, s.channel FROM engine_subjects e JOIN attempts a ON a.subject_id = e.id
              JOIN sender_accounts s ON s.id = a.account_id LEFT JOIN provider_work w ON w.key = a.idempotency_key ${and} a.handed_wall IS NOT NULL`,
         ).map((r) => ({ subjectId: str(r, "subject_id"), test: test(r), channel: str(r, "channel"), trackId: str(r, "track_id"), stepId: str(r, "step_id"), state: str(r, "state"), sentWall: numOrNull(r, "sent_wall"), action: strOrNull(r, "action") })),
         acceptances: rows(`SELECT t.subject_id, e.kind, t.track_id FROM engine_subjects e JOIN track_progress t ON t.subject_id = e.id ${and} t.accepted_wall IS NOT NULL`).map((r) => ({
@@ -812,7 +812,7 @@ export class SqliteEngineStore implements EngineStore {
     return this.sql("SELECT * FROM reply_events WHERE state = 'pending' ORDER BY received_wall, event_id").all().map(toReplyEvent);
   }
 
-  async upsertAccounts(accounts: readonly SenderAccountConfig[]): Promise<void> {
+  async upsertAccounts(accounts: readonly SenderAccountConfig[], now = 0): Promise<void> {
     this.transaction(() => {
       for (const a of accounts) {
         this.run(
@@ -824,6 +824,14 @@ export class SqliteEngineStore implements EngineStore {
            WHERE sender_accounts.channel = excluded.channel`,
           [a.id, a.channel, a.label, a.capacity, a.gapMs, a.k, a.healthy ? 1 : 0, a.healthy ? null : (a.problem ?? "unhealthy"), a.resetZone, a.dailyLimit, isMessageRequestChannel(a.channel) ? (a.socialKind ?? null) : null],
         );
+        // A LinkedIn session's InMail report (ADR 0004 15.5), with when it was read: kept until the session reports again.
+        if (a.channel === "linkedin" && a.inmail !== undefined) {
+          const report = a.inmail;
+          this.run(
+            `UPDATE sender_accounts SET inmail_plan = ?, inmail_credits = ?, inmail_reported_wall = ? WHERE id = ? AND channel = 'linkedin'`,
+            [report?.plan ?? null, report?.credits ?? null, now, a.id],
+          );
+        }
       }
     });
   }
@@ -1171,7 +1179,7 @@ export class SqliteEngineStore implements EngineStore {
       channel,
       capacity,
       dailyLimit,
-      ...(social ? { kinds: social.kinds, notes: social.notes } : {}),
+      ...(social ? { kinds: social.kinds, notes: social.notes, inmail: this.inmailStanding(id, a) } : {}),
       ...(isMessageRequestChannel(channel) && a["social_kind"] != null ? { socialKind: str(a, "social_kind") as SocialSenderKind } : {}),
       // From the daily limit, not today's room: a day other senders used up does not change the pacing (council on PR 63).
       gapMs: numOrNull(a, "gap_ms") ?? defaultGap(this.windowsServedBy(id, channel), dailyLimit),
@@ -1219,6 +1227,31 @@ export class SqliteEngineStore implements EngineStore {
       kinds: { invite: { capacity: cap("invites_per_day"), used: usedOf("invite") }, message: { capacity: cap("messages_per_day"), used: usedOf("message") } },
       notes: { capacity: cap("notes_per_month"), used: notesUsed },
     };
+  }
+
+  /**
+   * A LinkedIn session's InMail standing (ADR 0004 15.5): its last report, the InMails that report cannot include yet (work
+   * unsettled, or sent at or after the report: a claim's reservation, work handed and not settled, a send since), and the
+   * InMails running tracks chose on it whose work is not out (none yet, or only work that settled not sent).
+   */
+  private inmailStanding(id: string, account: Row): InmailStanding {
+    const plan = strOrNull(account, "inmail_plan") as InmailStanding["plan"];
+    const reportedWall = numOrNull(account, "inmail_reported_wall");
+    const credits = numOrNull(account, "inmail_credits") ?? 0;
+    // A session that never reported, or reports no plan, can back no InMail: no holding to count.
+    if (plan !== "premium" && plan !== "sales_navigator") return { plan, credits, reportedWall, holdings: [] };
+    // Every credit held on the session (15.5), earliest acquired first, but those the report already includes: an InMail sent
+    // before the report was read.
+    const holdings = this.sql(
+      `SELECT t.subject_id, t.track_id, t.inmail_hold_wall FROM track_progress t
+         WHERE t.inmail_session = :id AND t.inmail_hold_wall IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM provider_work w WHERE w.subject_id = t.subject_id AND w.track_id = t.track_id AND w.inmail = 1
+             AND (w.settled IN ('sent', 'user_sent') OR w.sent_wall IS NOT NULL) AND COALESCE(w.sent_wall, w.first_handed_wall, 0) < :reported)
+         ORDER BY t.inmail_hold_wall, t.subject_id, t.track_id`,
+    )
+      .all({ id, reported: reportedWall ?? 0 })
+      .map((r) => ({ key: `${str(r, "subject_id")}|${str(r, "track_id")}`, acquiredWall: num(r, "inmail_hold_wall") }));
+    return { plan, credits, reportedWall, holdings };
   }
 
   async allowances(accountId: string): Promise<SocialAllowances | null> {
@@ -1705,12 +1738,13 @@ export class SqliteEngineStore implements EngineStore {
         `INSERT OR REPLACE INTO track_progress (subject_id, track_id, start_at, start_basis_at, start_basis_wall, start_zone, started_at,
            destination_detail_id, next_step_id, basis_at, basis_wall, due_at, due_wall, due_zone, finished_at, finished_wall, finish_reason, conversation_owners,
            connection, connected_at, connected_wall, accepted_wall, accept_by, accept_by_wall, accept_by_zone, invite_withdrawal, invite_withdrawal_last_wall,
-           invite_withdrawal_unknowns, connection_checks, accept_by_days, skip_cause)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           invite_withdrawal_unknowns, connection_checks, accept_by_days, skip_cause, inmail, inmail_session, inmail_hold_wall, inmail_reported_wall, inmail_replaces)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id, t.trackId, t.startAt, t.startBasisAt, t.startBasisWall, t.startZone, t.startedAt, t.destinationDetailId, t.nextStepId, t.basisAt, t.basisWall, t.dueAt, t.dueWall, t.dueZone, t.finishedAt, t.finishedWall, t.finishReason, t.conversationOwners ? JSON.stringify(t.conversationOwners) : null,
           t.connection ?? null, t.connectedAt ?? null, t.connectedWall ?? null, t.acceptedWall ?? null, t.acceptBy ?? null, t.acceptByWall ?? null, t.acceptByZone ?? null, t.inviteWithdrawal ?? null, t.inviteWithdrawalLastWall ?? null,
           t.inviteWithdrawalUnknowns ?? 0, t.connectionChecks ? JSON.stringify(t.connectionChecks) : null, t.acceptByDays ?? null, t.skipCause ?? null,
+          t.inmail ?? null, t.inmailSession ?? null, t.inmailHoldWall ?? null, t.inmailReportedWall ?? null, t.inmailReplaces ?? null,
         ],
       );
       // Stored once and only forward (ADR 0004 10.4): a connection never changes once set, a withdrawal never moves back.
@@ -1718,6 +1752,8 @@ export class SqliteEngineStore implements EngineStore {
       if ((was?.connection ?? null) !== null && was?.connection !== t.connection) throw new Error(`a track's connection is set once (${t.trackId})`);
       // The deadline is stored once: it moves only with the wait it was resolved from (an edit), never on its own.
       if (was?.acceptBy != null && t.acceptBy !== was.acceptBy && t.acceptByDays === was.acceptByDays) throw new Error(`an acceptance deadline moves only with an edit of its wait (${t.trackId})`);
+      // The InMail state too (ADR 0004 15.10): null to any, then only from `chosen`, and never back to null.
+      if ((was?.inmail ?? null) !== null && t.inmail !== was?.inmail && (was?.inmail !== "chosen" || (t.inmail ?? null) === null)) throw new Error(`a track's InMail state only moves forward (${t.trackId})`);
       const order = { wanted: 1, withdrawn: 2, accepted_first: 2, kept_by_user: 2 } as const;
       if (was?.inviteWithdrawal && (!t.inviteWithdrawal || order[t.inviteWithdrawal] < order[was.inviteWithdrawal] || (order[was.inviteWithdrawal] === 2 && t.inviteWithdrawal !== was.inviteWithdrawal))) throw new Error(`an invite's withdrawal only moves forward (${t.trackId})`);
     }
@@ -1743,13 +1779,13 @@ export class SqliteEngineStore implements EngineStore {
       changed = true;
       this.run(
         `INSERT INTO provider_work (key, subject_id, track_id, step_id, account_id, destination, calls, first_handed_wall, provider_ref, settled,
-           sent_wall, sent_day, next_lookup_wall, lookup_answer, queued_lookups, unresolved_since, withdraw_wanted, withdraw_last_wall, went_wall, kind, note)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           sent_wall, sent_day, next_lookup_wall, lookup_answer, queued_lookups, unresolved_since, withdraw_wanted, withdraw_last_wall, went_wall, kind, note, inmail)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET calls = excluded.calls, first_handed_wall = excluded.first_handed_wall, provider_ref = excluded.provider_ref,
            settled = excluded.settled, sent_wall = excluded.sent_wall, sent_day = excluded.sent_day, next_lookup_wall = excluded.next_lookup_wall,
            lookup_answer = excluded.lookup_answer, queued_lookups = excluded.queued_lookups, unresolved_since = excluded.unresolved_since,
            withdraw_wanted = excluded.withdraw_wanted, withdraw_last_wall = excluded.withdraw_last_wall, went_wall = excluded.went_wall, note = excluded.note`,
-        [w.key, id, w.trackId, w.stepId, w.accountId, w.destination, w.calls, w.firstHandedWall, w.providerRef, w.settled, w.sentWall, w.sentDay, w.nextLookupWall, w.lookupAnswer, w.queuedLookups, w.unresolvedSince, w.withdrawWanted ? 1 : 0, w.withdrawLastWall, w.wentWall, w.kind ?? null, w.note ?? null],
+        [w.key, id, w.trackId, w.stepId, w.accountId, w.destination, w.calls, w.firstHandedWall, w.providerRef, w.settled, w.sentWall, w.sentDay, w.nextLookupWall, w.lookupAnswer, w.queuedLookups, w.unresolvedSince, w.withdrawWanted ? 1 : 0, w.withdrawLastWall, w.wentWall, w.kind ?? null, w.note ?? null, w.inmail === true ? 1 : 0],
       );
     }
     if (base.work.some((b) => !next.work.some((w) => w.key === b.key))) throw new Error("provider work is never deleted");
@@ -1759,8 +1795,8 @@ export class SqliteEngineStore implements EngineStore {
       this.run(
         `INSERT INTO attempts (id, subject_id, track_id, step_id, account_id, destination_detail_id, destination, state, copy, threading, thread_ref,
            retryable, not_sent_final, idempotency_key, calls, claimed_wall, handed_at, handed_wall, last_call_wall, presend_checked_wall,
-           presend_found_reply, ended_by, withdraw_requested, withdraw_called, awaiting_answer, retry, reject_reason, action)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           presend_found_reply, ended_by, withdraw_requested, withdraw_called, awaiting_answer, retry, reject_reason, action, inmail)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET state = excluded.state, copy = excluded.copy, thread_ref = excluded.thread_ref,
            calls = excluded.calls, handed_at = excluded.handed_at, handed_wall = excluded.handed_wall,
            last_call_wall = excluded.last_call_wall, presend_checked_wall = excluded.presend_checked_wall, presend_found_reply = excluded.presend_found_reply,
@@ -1770,7 +1806,9 @@ export class SqliteEngineStore implements EngineStore {
         [
           a.id, id, a.trackId, a.stepId, a.accountId, a.destinationDetailId, a.destination, a.state, a.copy ? JSON.stringify(a.copy) : null, a.threading, a.threadRef,
           a.retryable ? 1 : 0, a.notSentIsFinal ? 1 : 0, a.idempotencyKey, a.calls, a.claimedWall, a.handedAt, a.handedWall, a.lastCallWall, a.presendCheckedWall,
-          a.presendFoundReply ? 1 : 0, a.endedBy, a.withdrawRequested ? 1 : 0, a.withdrawCalled ? 1 : 0, a.awaitingAnswer ? 1 : 0, a.retry, a.rejectReason, a.action ?? null,
+          a.presendFoundReply ? 1 : 0, a.endedBy, a.withdrawRequested ? 1 : 0, a.withdrawCalled ? 1 : 0, a.awaitingAnswer ? 1 : 0, a.retry, a.rejectReason,
+          // An InMail is message work marked as one (ADR 0004 15.10): the action column keeps the allowance it counts on.
+          a.action === undefined ? null : a.action === "inmail" ? "message" : a.action, a.action === "inmail" ? 1 : 0,
         ],
       );
     }
@@ -2010,6 +2048,7 @@ function toTrack(r: Row): TrackProgress {
     ...(r["accept_by"] == null ? {} : { acceptBy: num(r, "accept_by"), acceptByWall: numOrNull(r, "accept_by_wall"), acceptByZone: strOrNull(r, "accept_by_zone"), acceptByDays: numOrNull(r, "accept_by_days") }),
     ...(r["invite_withdrawal"] == null ? {} : { inviteWithdrawal: str(r, "invite_withdrawal") as NonNullable<TrackProgress["inviteWithdrawal"]>, inviteWithdrawalLastWall: numOrNull(r, "invite_withdrawal_last_wall"), inviteWithdrawalUnknowns: num(r, "invite_withdrawal_unknowns") }),
     ...(r["connection_checks"] == null ? {} : { connectionChecks: JSON.parse(str(r, "connection_checks")) as NonNullable<TrackProgress["connectionChecks"]> }),
+    ...(r["inmail"] == null ? {} : { inmail: str(r, "inmail") as InmailState, inmailSession: strOrNull(r, "inmail_session"), inmailHoldWall: numOrNull(r, "inmail_hold_wall"), inmailReportedWall: numOrNull(r, "inmail_reported_wall"), inmailReplaces: strOrNull(r, "inmail_replaces") }),
   };
 }
 
@@ -2043,7 +2082,7 @@ function toAttempt(r: Row): Attempt {
     awaitingAnswer: num(r, "awaiting_answer") === 1,
     retry: str(r, "retry") as Attempt["retry"],
     rejectReason: strOrNull(r, "reject_reason") as RejectReason | null,
-    ...(r["action"] == null ? {} : { action: str(r, "action") === "invite" ? ("invite" as const) : ("message" as const) }),
+    ...(r["action"] == null ? {} : { action: str(r, "action") === "invite" ? ("invite" as const) : num(r, "inmail") === 1 ? ("inmail" as const) : ("message" as const) }),
   };
 }
 
@@ -2069,6 +2108,7 @@ function toWork(r: Row): ProviderWork {
     withdrawLastWall: numOrNull(r, "withdraw_last_wall"),
     wentWall: numOrNull(r, "went_wall"),
     ...(r["kind"] == null ? {} : { kind: str(r, "kind") === "invite" ? ("invite" as const) : ("message" as const), note: strOrNull(r, "note") as "with" | "withheld" | "none" | null }),
+    ...(num(r, "inmail") === 1 ? { inmail: true } : {}),
   };
 }
 
