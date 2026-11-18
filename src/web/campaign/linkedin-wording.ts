@@ -144,8 +144,11 @@ export function inmailLine(view: Pick<LinkedinTrackView, "inmail" | "inviteOpen"
     // Recorded sent with no sent work in the read: a send the user marked, as the result says.
     case "sent":
       return `No acceptance was recorded within the track’s wait, so the InMail went instead${inmail.sentAt ? ` on ${dateIn(userZone, inmail.sentAt)}` : ""}${inmail.sentFrom ? `, from ${inmail.sentFrom}` : ""}. The first message isn’t sent; the follow-ups wait their days from the InMail.${open}`;
+    // From the stored facts (the verifier on f6bf9a3): an InMail handed over and since confirmed not sent is said as such.
     case "accepted":
-      return "They accepted the invite after the wait ended and before any InMail was handed over, so none was sent; the first message follows their acceptance.";
+      return inmail.handedOver
+        ? "An InMail was handed to the LinkedIn session after the wait ended, and it is confirmed it wasn’t sent; they accepted the invite, so the first message follows their acceptance."
+        : "They accepted the invite after the wait ended and before any InMail was handed over, so none was sent; the first message follows their acceptance.";
     case "no_plan":
       return inmail.reportedAt ? `The InMail fallback didn’t go: when the wait ended, the session that sent the invite didn’t report Premium or Sales Navigator, ${asReported}.` : "The InMail fallback didn’t go: when the wait ended, the session that sent the invite had reported nothing about InMail.";
     case "no_credit":

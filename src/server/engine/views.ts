@@ -415,6 +415,9 @@ function inmailView(s: SubjectState, trackId: string, labels: Readonly<Record<st
     on: track ? inmailStepOf(track) !== null : false,
     state: p?.inmail ?? null,
     work: sent ? "sent" : work.some((w) => w.settled === null) ? "handed" : null,
+    // Whether any InMail work was ever handed over, whatever became of it (the verifier on f6bf9a3): a skip for an
+    // acceptance says so when it was.
+    handedOver: work.length > 0,
     sentAt: result ? new Date(result.atWall).toISOString() : sentWork?.sentWall != null ? new Date(sentWork.sentWall).toISOString() : null,
     // The session it went from, from the sent work's own account: a sentence about what went names it (ADR 0004 15.7).
     sentFrom: sentWork ? (labels[sentWork.accountId] ?? sentWork.accountId) : null,

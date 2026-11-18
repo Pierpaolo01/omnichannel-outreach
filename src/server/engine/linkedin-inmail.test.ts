@@ -663,6 +663,7 @@ describe("an acceptance while the InMail is uncertain (council on d6ad9f5, item 
     const w = await world({ plan: "premium", credits: 1 });
     w.h.linkedin.profiles.set(PAT, { acceptAfterMs });
     const c = await w.campaign([linkedin(FALLBACK, OFFICE)], PAT_ONLY);
+    const campaignId = c.id;
     await w.h.advanceTo(MONDAY_9 + 2 * H);
     w.h.linkedin.profiles.set(PAT, { acceptAfterMs, unknownUnsent: 1 });
     const pat = c.lead("Pat Oneil");
@@ -672,11 +673,17 @@ describe("an acceptance while the InMail is uncertain (council on d6ad9f5, item 
       const a = st?.attempts.find((x) => x.stepId === "im");
       return { attempt: a, work: st?.work.find((x) => x.key === a?.idempotencyKey) };
     };
-    return { ...w, pat, control, inmailWork };
+    /** What the record says of the InMail, from the read (the verifier on f6bf9a3: from the stored facts). */
+    const said = async () => {
+      const read = (await w.h.request<{ tracks: TrackProgressView[]; status: OutreachStatus }>("GET", `/api/enrollments/${pat}`)).body;
+      return linkedinTrackLines(read.tracks.find((t) => t.trackId === "li")!, read.status, "Europe/London").join(" ");
+    };
+    return { ...w, pat, control, inmailWork, said, campaignId };
   }
+  const HANDED_THEN_ACCEPTED = "An InMail was handed to the LinkedIn session after the wait ended, and it is confirmed it wasn’t sent; they accepted the invite, so the first message follows their acceptance.";
 
   test("accepted while the InMail is uncertain, then marked not sent: the acceptance applies in that write, and the first message follows", async () => {
-    const { h, pat, track, delivered, inmailWork } = await uncertain();
+    const { h, pat, track, delivered, inmailWork, said } = await uncertain();
     await h.advanceTo(WEDNESDAY_0 + 9 * H + 30 * MIN);
     expect((await track(pat))?.acceptedWall).not.toBeNull();
     expect((await track(pat))?.inmail).toBe("chosen");
@@ -686,6 +693,8 @@ describe("an acceptance while the InMail is uncertain (council on d6ad9f5, item 
     expect(await h.engine.markAttempt(attempt!.id, "not_sent")).toBe(true);
     // Settled, and connected in the same write, before any other check of the InMail.
     expect(await track(pat)).toMatchObject({ inmail: "accepted", connection: "accepted", inmailHoldWall: null });
+    expect(await said()).toContain(HANDED_THEN_ACCEPTED);
+    expect(await said()).not.toMatch(/before any InMail was handed over/);
     await h.advanceTo(WEDNESDAY_0 + 10 * DAY);
     expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1", "m2", "m3"]);
   });
@@ -706,7 +715,7 @@ describe("an acceptance while the InMail is uncertain (council on d6ad9f5, item 
 
   test("settled not sent first (while stopped), accepted afterwards, then restarted: the acceptance applies, and no InMail goes", async () => {
     // Pat accepts on Thursday, after the InMail's work is marked not sent on Wednesday.
-    const { h, pat, track, delivered, control, inmailWork } = await uncertain(3 * DAY + 2 * H);
+    const { h, pat, track, delivered, control, inmailWork, said } = await uncertain(3 * DAY + 2 * H);
     await h.advanceTo(WEDNESDAY_0 + 9 * H + 30 * MIN);
     expect((await control("stop")).status).toBe(200);
     await h.advanceTo(WEDNESDAY_0 + 18 * H);
@@ -715,9 +724,76 @@ describe("an acceptance while the InMail is uncertain (council on d6ad9f5, item 
     expect((await track(pat))?.inmailHoldWall ?? null).toBeNull();
     await h.advanceTo(WEDNESDAY_0 + 2 * DAY);
     expect(await track(pat)).toMatchObject({ inmail: "accepted", connection: "accepted" });
+    expect(await said()).toContain(HANDED_THEN_ACCEPTED);
     expect((await control("resume_from_next_step")).status).toBe(200);
     await h.advanceTo(WEDNESDAY_0 + 10 * DAY);
     expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1", "m2", "m3"]);
+  });
+
+  // The review bot on f6bf9a3: an edit while accepted and uncertain must not end the track before the acceptance applies.
+  const switchedOff = definition([linkedin(FALLBACK.map((s) => (s.role === "inmail" ? { ...s, removed: true } : s)), OFFICE)]);
+  const settleByMark = async (h: EngineHarness, attemptId: string) => expect(await h.engine.markAttempt(attemptId, "not_sent")).toBe(true);
+
+  test("accepted while uncertain, the fallback then switched off, then marked not sent: connected, and both messages go", async () => {
+    const { h, pat, track, delivered, inmailWork, campaignId } = await uncertain();
+    await h.advanceTo(WEDNESDAY_0 + 9 * H + 30 * MIN);
+    expect((await h.request("PUT", `/api/campaigns/${campaignId}/sequence`, switchedOff)).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 18 * H);
+    await settleByMark(h, (await inmailWork()).attempt!.id);
+    expect(await track(pat)).toMatchObject({ inmail: "accepted", connection: "accepted", finishReason: null });
+    await h.advanceTo(WEDNESDAY_0 + 10 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1", "m2", "m3"]);
+  });
+
+  test("the same, settled by the session's late definite refusal instead of a mark: connected, and both messages go", async () => {
+    const { h, pat, track, delivered, inmailWork, campaignId } = await uncertain();
+    await h.advanceTo(WEDNESDAY_0 + 9 * H + 30 * MIN);
+    expect((await h.request("PUT", `/api/campaigns/${campaignId}/sequence`, switchedOff)).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 11 * H);
+    h.linkedin.refuseLate((await inmailWork()).work!.key);
+    await h.advanceTo(WEDNESDAY_0 + 11 * H + 10 * MIN);
+    expect((await inmailWork()).work?.settled).toBe("rejected");
+    expect(await track(pat)).toMatchObject({ inmail: "accepted", connection: "accepted", finishReason: null });
+    await h.advanceTo(WEDNESDAY_0 + 10 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1", "m2", "m3"]);
+  });
+
+  test("the same with a stop and restart between the edit and the settlement: connected, and both messages go after the restart", async () => {
+    const { h, pat, track, delivered, inmailWork, campaignId, control } = await uncertain();
+    await h.advanceTo(WEDNESDAY_0 + 9 * H + 30 * MIN);
+    expect((await h.request("PUT", `/api/campaigns/${campaignId}/sequence`, switchedOff)).status).toBe(200);
+    expect((await control("stop")).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 12 * H);
+    expect((await control("resume_from_next_step")).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 18 * H);
+    await settleByMark(h, (await inmailWork()).attempt!.id);
+    expect(await track(pat)).toMatchObject({ inmail: "accepted", connection: "accepted", finishReason: null });
+    await h.advanceTo(WEDNESDAY_0 + 10 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1", "m2", "m3"]);
+  });
+
+  test("the fallback switched off before the acceptance, both while the InMail is uncertain, then marked not sent: connected, and both messages go", async () => {
+    // Accepted at 11:00, after the 09:30 switch-off.
+    const { h, pat, track, delivered, inmailWork, campaignId } = await uncertain(2 * DAY + 2 * H);
+    await h.advanceTo(WEDNESDAY_0 + 9 * H + 30 * MIN);
+    expect((await h.request("PUT", `/api/campaigns/${campaignId}/sequence`, switchedOff)).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 18 * H);
+    expect((await track(pat))?.acceptedWall).not.toBeNull();
+    await settleByMark(h, (await inmailWork()).attempt!.id);
+    expect(await track(pat)).toMatchObject({ inmail: "accepted", connection: "accepted", finishReason: null });
+    await h.advanceTo(WEDNESDAY_0 + 10 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1", "m2", "m3"]);
+  });
+
+  test("the sibling: the whole LinkedIn track removed while accepted and uncertain, then marked not sent: connected, not ended on the withdrawal path", async () => {
+    const { h, pat, track, inmailWork, campaignId } = await uncertain();
+    await h.advanceTo(WEDNESDAY_0 + 9 * H + 30 * MIN);
+    expect((await h.request("PUT", `/api/campaigns/${campaignId}/sequence`, definition([{ ...linkedin(FALLBACK, OFFICE), removed: true }]))).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 18 * H);
+    await settleByMark(h, (await inmailWork()).attempt!.id);
+    const t = await track(pat);
+    expect(t).toMatchObject({ inmail: "accepted", connection: "accepted" });
+    expect(t?.finishReason).not.toBe("invite_not_accepted");
   });
 
   test("connected at the InMail's own check, the acceptance not yet reported: no InMail, the track connects in that write, and it never loops", async () => {

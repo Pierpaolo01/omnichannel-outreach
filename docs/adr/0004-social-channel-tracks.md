@@ -913,6 +913,12 @@ Both no-change digests are equal on `b4e2e8c` and here (the simulated provider's
 4. **What went is said from the work.** An InMail confirmed sent after its track stopped moving (stopped and won back, marked replied, or its track removed) said "It hasn't gone", read from the track's `chosen`. The sentence now reads the sent work, names the session from that work's account, and keeps the follow-up clause only where the track moved past the InMail. The invite's sentences already read its work (`invitingWork`). Tests through HTTP for the three lifecycles.
 5. **The running-edit preview** counts a lead still waiting for acceptance as one the InMail may reach (switched on) or may not (switched off), said as that condition, and names the step by its stored kind (15.8). Tests on the read and through the screen.
 
+### 15.19 The review bot and the verifier on `f6bf9a3`, and ticket 26's merge
+
+- **An acceptance recorded while the InMail was uncertain applies before the pending step is aligned** (review bot, blocking). `attend` ran `alignPending` first, so an edit made while the work was uncertain (the fallback switched off) ended the track on the withdrawal path before the acceptance took effect, and the person who accepted got no messages. The acceptance now applies first, by the same transition (15.18 item 2). Tests through HTTP: switched off after the acceptance and settled by the mark, by the session's late definite refusal, and across a stop and restart; switched off before the acceptance; and the whole track removed. The four switch-off cases fail without the change.
+- **The skip's sentence after an acceptance during uncertain work** (verifier). It said "before any InMail was handed over" where one had been. When the skipped InMail has work with a handover time, the record now says that an InMail was handed over, that it is confirmed it wasn't sent, and that they accepted; the earlier sentence only when no InMail work was handed over. The Test run tab's "you accepted the test invite before the InMail went" and Activity's "No InMail: they accepted the invite before it went" stay true either way.
+- **Ticket 26's merge** (`c633f73`): this migration is 27, its upgrade fixture written by `c633f73`'s own code, and this section is 15 (ticket 26 took 14).
+
 ## The review of `194fc44` (council, review bot and verifier, 16 November 2026)
 
 Fifteen items, each reproduced first as a failing test through HTTP (`src/server/engine/linkedin-review.test.ts`) unless it says otherwise.

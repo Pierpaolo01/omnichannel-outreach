@@ -745,7 +745,10 @@ function carrierOf(state: SubjectState, key: string): Attempt | undefined {
  * or the user settles it.
  */
 export function attend(state: SubjectState, now: number): SubjectState {
-  return releaseSettledHolds(applySettledAcceptances(alignPending(attendWork(state, now), now), now));
+  // A recorded acceptance first, then the pending step's alignment (review bot on f6bf9a3): an edit that switched the
+  // fallback off, or removed the InMail or its track, while the InMail's work was uncertain must not end the track on the
+  // withdrawal path before the acceptance it already had takes effect.
+  return releaseSettledHolds(alignPending(applySettledAcceptances(attendWork(state, now), now), now));
 }
 
 /**

@@ -661,7 +661,7 @@ export interface LinkedinTrackView {
    * the InMail's own work, `sent` once recorded sent, `handed` while with the session and not known to have gone; `sentAt`,
    * its send's instant once recorded.
    */
-  readonly inmail: { readonly on: boolean; readonly state: import("../domain/sequence/state.ts").InmailState | null; readonly work: "sent" | "handed" | null; readonly sentAt: string | null; /** The session the InMail went from, by its label: from the sent work (15.7). */ readonly sentFrom: string | null; /** The instant of the session's report the expiry judged on (15.5). */ readonly reportedAt: string | null };
+  readonly inmail: { readonly on: boolean; readonly state: import("../domain/sequence/state.ts").InmailState | null; readonly work: "sent" | "handed" | null; readonly sentAt: string | null; /** The session the InMail went from, by its label: from the sent work (15.7). */ readonly sentFrom: string | null; /** Any InMail work was handed over, whatever became of it. */ readonly handedOver: boolean; /** The instant of the session's report the expiry judged on (15.5). */ readonly reportedAt: string | null };
 }
 
 /**

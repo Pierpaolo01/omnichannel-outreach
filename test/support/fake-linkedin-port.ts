@@ -219,6 +219,12 @@ export class FakeLinkedInPort implements SendPort {
     return Promise.resolve(lost ? { kind: "unknown" } : { kind: "accepted", providerRef });
   }
 
+  /** A definite refusal the session reports late for work it answered `unknown` (and never sent): reported now. */
+  refuseLate(key: string, reason: "rate_limited" | "payment_required" = "rate_limited"): void {
+    this.refusals.push({ at: this.now(), key, destination: this.handoverLog.find((x) => x.key === key)?.destination ?? "", reason });
+    this.emit(this.now(), { id: `rejected-${key}`, kind: "rejected", key, providerRef: "", reason });
+  }
+
   private emit(visibleAt: number, event: ProviderEvent): void {
     this.events.push({ visibleAt: Math.max(visibleAt, this.now()), event });
   }
