@@ -21,10 +21,11 @@ export const LINKEDIN_SEED = 24000;
 // seed of the mutation "no allowance reads as full for the day".
 // 10 (the review bot on 0922582): the removal of a started LinkedIn track, drawn since, changed what 8 and 93 go on to do; 10
 // reaches the two behaviours they no longer did (a pair released then invited by another, a second invite after a withdrawal).
-// Ticket 27 (ADR 0004 14.11, 14.16 and 14.17): after ticket 25's merge and the draws for the review bot on 56030c4, a greedy
-// cover by cost of every behaviour below over offsets 0 to 50, keeping 10, 15, 46, 69, 73 and 93 and the search's two seeds
-// on 56030c4 (71 and 84, the record's errors): 4, 8, 16, 18, 30, 32 and 42 (about 150 seconds of runs on a developer machine).
-export const LINKEDIN_FIXED_SEEDS: readonly number[] = [4, 8, 10, 15, 16, 18, 30, 32, 42, 46, 69, 71, 73, 84, 93];
+// Ticket 27 (ADR 0004 14.11 and 14.16 to 14.18): after ticket 25's merge and the draws for the review bot on 56030c4 and the
+// council on d6ad9f5, a greedy cover by cost of every behaviour below over offsets 0 to 50, keeping 10, 15, 46, 69, 73 and
+// 93 and the search's two seeds on 56030c4 (71 and 84, the record's errors): 4, 8, 16, 18, 23, 30, 35, 42, 44 and 49 (about
+// 180 seconds of runs on a developer machine).
+export const LINKEDIN_FIXED_SEEDS: readonly number[] = [4, 8, 10, 15, 16, 18, 23, 30, 35, 42, 44, 46, 49, 69, 71, 73, 84, 93];
 /** Every behaviour the fixed seeds must reach (`stats.features`); a run that reports a name not listed here fails. */
 export const LINKEDIN_FEATURES: readonly string[] = [
   "a-campaign-paused",
@@ -54,7 +55,10 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "a-report-between-an-inmail-claim-and-its-handover:no_credit",
   "a-report-between-an-inmail-claim-and-its-handover:no_plan",
   "a-restart-after-another-took-a-credit",
+  "a-running-edit-before-the-choice:insert",
+  "a-running-edit-before-the-choice:remove",
   "a-running-edit-while-an-inmail-is-chosen:remove",
+  "a-running-edit-while-an-inmail-is-chosen:reorder",
   "a-running-edit:insert",
   "a-running-edit:remove",
   "a-running-edit:reorder",
@@ -75,7 +79,9 @@ export const LINKEDIN_FEATURES: readonly string[] = [
   "a-third-session",
   "a-withdrawal-answered-unknown",
   "already-connected",
+  "an-acceptance-after-the-inmail-settled-unsent",
   "an-acceptance-before-the-inmail-went",
+  "an-acceptance-while-the-inmail-was-uncertain",
   "an-answer-of-one-session",
   "an-edit-of-the-wait-while-waiting",
   "an-expiry-while-the-laptop-was-off",
@@ -118,13 +124,12 @@ export const LINKEDIN_FEATURES: readonly string[] = [
  *   handed over");
  * - an InMail judged on a stale report, and the withdrawal path after it (`linkedin-inmail.test.ts`, "a session not read for
  *   over a day at the expiry");
- * - a message inserted, and a follow-up moved before the replaced step, while an InMail is chosen (`linkedin-inmail.test.ts`,
- *   "kept steps around the replaced one").
+ * - a message inserted before the replaced step while an InMail is chosen (`linkedin-inmail.test.ts`, "kept steps around
+ *   the replaced one").
  * `sequence-runs-linkedin-registry.test.ts` requires these two lists to hold every name a run can report, each once.
  */
 export const LINKEDIN_OTHER_FEATURES: readonly string[] = [
   "a-running-edit-while-an-inmail-is-chosen:insert",
-  "a-running-edit-while-an-inmail-is-chosen:reorder",
   "a-withdrawal-found-it-accepted",
   "an-inmail-on-a-stale-report",
   "the-fallback-switched-off-while-an-inmail-waits",
