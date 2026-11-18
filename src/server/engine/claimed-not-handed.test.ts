@@ -1,6 +1,8 @@
 import { describe, expect, test } from "vitest";
 import { linkedinAccountId, socialAccountId } from "./ports.ts";
 import { Crash, EngineHarness } from "../../../test/support/engine-harness.ts";
+import { everyChannelSessions, everyPersonAccountCell } from "../../../test/support/message-request-accounts.ts";
+import { isMessageRequestChannel, MESSAGE_REQUEST_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { LeadSearchResult, RecordControls } from "../../shared/api.ts";
@@ -24,10 +26,10 @@ const IG = "ig-session-1";
 
 const HARBOUR = business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" });
 const PEOPLE = ["Pat Oneil", "Nia Cole"].map((name, i) =>
-  person({ person_id: `p${i}`, business_id: "b1", full_name: name, email: `p${i}@harbour.example`, dial_phone: `+44770090010${i}`, dial_phone_type: "mobile", linkedin_url: `https://www.linkedin.com/in/fictional-claimed-${i}`, instagram: `https://www.instagram.com/example_claimed_${i}` }),
+  person({ person_id: `p${i}`, business_id: "b1", full_name: name, email: `p${i}@harbour.example`, dial_phone: `+44770090010${i}`, dial_phone_type: "mobile", linkedin_url: `https://www.linkedin.com/in/fictional-claimed-${i}`, ...everyPersonAccountCell(`claimed.${i}`) }),
 );
 
-type Channel = "email" | "sms" | "linkedin" | "instagram";
+type Channel = "email" | "sms" | "linkedin" | MessageRequestChannel;
 const stepOf = (id: string, channel: Channel): StepDefinition => ({ id, waitDays: 0, subject: channel === "email" ? "Hello {{first_name|there}}" : "", body: "Hello {{first_name|there}}.", threading: "new_subject", removed: false });
 const FROM_TEN = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 10, end: 24 }));
 const definition = (channel: Channel, window = ALWAYS): CampaignDefinition => {
@@ -40,7 +42,7 @@ const definition = (channel: Channel, window = ALWAYS): CampaignDefinition => {
     start: { kind: "entry" },
     removed: false,
     ...(channel === "linkedin" ? { acceptWaitDays: 3 } : {}),
-    ...(channel === "instagram" ? { senders: [socialAccountId("instagram", IG)] } : {}),
+    ...(isMessageRequestChannel(channel) ? { senders: [socialAccountId(channel, IG)] } : {}),
   };
   return { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [N1], linkedinPool: [linkedinAccountId(LI)], tracks: [track] };
 };
@@ -51,14 +53,14 @@ async function world(channel: Channel, window = ALWAYS) {
     accounts: [{ id: "inbox-a", capacity: 50, gapMs: GAP, k: 1, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
     sms: { numbers: [{ id: N1, capacity: 50, gapMs: GAP, k: 1, healthy: true, resetZone: "Europe/London" }] },
     linkedin: { sessions: [{ id: LI, gapMs: GAP, k: 1, healthy: true, resetZone: "Europe/London" }] },
-    instagram: { sessions: [{ id: IG, kind: "business", gapMs: GAP, k: 1, healthy: true, resetZone: "Europe/London" }] },
+    social: everyChannelSessions([{ id: IG, kind: "business", gapMs: GAP, k: 1, healthy: true, resetZone: "Europe/London" }]),
   });
   await h.tick();
-  for (const id of [linkedinAccountId(LI), socialAccountId("instagram", IG)]) expect((await h.request("PUT", `/api/sender-accounts/${id}/allowances`, { invitesPerDay: 20, messagesPerDay: 20, notesPerMonth: 20 })).status).toBe(200);
+  for (const id of [linkedinAccountId(LI), ...MESSAGE_REQUEST_CHANNELS.map((c) => socialAccountId(c, IG))]) expect((await h.request("PUT", `/api/sender-accounts/${id}/allowances`, { invitesPerDay: 20, messagesPerDay: 20, notesPerMonth: 20 })).status).toBe(200);
   const { campaign } = await h.createCampaign("Claimed", { businesses: [HARBOUR], people: PEOPLE });
   await h.defineSequence(campaign.id, definition(channel, window));
   const rows = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows;
-  const handed = () => ({ email: h.fake.handoverLog, sms: h.sms.handoverLog, linkedin: h.linkedin.handoverLog, instagram: h.instagram.handoverLog })[channel];
+  const handed = () => (isMessageRequestChannel(channel) ? h.social(channel).handoverLog : { email: h.fake.handoverLog, sms: h.sms.handoverLog, linkedin: h.linkedin.handoverLog }[channel]);
   /** Each lead's record row: its sends as the record reads them, and the sentence under its status. */
   const record = async (row: (typeof rows)[number]) => {
     const r = (await h.request<RecordControls>("GET", `/api/people/${row.id}`)).body;
@@ -68,7 +70,7 @@ async function world(channel: Channel, window = ALWAYS) {
   return { h, campaign, rows, handed, record };
 }
 
-describe.each(["email", "sms", "linkedin", "instagram"] as const)("%s: a claim not yet handed over", (channel) => {
+describe.each(["email", "sms", "linkedin", ...MESSAGE_REQUEST_CHANNELS] as const)("%s: a claim not yet handed over", (channel) => {
   test("one sender, two leads, ten minutes apart: the second's claim has sent nothing, and its record says so", async () => {
     const { h, campaign, rows, handed, record } = await world(channel);
     h.clock = MONDAY_9;

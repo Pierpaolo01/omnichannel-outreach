@@ -76,7 +76,7 @@ describe("items 1, 8 and 9: the load withheld for LinkedIn", () => {
 
 describe("item 10: a test run's confirmation belongs to the run it was opened on", () => {
   const run = (id: string, fields: Partial<TestRunRead> = {}): TestRunRead => ({
-    id, running: false, ending: "finished", startedAt: "2026-11-02T09:00:00Z", endedAt: null, renderAs: { id: "l", name: "Pat" }, email: null, mobile: null, linkedin: null, status: "sequence_finished_no_response", mayStillSend: 0, steps: [], linkedinTracks: [], replyMarks: { linkedin: { allowed: true, work: { kind: "invite", state: "sent" } } }, social: { instagram: null }, stopReply: null, ...fields,
+    id, running: false, ending: "finished", startedAt: "2026-11-02T09:00:00Z", endedAt: null, renderAs: { id: "l", name: "Pat" }, email: null, mobile: null, linkedin: null, status: "sequence_finished_no_response", mayStillSend: 0, steps: [], linkedinTracks: [], replyMarks: { linkedin: { allowed: true, work: { kind: "invite", state: "sent" } } }, social: { instagram: null, facebook: null }, stopReply: null, ...fields,
   });
   test("a newer run shown closes it, with the reason; the same run still allowing it keeps it", () => {
     const c = { kind: "reply" as const, channel: "linkedin" as const, runId: "t1", status: "sequence_finished_no_response" as const, wasRunning: false };

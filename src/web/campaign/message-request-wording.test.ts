@@ -33,6 +33,24 @@ describe("the record's Instagram lines", () => {
   });
 });
 
+/** Ticket 26 (ADR 0004 14.2, 14.5): Facebook's sentences, its sender kinds named in its own words: a Page, not a business account. */
+describe("the record's Facebook lines", () => {
+  const fb = (view: Partial<MessageRequestTrackView>, finishReason: TrackProgressView["finishReason"] = null) => ({ channel: "facebook" as const, finishReason, messageRequest: { ...VIEW, address: "https://www.facebook.com/example.pat", ...view } });
+  test("a first message from a Page or a personal profile names it so", () => {
+    expect(messageRequestTrackLines(fb({ firstMessage: "sent", sender: { id: "facebook:s", kind: "business" } }))).toEqual([
+      "The first message went to their own Facebook account from your Page, as a message request if they don’t follow you. Facebook doesn’t tell the app whether it was accepted or read.",
+    ]);
+    expect(messageRequestTrackLines(fb({ firstMessage: "sent", destination: "company", sender: { id: "facebook:s", kind: "personal" } }))[0]).toMatch(/^The first message went to their company’s Facebook account from your personal profile, /);
+    expect(messageRequestTrackLines(fb({ firstMessage: "sent", sender: { id: "facebook:s", kind: null } }))[0]).toMatch(/^The first message went to their own Facebook account, as a message request/);
+  });
+
+  test("its skips and its limits say Facebook, with its article, and a Page", () => {
+    expect(messageRequestTrackLines(fb({ skipCause: "no_profile", destination: null }, "skipped_missing_channel"))).toEqual(["Skipped: neither they nor their company have a Facebook account in the import."]);
+    expect(messageRequestLimits("facebook", 1)[3]).toBe("A personal profile and a Page are used alike; if Facebook refuses a message, the track ends for that lead and says so.");
+    expect(messageRequestLimits("instagram", 1)[3]).toBe("A personal profile and a business account are used alike; if Instagram refuses a message, the track ends for that lead and says so.");
+  });
+});
+
 describe("the reply mark carries its channel", () => {
   test("each social channel has its own control and words; LinkedIn's are unchanged", () => {
     expect(markRepliedControl("instagram")).toBe("mark_replied:instagram");
@@ -96,9 +114,9 @@ describe("leads sharing a company's account, on Before launch and in the inspect
   });
 
   test("the inspector says the same limit for the same number of chosen sessions", () => {
-    expect(messageRequestLimits("Instagram", 3)[2]).toContain("up to 3 first messages from this track, one from each session you chose, each about a different lead");
-    expect(messageRequestLimits("Instagram", 1)[2]).toContain("one first message from this track: the first lead to reach it keeps it, and the others are skipped here");
-    expect(messageRequestLimits("Instagram", 0)[2]).toContain("one first message from this track");
+    expect(messageRequestLimits("instagram", 3)[2]).toContain("up to 3 first messages from this track, one from each session you chose, each about a different lead");
+    expect(messageRequestLimits("instagram", 1)[2]).toContain("one first message from this track: the first lead to reach it keeps it, and the others are skipped here");
+    expect(messageRequestLimits("instagram", 0)[2]).toContain("one first message from this track");
   });
 });
 

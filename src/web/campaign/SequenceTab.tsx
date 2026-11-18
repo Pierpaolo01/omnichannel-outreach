@@ -4,7 +4,7 @@ import { useLocation, useSearch } from "wouter";
 import { skipLimitOf } from "../../domain/sequence/calls.ts";
 import { MERGE_FIELDS } from "../../domain/sequence/copy.ts";
 import { NO_WIN_BACK_BRANCH, declinedPathOf, winBackAvailable, type DeclinedPath } from "../../domain/sequence/definition.ts";
-import { isMessageRequestChannel, MESSAGE_REQUEST_CHANNELS, SOCIAL_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
+import { isMessageRequestChannel, MESSAGE_REQUEST_CHANNELS, MESSAGE_REQUEST_SENDER_KINDS, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialSenderKind } from "../../domain/social-channels.ts";
 import { anotherTrackChoseOtherSessions, messageRequestLimits, messageRequestNote, twoTracksNote } from "./message-request-wording.ts";
 import type { BeforeLaunchView, CampaignDefinition, EmailProviderStatus, LaunchBlocker, LinkedinProviderStatus, SequenceView, SmsProviderStatus, SocialProvidersStatus, StepDefinition, TrackDefinition } from "../../shared/api.ts";
 import { stepTitle } from "../../shared/track-label.ts";
@@ -1491,7 +1491,7 @@ function TimingAndSender({ track, editor, onWindow, onSenders }: { track: TrackD
             // ADR 0004 13.1: the running app has no Instagram session; nothing here suggests one can be connected from the application.
             // With none connected, the cause is that, whatever the track chose: there is nothing to tick.
             <>
-              <span className="font-semibold text-crit">No connected {SOCIAL_CHANNELS[track.channel as MessageRequestChannel].name} session.</span>
+              <span className="font-semibold text-crit">No connected {SOCIAL_CHANNELS[track.channel].name} session.</span>
               <SocialProviderReason channel={track.channel} />
               <div className="text-[12.5px] text-muted">Launch is blocked while this track has no session.</div>
             </>
@@ -1525,8 +1525,8 @@ function TimingAndSender({ track, editor, onWindow, onSenders }: { track: TrackD
             </ul>
           )}
           {request && (
-            <ul className="mt-1.5 flex list-disc flex-col gap-0.5 pl-4 text-[12.5px] text-muted" aria-label={`What limits ${SOCIAL_CHANNELS[track.channel as MessageRequestChannel].name} messages`}>
-              {messageRequestLimits(SOCIAL_CHANNELS[track.channel as MessageRequestChannel].name, (track.senders ?? []).length).map((line) => (
+            <ul className="mt-1.5 flex list-disc flex-col gap-0.5 pl-4 text-[12.5px] text-muted" aria-label={`What limits ${SOCIAL_CHANNELS[track.channel].name} messages`}>
+              {messageRequestLimits(track.channel, (track.senders ?? []).length).map((line) => (
                 <li key={line}>{line}</li>
               ))}
             </ul>
@@ -1721,7 +1721,7 @@ function SenderChoice({ track, accounts, locked, otherTracks, onChange }: { trac
   const listed = new Set(accounts.map((a) => a.id));
   const gone = chosen.filter((id) => !listed.has(id));
   const name = isMessageRequestChannel(track.channel) ? SOCIAL_CHANNELS[track.channel].name : "";
-  const kindWord = (kind: string | undefined) => (kind === "business" ? "a business account" : kind === "personal" ? "a personal profile" : "kind not reported");
+  const kindWord = (kind: SocialSenderKind | undefined) => (kind !== undefined && isMessageRequestChannel(track.channel) ? MESSAGE_REQUEST_SENDER_KINDS[track.channel][kind].aName : "kind not reported");
   const toggle = (id: string, on: boolean) => onChange(on ? [...chosen.filter((x) => x !== id), id] : chosen.filter((x) => x !== id));
   return (
     <fieldset disabled={locked} className="flex min-w-0 flex-col gap-1" aria-describedby={chosen.length === 0 ? `${legendId}-none` : undefined}>

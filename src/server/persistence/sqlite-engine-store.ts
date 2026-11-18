@@ -42,7 +42,7 @@ import type { StoredTestContacts, TestRunRecord, TestStop } from "../engine/engi
 import type { SocialAllowances, BounceEvent, CallNoteRecord, MeasureFacts, CallSettings, CampaignEngineRow, DefinitionSave, EngineStore, LaunchOutcome, RunningSave, ReplyEvent, SaveResult, SenderAccountConfig, StoredDefinition, StoredNote, WorkerLease } from "../engine/engine-store.ts";
 import { liveDetailRowOf } from "./sqlite-store.ts";
 import { linkedinProfileKey } from "../../domain/linkedin-profile.ts";
-import { accountDetailId, accountOfDetailId, isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, MESSAGE_REQUEST_COLUMNS, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel, type SocialSenderKind } from "../../domain/social-channels.ts";
+import { accountDetailId, accountOfDetailId, isMessageRequestChannel, isSocialChannel, MESSAGE_REQUEST_CHANNELS, MESSAGE_REQUEST_COLUMNS, MESSAGE_REQUEST_MAY_NAME, SOCIAL_CHANNELS, type MessageRequestChannel, type SocialChannel, type SocialSenderKind } from "../../domain/social-channels.ts";
 import { holdsLeaseOn, releaseLeaseOn, takeLeaseOn } from "./lease-table.ts";
 
 type Row = Record<string, SQLOutputValue>;
@@ -429,8 +429,9 @@ export class SqliteEngineStore implements EngineStore {
   }
 
   /**
-   * Whether some person's or company's record holds this account on a message-request channel (ADR 0004 13.8's boundary),
-   * read from the import's cells by the channel's one normaliser.
+   * Whether some person's or company's record may hold this account on a message-request channel (ADR 0004 13.8's boundary,
+   * 14.3): any key an imported cell may name, a superset of the account key, so a form of a prospect's account the app
+   * never messages still refuses it as a test contact.
    */
   private leadHasAccount(channel: MessageRequestChannel, key: string): boolean {
     const columns = MESSAGE_REQUEST_COLUMNS[channel];
@@ -438,7 +439,7 @@ export class SqliteEngineStore implements EngineStore {
       ...this.sql("SELECT json_extract(source_row, '$.' || ?) AS cell FROM people WHERE json_extract(source_row, '$.' || ?) <> ''").all(columns.people, columns.people),
       ...this.sql("SELECT json_extract(source_row, '$.' || ?) AS cell FROM companies WHERE json_extract(source_row, '$.' || ?) <> ''").all(columns.businesses, columns.businesses),
     ];
-    return cells.some((r) => SOCIAL_CHANNELS[channel].accountKey(String(r["cell"] ?? "")) === key);
+    return cells.some((r) => MESSAGE_REQUEST_MAY_NAME[channel](String(r["cell"] ?? "")).includes(key));
   }
 
   /** Whether some person's record holds this LinkedIn profile (ADR 0004 section 8's boundary), read by the one key rule. */

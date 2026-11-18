@@ -1,6 +1,8 @@
 import { describe, expect, test } from "vitest";
 import { linkedinAccountId, socialAccountId } from "./ports.ts";
 import { EngineHarness } from "../../../test/support/engine-harness.ts";
+import { everyChannelSessions, everyPersonAccountCell } from "../../../test/support/message-request-accounts.ts";
+import { isMessageRequestChannel, MESSAGE_REQUEST_CHANNELS, type MessageRequestChannel } from "../../domain/social-channels.ts";
 import { business, person } from "../../../test/support/export-builder.ts";
 import type { CampaignDefinition, StepDefinition, TrackDefinition } from "../../domain/sequence/definition.ts";
 import type { EnrollmentRead, LeadSearchResult } from "../../shared/api.ts";
@@ -19,12 +21,11 @@ const NINE_TO_FIVE = [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, start: 9, end: 1
 const N1 = "+447700900001";
 const LI = "li-session-1";
 const IG = "ig-session-1";
-const PAT_INSTAGRAM = "https://www.instagram.com/example_pat.removed";
 
 const HARBOUR = business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101" });
-const PAT = person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile", linkedin_url: "https://www.linkedin.com/in/fictional-pat-removed", instagram: PAT_INSTAGRAM });
+const PAT = person({ person_id: "p1", business_id: "b1", full_name: "Pat Oneil", email: "pat@harbour.example", dial_phone: "+447700900101", dial_phone_type: "mobile", linkedin_url: "https://www.linkedin.com/in/fictional-pat-removed", ...everyPersonAccountCell("pat.removed") });
 
-type Channel = "email" | "sms" | "linkedin" | "instagram";
+type Channel = "email" | "sms" | "linkedin" | MessageRequestChannel;
 const stepOf = (id: string, channel: Channel): StepDefinition => ({ id, waitDays: 0, subject: channel === "email" ? "Hello {{first_name|there}}" : "", body: "Hello {{first_name|there}}.", threading: "new_subject", removed: false });
 const trackOf = (channel: Channel): TrackDefinition => ({
   id: "t",
@@ -35,7 +36,7 @@ const trackOf = (channel: Channel): TrackDefinition => ({
   start: { kind: "entry" },
   removed: false,
   ...(channel === "linkedin" ? { acceptWaitDays: 3 } : {}),
-  ...(channel === "instagram" ? { senders: [socialAccountId("instagram", IG)] } : {}),
+  ...(isMessageRequestChannel(channel) ? { senders: [socialAccountId(channel, IG)] } : {}),
 });
 /** A call track beside it, so the campaign keeps a live track once `t` is removed. */
 const CALLS: TrackDefinition = { id: "c", channel: "call", branch: "main", window: NINE_TO_FIVE, steps: [{ id: "c1", waitDays: 0, subject: "", body: "", threading: "new_subject", removed: false }], start: { kind: "entry" }, removed: false };
@@ -54,10 +55,10 @@ async function run(channel: Channel) {
     accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
     sms: { numbers: [{ id: N1, capacity: 50, gapMs: MIN, k: 2, healthy: true, resetZone: "Europe/London" }] },
     linkedin: { sessions: [{ id: LI, gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }] },
-    instagram: { sessions: [{ id: IG, kind: "business", gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }] },
+    social: everyChannelSessions([{ id: IG, kind: "business", gapMs: MIN, k: 1, healthy: true, resetZone: "Europe/London" }]),
   });
   await h.tick();
-  for (const id of [linkedinAccountId(LI), socialAccountId("instagram", IG)]) expect((await h.request("PUT", `/api/sender-accounts/${id}/allowances`, { invitesPerDay: 20, messagesPerDay: 20, notesPerMonth: 20 })).status).toBe(200);
+  for (const id of [linkedinAccountId(LI), ...MESSAGE_REQUEST_CHANNELS.map((c) => socialAccountId(c, IG))]) expect((await h.request("PUT", `/api/sender-accounts/${id}/allowances`, { invitesPerDay: 20, messagesPerDay: 20, notesPerMonth: 20 })).status).toBe(200);
   const { campaign } = await h.createCampaign("Removed", { businesses: [HARBOUR], people: [PAT] });
   await h.defineSequence(campaign.id, definition(channel, false));
   h.clock = MONDAY_8;
@@ -65,11 +66,11 @@ async function run(channel: Channel) {
   await h.tick();
   const lead = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign.id}`)).body.rows[0]!.enrollments[0]!.id;
   const track = async () => (await h.request<EnrollmentRead>("GET", `/api/enrollments/${lead}`)).body.tracks.find((t) => t.trackId === "t");
-  const log = () => ({ email: h.fake.handoverLog, sms: h.sms.handoverLog, linkedin: h.linkedin.handoverLog, instagram: h.instagram.handoverLog })[channel].filter((x) => x.subjectId === lead);
+  const log = () => (isMessageRequestChannel(channel) ? h.social(channel).handoverLog : { email: h.fake.handoverLog, sms: h.sms.handoverLog, linkedin: h.linkedin.handoverLog }[channel]).filter((x) => x.subjectId === lead);
   return { h, campaign, track, log };
 }
 
-describe.each(["email", "sms", "linkedin", "instagram"] as const)("%s: a track started, then removed before its first claim", (channel) => {
+describe.each(["email", "sms", "linkedin", ...MESSAGE_REQUEST_CHANNELS] as const)("%s: a track started, then removed before its first claim", (channel) => {
   test("still sends for the lead that started it when its window opens, from what it chose", async () => {
     const { h, campaign, track, log } = await run(channel);
     // Started at launch, its first step waiting for the window: nothing claimed yet.

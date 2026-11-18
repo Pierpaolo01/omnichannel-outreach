@@ -9,24 +9,32 @@ import { end, goodAccount } from "../../src/domain/sequence/progress.ts";
 const RETARGET_SEED = 20;
 /** The first of offsets 0 to 29 that killed it (17 November 2026). */
 const BORROWED_SEED = 0;
+/** The first of offsets 0 to 29 that killed it with both channels in one campaign (17 November 2026). */
+const TOGETHER_SEED = 10;
 import { markedReplyId } from "../../src/domain/sequence/reply-identity.ts";
-import { isMessageRequestChannel } from "../../src/domain/social-channels.ts";
+import { isMessageRequestChannel, MESSAGE_REQUEST_CHANNELS } from "../../src/domain/social-channels.ts";
 import type { SubjectState } from "../../src/domain/sequence/state.ts";
+import type { RunChannel } from "./generated-message-requests.ts";
 
 /**
- * Deliberately broken engines for the generated message-request runs (ADR 0004 13.9): one per invariant, each a swap of one
- * rule or one module seam. Each must make the runs fail the invariant it names, at its recorded seed offset (from
- * MESSAGE_REQUEST_SEED) in `pnpm check`; each seed is the first of offsets 0 to 29 that killed it on 17 November 2026.
+ * Deliberately broken engines for the generated message-request runs (ADR 0004 13.9, 14.7): one per invariant, each a swap of
+ * one rule or one module seam, none naming a channel. Each must make the runs fail the invariant it names on each channel
+ * alone, at its recorded seed offset for that channel (from MESSAGE_REQUEST_SEED) in `pnpm check`; each seed is the first of
+ * offsets 0 to 29 that killed it on 17 November 2026.
  */
 export interface MessageRequestMutation {
   readonly invariant: string;
-  readonly seed: number;
+  /**
+   * The recorded killing seed offset on each channel alone (the runs' `channels` option), and, for a fault only two channels
+   * in one campaign can show, with both (`together`).
+   */
+  readonly seeds: { readonly [C in RunChannel]?: number } & { readonly together?: number };
   readonly rules: Partial<Rules>;
   /** A swap outside the engine's rules, applied for the replay and undone after it. */
   readonly patch?: () => () => void;
 }
 
-const isInstagramTrack = (s: SubjectState, trackId: string) => isMessageRequestChannel(s.campaign.definition.tracks.find((t) => t.id === trackId)?.channel);
+const isMessageRequestTrack = (s: SubjectState, trackId: string) => isMessageRequestChannel(s.campaign.definition.tracks.find((t) => t.id === trackId)?.channel);
 
 /** The subject with its message-request details reordered: the company's account newer than the person's own (M2's mutation). */
 function companyFirst(s: SubjectState): SubjectState {
@@ -89,19 +97,19 @@ export const MESSAGE_REQUEST_MUTATIONS: Readonly<Record<string, MessageRequestMu
   // M1: a message-request step's work is retryable, so a lost answer is handed over again under its key.
   "a lost answer handed over again": {
     invariant: "M1",
-    seed: 2,
-    rules: { claim: (state, item, account, input) => DEFAULT_RULES.claim(state, item, account, isInstagramTrack(state, item.trackId) ? { ...input, retryable: true } : input) },
+    seeds: { instagram: 2, facebook: 2 },
+    rules: { claim: (state, item, account, input) => DEFAULT_RULES.claim(state, item, account, isMessageRequestTrack(state, item.trackId) ? { ...input, retryable: true } : input) },
   },
   // M2: the company's account preferred to the person's own.
   "the company's account preferred to the person's own": {
     invariant: "M2",
-    seed: 0,
+    seeds: { instagram: 0, facebook: 0 },
     rules: { evaluate: (state, now, options) => DEFAULT_RULES.evaluate(companyFirst(state), now, options) },
   },
   // M3: a reply mark recorded without ending the lead.
   "a mark recorded without ending the lead": {
     invariant: "M3",
-    seed: 29,
+    seeds: { instagram: 29, facebook: 29 },
     rules: {
       markReplied: (state, requestId, now, channel) => {
         const refused = DEFAULT_RULES.markReplied(state, requestId, now, channel);
@@ -113,20 +121,20 @@ export const MESSAGE_REQUEST_MUTATIONS: Readonly<Record<string, MessageRequestMu
   // M4: one bucket for every session: the message allowance not read.
   "the message allowance ignored": {
     invariant: "M4",
-    seed: 1,
+    seeds: { instagram: 1, facebook: 1 },
     rules: { chooseAccount: (state, now, stepId) => DEFAULT_RULES.chooseAccount(unlimited(state), now, stepId) },
   },
   // M2: a started track whose account a re-import replaced is retargeted to the new account, not skipped (review of f2824d4, item 8).
   "a started track retargeted by a re-import": {
     invariant: "M2",
-    seed: RETARGET_SEED,
+    seeds: { instagram: RETARGET_SEED, facebook: RETARGET_SEED },
     rules: { evaluate: (state, now, options) => DEFAULT_RULES.evaluate(retargeted(state), now, options) },
   },
   // M5: a pair another subject owns is ignored, in the account choice and the handover.
   "a taken pair ignored": {
     invariant: "M5",
     // 3 since M5 holds a pair by a crash on that pair only (the review bot on 0922582); 0 before.
-    seed: 3,
+    seeds: { instagram: 3, facebook: 3 },
     rules: {
       evaluate: (state, now, options) => DEFAULT_RULES.evaluate(ownPairsOnly(state), now, options),
       chooseAccount: (state, now, stepId) => DEFAULT_RULES.chooseAccount(ownPairsOnly(state), now, stepId),
@@ -136,7 +144,7 @@ export const MESSAGE_REQUEST_MUTATIONS: Readonly<Record<string, MessageRequestMu
   // M6: a mark accepted where nothing reached the person.
   "a mark accepted with nothing reached": {
     invariant: "M6",
-    seed: 1,
+    seeds: { instagram: 1, facebook: 1 },
     rules: {
       markReplied: (state, requestId, now, channel) => {
         const out = DEFAULT_RULES.markReplied(state, requestId, now, channel);
@@ -145,10 +153,24 @@ export const MESSAGE_REQUEST_MUTATIONS: Readonly<Record<string, MessageRequestMu
       },
     },
   },
+  // M6 across channels (ticket 26, ADR 0004 14.6): a mark accepted on one channel because the lead was reached on another.
+  // Only a campaign with both channels can show it, so it is replayed with both.
+  "a reply mark's reach read on any message-request channel": {
+    invariant: "M6",
+    seeds: { together: TOGETHER_SEED },
+    rules: {
+      markReplied: (state, requestId, now, channel) => {
+        const out = DEFAULT_RULES.markReplied(state, requestId, now, channel);
+        if (out.ok || !isMessageRequestChannel(channel)) return out;
+        const elsewhere = MESSAGE_REQUEST_CHANNELS.some((c) => c !== channel && DEFAULT_RULES.markReplied(state, requestId, now, c).ok);
+        return elsewhere ? { ok: true, state: end({ ...state, replies: [...state.replies, { channel, atWall: now, providerRef: markedReplyId(channel, requestId) }] }, "replied", now) } : out;
+      },
+    },
+  },
   // M7: a step no eligible session has any allowance for reads as full for the day, a time it can never keep.
   "no allowance reads as full for the day": {
     invariant: "M7",
-    seed: 6,
+    seeds: { instagram: 6, facebook: 6 },
     rules: {},
     patch: () => {
       const was = viewRules.noAllowanceReadAs;
@@ -161,7 +183,7 @@ export const MESSAGE_REQUEST_MUTATIONS: Readonly<Record<string, MessageRequestMu
   // M8: the track's session is not fixed: each message may go from any session of the pool.
   "the pair's session not fixed": {
     invariant: "M8",
-    seed: 0,
+    seeds: { instagram: 0, facebook: 0 },
     rules: {
       chooseAccount: (state, now, stepId) => DEFAULT_RULES.chooseAccount(unfixed(state), now, stepId),
       handoverFailures: (state, attempt, account, now) => DEFAULT_RULES.handoverFailures(unfixed(state), attempt, account, now),
@@ -170,7 +192,7 @@ export const MESSAGE_REQUEST_MUTATIONS: Readonly<Record<string, MessageRequestMu
   // M8: a track's sender taken from another track of the same channel, as when it was fixed per subject (review bot on 0922582).
   "a track's sender taken from another track of the same channel": {
     invariant: "M8",
-    seed: BORROWED_SEED,
+    seeds: { instagram: BORROWED_SEED, facebook: BORROWED_SEED },
     rules: {
       chooseAccount: (state, now, stepId) => DEFAULT_RULES.chooseAccount(borrowed(state), now, stepId),
       handoverFailures: (state, attempt, account, now) => DEFAULT_RULES.handoverFailures(borrowed(state), attempt, account, now),
@@ -180,17 +202,17 @@ export const MESSAGE_REQUEST_MUTATIONS: Readonly<Record<string, MessageRequestMu
   // removed track were left unloaded (the review bot on 0922582): it waits for ever.
   "a removed track a lead started finds no sender": {
     invariant: "M7",
-    seed: 4,
+    seeds: { instagram: 4, facebook: 4 },
     rules: { chooseAccount: (state, now, stepId) => (state.campaign.definition.tracks.find((t) => t.steps.some((x) => x.id === stepId))?.removed ? null : DEFAULT_RULES.chooseAccount(state, now, stepId)) },
   },
-  // M9: an Instagram track that finishes ends the lead, so the tracks beside and after it stop.
-  "a finished Instagram track ends the lead": {
+  // M9: a message-request track that finishes ends the lead, so the tracks beside and after it stop.
+  "a finished message-request track ends the lead": {
     invariant: "M9",
-    seed: 3,
+    seeds: { instagram: 3, facebook: 3 },
     rules: {
       evaluate: (state, now, options) => {
         const next = DEFAULT_RULES.evaluate(state, now, options);
-        const done = next.tracks.some((p) => p.finishedAt !== null && isInstagramTrack(next, p.trackId));
+        const done = next.tracks.some((p) => p.finishedAt !== null && isMessageRequestTrack(next, p.trackId));
         return done && next.subject.ended === null ? end(next, "sequence_finished_no_response", now) : next;
       },
     },
@@ -198,13 +220,13 @@ export const MESSAGE_REQUEST_MUTATIONS: Readonly<Record<string, MessageRequestMu
   // M10: priority by the due time alone: a first contact as likely as a follow-up to take a contested slot.
   "priority by the due time alone": {
     invariant: "M10",
-    seed: 3,
+    seeds: { instagram: 3, facebook: 3 },
     rules: { claimOrder: (a, b) => comparePriority({ ...a, touched: false }, { ...b, touched: false }), handoverOrder: (a, b) => comparePriority({ ...a, touched: false }, { ...b, touched: false }) },
   },
-  // 29: the conversations' version ignores every change, so a cache outlives a pair taken on an Instagram account.
+  // 29: the conversations' version ignores every change, so a cache outlives a pair taken on a message-request account.
   "the conversations' version ignores every change": {
     invariant: "29",
-    seed: 4,
+    seeds: { instagram: 4, facebook: 4 },
     rules: {},
     patch: () => {
       const proto = SqliteEngineStore.prototype as unknown as { conversationVersions: () => Promise<ReadonlyMap<string, number>> };

@@ -1264,6 +1264,17 @@ export const MIGRATIONS: readonly Migration[] = [
     data: (db) =>
       addChannel(db, "instagram", [{ from: "OR linkedin_key IS NOT NULL)", to: "OR linkedin_key IS NOT NULL OR social_contacts IS NOT NULL)" }]),
   },
+  {
+    version: 26,
+    name: "Facebook as a message-request channel (ticket 26, ADR 0004 section 14): its row, and the social channel lists",
+    // The second message-request channel: a row the destination triggers and the bad marks read, and the one `addChannel`
+    // rebuild of every CHECK that lists the social channels. Nothing else in the schema names a message-request channel.
+    rebuildsTables: true,
+    sql: `
+      INSERT INTO message_request_channels (name) VALUES ('facebook');
+    `,
+    data: (db) => addChannel(db, "facebook"),
+  },
 ];
 
 export function migrate(db: DatabaseSync, appliedAt: () => string, migrations: readonly Migration[] = MIGRATIONS): void {
