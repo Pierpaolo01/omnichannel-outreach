@@ -9,7 +9,7 @@ import { launchCheck, type LaunchCheck } from "../../domain/sequence/blockers.ts
 import { REQUEST_ID_DIFFERENT, REQUEST_ID_REUSED, type OutcomeInput } from "../../domain/sequence/calls.ts";
 import { leadNow, localDayNumber, nextWindowOpen, resetDayOf, runningCredit, startOfLocalDay } from "../../domain/sequence/clock.ts";
 import { windowOf, type ReadyItem } from "../../domain/sequence/dispatch.ts";
-import { rules as inmailSeams, inmailJudgedSessions, awaitingAcceptance, markInviteWithdrawal, invitePendingElsewhere, invitePendingUntil, runs, type ConversationVersions, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
+import { rules as inmailSeams, inmailJudgedSessions, awaitingAcceptance, markInviteWithdrawal, invitePendingElsewhere, inmailAlreadyConnected, invitePendingUntil, runs, type ConversationVersions, sealReckoning, settledEvaluation, settledReadiness, stillSettled, type SettledEvaluation } from "../../domain/sequence/progress.ts";
 import { definitionProblems, type CampaignDefinition } from "../../domain/sequence/definition.ts";
 import type { Attempt, ProviderWork, SubjectState } from "../../domain/sequence/state.ts";
 import type { OutreachStatus } from "../../domain/outreach-status.ts";
@@ -1535,9 +1535,20 @@ export class Engine {
       // A message after an InMail known sent goes beside the track's own invite, which the fallback leaves open.
       const ownInviteOpen = inmail || subject?.tracks.find((p) => p.trackId === a.trackId)?.inmail === "sent";
       if (pendingStops && !ownInviteOpen) return false;
-      // Connected at an InMail's slot: they accepted and the session has not reported it yet. No InMail to a connection; the
-      // acceptance, once observed, skips it and connects the track (14.3).
-      if (asked.kind === "connected" && inmail && inmailSeams.acceptanceSkipsInmail) return false;
+      // Connected at an InMail's slot: they accepted and the session has not reported it yet. No InMail to a connection: the
+      // connection overtakes it in the handover's own write, so the next check never meets it again (14.3; the council on
+      // d6ad9f5, item 2: it looped, claimed and expired every morning).
+      if (asked.kind === "connected" && inmail && inmailSeams.acceptanceSkipsInmail) {
+        await this.update(a.subjectId, now, (s) => {
+          const current = s.attempts.find((x) => x.id === a.id);
+          const account = current ? s.accounts[current.accountId] : undefined;
+          if (!current || current.state !== "claimed" || !account) return null;
+          const failed = this.rules.handoverFailures(s, current, account, now).filter((f) => f !== 14 && f !== 16);
+          if (failed.length > 0) return this.rules.applyToAttempt(s, current.id, { kind: "guard_failed" }, now).state;
+          return inmailAlreadyConnected(s, current.id, now);
+        });
+        return false;
+      }
       await this.update(a.subjectId, now, (s) => ({ ...s, attempts: s.attempts.map((x) => (x.id === a.id ? { ...x, presendCheckedWall: now, presendFoundReply: false } : x)) }));
       this.hooks.crashPoint?.("after_presend", a.id);
       return true;

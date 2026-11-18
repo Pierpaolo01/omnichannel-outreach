@@ -330,6 +330,12 @@ export const rules = {
    * only for the mutation "a holding settled unsent on a stopped lead is kept" (review bot on 56030c4, item C).
    */
   settledUnsentReleases: true,
+  /**
+   * An acceptance recorded while the InMail's work was uncertain applies when that work settles not sent; false only for the
+   * mutation "an acceptance recorded while the InMail was uncertain is not applied when it settles unsent" (council on
+   * d6ad9f5, item 2).
+   */
+  settledAcceptanceApplies: true,
   /** A refusal because the connection is gone fails the track and keeps the profile good (Q37); true only for a mutation. */
   notConnectedMarksBad: false,
   /** An edit of the acceptance wait re-resolves every waiting deadline (ADR 0004 3.2); false only for a mutation. */
@@ -391,6 +397,11 @@ export const rules = {
   handoverRechecksBacking: true,
   /** The replaced first message is named at the choice (14.15); false only for the mutation that finds it among the live steps at the send. */
   replacedNamedAtChoice: true,
+  /**
+   * The replaced step is the first live message at the choice; false only for the mutation "the replaced step picked by
+   * place, removed steps included", as `d6ad9f5` had it (the council on d6ad9f5, item 1).
+   */
+  replacedPickedByLivePlace: true,
 };
 
 /**
@@ -734,7 +745,24 @@ function carrierOf(state: SubjectState, key: string): Attempt | undefined {
  * or the user settles it.
  */
 export function attend(state: SubjectState, now: number): SubjectState {
-  return releaseSettledHolds(alignPending(attendWork(state, now), now));
+  return releaseSettledHolds(applySettledAcceptances(alignPending(attendWork(state, now), now), now));
+}
+
+/**
+ * An acceptance recorded while the InMail's work was uncertain (only `acceptedWall` stored: work that may have gone stops
+ * the skip) takes effect once that work settles not sent, by any transition: a provider's late definite answer, a lookup,
+ * the user's mark, a confirmed withdrawal, a claim that expires at store open (the council on d6ad9f5, item 2). It runs the
+ * same transition an acceptance does, at the settlement's instant. Sent and still-uncertain work, and a finished track,
+ * keep it from applying.
+ */
+function applySettledAcceptances(state: SubjectState, now: number): SubjectState {
+  if (!rules.settledAcceptanceApplies || !rules.acceptanceSkipsInmail) return state;
+  let s = state;
+  for (const p of state.tracks) {
+    if ((p.acceptedWall ?? null) === null || !inmailMayBeSkipped(s, p.trackId)) continue;
+    s = skipInmailForConnection(s, p.trackId, leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now));
+  }
+  return s;
 }
 
 /**
@@ -1549,23 +1577,41 @@ export function recordAcceptance(state: SubjectState, trackId: string, providerT
   // The expiry chose the InMail and it has not been handed over (ADR 0004 14.3, question Q56): a person who accepted is a
   // connection, so the InMail is not sent, and the first message follows the connection.
   if (p.inmail === "chosen" && p.finishedAt === null && (p.connection ?? null) === null && rules.acceptanceSkipsInmail) {
-    const track = s.campaign.definition.tracks.find((t) => t.id === trackId);
-    const im = p.nextStepId;
-    // Work that may have gone (unsettled, or sent) stops the skip; work refused or settled not sent does not (review bot on b49a71b).
-    const handed = im !== null && s.work.some((w) => w.stepId === im && w.firstHandedWall !== null && (w.settled === null || w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null));
-    if (!track || im === null || linkedinStepKind(track, im) !== "inmail" || handed) return s;
+    if (!inmailMayBeSkipped(s, trackId)) return s;
     const at = point(s.subject.clock, s.freezes, providerTime, handedWall, now);
-    const lead = leadNow(s.subject.clock, now);
-    const when = Math.min(at.at, lead);
-    const whenWall = Math.min(at.atWall, wallOfLead(s.subject.clock, now));
-    let x = releaseInmailHold(withTrack(withdrawClaims(s, trackId), trackId, (t) => ({ ...t, inmail: "accepted" })), trackId);
-    x = { ...x, results: [...x.results, { stepId: im, trackId, result: "skipped", reason: "accepted", at: when, atWall: whenWall, attemptId: null }] };
-    return connect(x, trackId, "accepted", when, whenWall);
+    return skipInmailForConnection(s, trackId, Math.min(at.at, leadNow(s.subject.clock, now)), Math.min(at.atWall, wallOfLead(s.subject.clock, now)));
   }
   if (!awaitingAcceptance(s, trackId)) return s;
   const at = point(s.subject.clock, s.freezes, providerTime, handedWall, now);
   if (at.at >= (p.acceptBy ?? Infinity)) return s;
   return connect(s, trackId, "accepted", at.at, at.atWall);
+}
+
+/**
+ * Whether a track's chosen InMail can still be skipped for a connection (ADR 0004 14.3): the track runs on, unconnected, its
+ * InMail is the pending step, and no InMail work may have gone. Work that may have gone (unsettled, or sent) stops the skip;
+ * work refused or settled not sent does not (review bot on b49a71b).
+ */
+function inmailMayBeSkipped(state: SubjectState, trackId: string): boolean {
+  const p = progressOf(state, trackId);
+  const track = state.campaign.definition.tracks.find((t) => t.id === trackId);
+  const im = p?.nextStepId ?? null;
+  if (!p || !track || p.inmail !== "chosen" || p.finishedAt !== null || (p.connection ?? null) !== null || im === null || linkedinStepKind(track, im) !== "inmail") return false;
+  return !state.work.some((w) => w.stepId === im && w.firstHandedWall !== null && (w.settled === null || w.settled === "sent" || w.settled === "user_sent" || w.sentWall !== null));
+}
+
+/**
+ * The one transition by which a connection overtakes a chosen InMail (ADR 0004 14.3, question Q56): its claims withdrawn,
+ * the InMail skipped as `accepted`, its credit released, and the track connected, so the first message follows the
+ * connection. Used by an acceptance, by an acceptance recorded while the InMail's work was uncertain once that work settles
+ * not sent (`attend`), and by a session that answers `connected` at the InMail's own check.
+ */
+export function skipInmailForConnection(state: SubjectState, trackId: string, when: number, whenWall: number): SubjectState {
+  const im = progressOf(state, trackId)?.nextStepId ?? null;
+  if (im === null) return state;
+  let x = releaseInmailHold(withTrack(withdrawClaims(state, trackId), trackId, (t) => ({ ...t, inmail: "accepted" })), trackId);
+  x = { ...x, results: [...x.results, { stepId: im, trackId, result: "skipped", reason: "accepted", at: when, atWall: whenWall, attemptId: null }] };
+  return connect(x, trackId, "accepted", when, whenWall);
 }
 
 /**
@@ -1591,8 +1637,10 @@ export function inviteExpired(state: SubjectState, trackId: string, now: number)
     // so the expiry waits for that report rather than judge on the old one (seed 24018). Signed out, it is judged stale.
     if (availability === "stale_report" && account?.healthy === true) return state;
     if (availability !== "free") return withTrack(inmailNotSent(state, trackId, availability, at, atWall), trackId, (t) => ({ ...t, inmailReportedWall: reportedWall }));
-    // The step it replaces is named now, by its place among every step, removed ones included (council on 8b0c846, item 1).
-    const replaces = track.steps.filter((s) => s.role !== "inmail")[1]?.id ?? null;
+    // The step it replaces is the track's first message now: the first live message step after the invite that is not the
+    // InMail, as the definition stands at this instant; none if no message step is live. Stored once, so no later edit moves
+    // it (council on 8b0c846, item 1; the council on d6ad9f5, item 1: a removed step is not the first message).
+    const replaces = (rules.replacedPickedByLivePlace ? track.steps.filter((s) => s.role !== "inmail" && !s.removed) : track.steps.filter((s) => s.role !== "inmail"))[1]?.id ?? null;
     const chosen = withTrack(state, trackId, (t) => ({ ...t, inmail: "chosen", inmailSession: session, inmailReportedWall: reportedWall, inmailReplaces: replaces, nextStepId: im.id, basisAt: at, basisWall: atWall, dueAt: at, dueWall: atWall, dueZone: p.acceptByZone ?? state.lead.zone }));
     return session === null ? chosen : acquireInmailHold(chosen, trackId, session, now);
   }
@@ -1718,6 +1766,20 @@ export function reacquireInmailHolds(state: SubjectState, now: number): SubjectS
  * handover's own write, no provider call. The claim is withdrawn (its reservation released), the invite gets the result
  * skipped, `already_connected`, and the track is connected at that instant, so the first message follows with its wait.
  */
+/**
+ * A session that answers `connected` at a chosen InMail's own check (ADR 0004 14.3; the council on d6ad9f5, item 2): they
+ * accepted, and the acceptance has not been reported. In the handover's own write, with no call: the claim is withdrawn and
+ * the connection overtakes the InMail by the one transition an acceptance uses, so the next check never meets it again.
+ */
+export function inmailAlreadyConnected(state: SubjectState, attemptId: string, now: number): SubjectState {
+  const a = state.attempts.find((x) => x.id === attemptId);
+  if (!a || a.state !== "claimed") return state;
+  const step = applyAttemptEvent(a, workOf(state, a.idempotencyKey), { kind: "quiesce" });
+  const s = withWork(withAttempt(state, { ...step.attempt, endedBy: "guard" }), step.work);
+  if (!inmailMayBeSkipped(s, a.trackId)) return attend(s, now);
+  return attend(skipInmailForConnection(s, a.trackId, leadNow(s.subject.clock, now), wallOfLead(s.subject.clock, now)), now);
+}
+
 export function inviteAlreadyConnected(state: SubjectState, attemptId: string, now: number): SubjectState {
   const a = state.attempts.find((x) => x.id === attemptId);
   if (!a || a.state !== "claimed") return state;

@@ -522,6 +522,58 @@ describe("kept steps around the replaced one (review bot on 56030c4, item B)", (
     expect(plain.sent()).toEqual(["inv", "im", "m2", "m3", "m4"]);
     expect((await plain.read())?.steps.filter((s) => s.state === "skipped").map((s) => s.stepId)).toEqual(["m1"]);
   });
+
+  // The council on d6ad9f5, item 1: the step replaced is the track's first message at the choice, the first live message
+  // step after the invite, however an edit before the choice made it so.
+  const BEFORE_CHOICE = MONDAY_9 + 2 * H;
+  const gone = (ids: string[]) => BASE.map((s) => (ids.includes(s.id) ? { ...s, removed: true } : s));
+
+  test("the first message removed before the choice: the next message is the first message then, so it is the one replaced", async () => {
+    const r = await run(gone(["m1"]), BEFORE_CHOICE);
+    expect(r.went).toEqual(["inv", "im", "m3", "m4"]);
+    expect(r.replaced).toEqual(["m2"]);
+  });
+
+  test("the first message removed and a new one added in its place before the choice (a removed step cannot come back): the new one is replaced", async () => {
+    const { h, campaign, delivered, results } = await world();
+    const c = await campaign([linkedin(BASE, OFFICE)]);
+    await h.advanceTo(BEFORE_CHOICE);
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, definition([linkedin(gone(["m1"]), OFFICE)]))).status).toBe(200);
+    await h.advanceTo(BEFORE_CHOICE + DAY);
+    const again = step("m1b", 0, "Thanks for connecting, again.");
+    const readded = gone(["m1"]);
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, definition([linkedin([...readded.slice(0, 3), again, ...readded.slice(3)], OFFICE)]))).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 12 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "im", "m2", "m3", "m4"]);
+    expect((await results(c.lead("Pat Oneil"))).filter((r) => r.reason === "inmail_instead").map((r) => r.stepId)).toEqual(["m1b"]);
+  });
+
+  test("a message inserted before the first message before the choice: it is the first message then, and the one replaced", async () => {
+    const added = step("x", 1, "A message added while they wait.");
+    const r = await run([...by(["inv", "im"]), added, ...by(["m1", "m2", "m3", "m4"])], BEFORE_CHOICE);
+    expect(r.went).toEqual(["inv", "im", "m1", "m2", "m3", "m4"]);
+    expect(r.replaced).toEqual(["x"]);
+  });
+
+  test("every message removed before the choice is refused: a LinkedIn track keeps a first message, so there is always one to replace", async () => {
+    const { h, campaign } = await world();
+    const c = await campaign([linkedin(BASE, OFFICE)]);
+    await h.advanceTo(BEFORE_CHOICE);
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, definition([linkedin(gone(["m1", "m2", "m3", "m4"]), OFFICE)]))).status).toBe(400);
+  });
+
+  test("a test run of a sequence whose first message was removed: the next message is the one replaced", async () => {
+    const TEST = "https://www.linkedin.com/in/fictional-own-test-profile";
+    const { h, campaign } = await world();
+    const c = await campaign([linkedin(gone(["m1"]), OFFICE)]);
+    expect((await h.request("PUT", `/api/campaigns/${c.id}/test-contacts`, { email: "", mobile: "", linkedin: TEST })).status).toBe(200);
+    const tab = (await h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${c.id}/test-runs`)).body;
+    expect((await h.request("POST", `/api/campaigns/${c.id}/test-runs`, { requestId: "run-1", renderAs: c.lead("Pat Oneil"), expect: { definitionVersion: tab.definitionVersion } })).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 12 * DAY);
+    expect(h.linkedin.deliveryLog.filter((d) => d.destination === TEST).map((d) => d.stepId)).toEqual(["inv", "im", "m3", "m4"]);
+    const run = (await h.request<{ run: { steps: { stepId: string; state: string }[] } | null }>("GET", `/api/campaigns/${c.id}/test-runs`)).body.run;
+    expect(run?.steps.filter((x) => x.state === "skipped").map((x) => x.stepId)).toEqual(["m2"]);
+  });
 });
 
 /**
@@ -592,5 +644,90 @@ describe("a holding kept through a stop, then settled (review bot on 56030c4, it
     await h.advanceTo(WEDNESDAY_0 + 4 * DAY);
     expect(delivered(NIA).some((d) => d.action === "inmail")).toBe(true);
     expect(b.lead("Nia Cole")).not.toBe("");
+  });
+});
+
+/**
+ * The council on d6ad9f5, item 2: an acceptance reported while the InMail's work is uncertain (handed over, answered unknown)
+ * is only stored, since that work may have gone. When the work then settles as not sent, by any transition, the acceptance
+ * takes effect at once: the InMail skipped as accepted, its credit released, the track connected and the first message due.
+ * And a session that answers `connected` at the InMail's own check settles it the same way, in that write.
+ */
+describe("an acceptance while the InMail is uncertain (council on d6ad9f5, item 2)", () => {
+  const PAT_ONLY = [PEOPLE[0]!];
+  /** Pat accepts at Wednesday 09:05, just after the InMail's 09:00 handover, which is answered unknown with nothing sent. */
+  async function uncertain(acceptAfterMs = 2 * DAY + 5 * MIN) {
+    const w = await world({ plan: "premium", credits: 1 });
+    w.h.linkedin.profiles.set(PAT, { acceptAfterMs });
+    const c = await w.campaign([linkedin(FALLBACK, OFFICE)], PAT_ONLY);
+    await w.h.advanceTo(MONDAY_9 + 2 * H);
+    w.h.linkedin.profiles.set(PAT, { acceptAfterMs, unknownUnsent: 1 });
+    const pat = c.lead("Pat Oneil");
+    const control = (action: string) => w.h.request("POST", `/api/enrollments/${pat}/controls`, { requestId: `pat-${action}-${w.h.clock}`, action });
+    const inmailWork = async () => {
+      const st = await w.h.store.engine.subject(pat, w.h.clock);
+      const a = st?.attempts.find((x) => x.stepId === "im");
+      return { attempt: a, work: st?.work.find((x) => x.key === a?.idempotencyKey) };
+    };
+    return { ...w, pat, control, inmailWork };
+  }
+
+  test("accepted while the InMail is uncertain, then marked not sent: the acceptance applies in that write, and the first message follows", async () => {
+    const { h, pat, track, delivered, inmailWork } = await uncertain();
+    await h.advanceTo(WEDNESDAY_0 + 9 * H + 30 * MIN);
+    expect((await track(pat))?.acceptedWall).not.toBeNull();
+    expect((await track(pat))?.inmail).toBe("chosen");
+    await h.advanceTo(WEDNESDAY_0 + 18 * H);
+    const { attempt, work } = await inmailWork();
+    expect(work?.unresolvedSince).not.toBeNull();
+    expect(await h.engine.markAttempt(attempt!.id, "not_sent")).toBe(true);
+    // Settled, and connected in the same write, before any other check of the InMail.
+    expect(await track(pat)).toMatchObject({ inmail: "accepted", connection: "accepted", inmailHoldWall: null });
+    await h.advanceTo(WEDNESDAY_0 + 10 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1", "m2", "m3"]);
+  });
+
+  test("accepted, stopped, then marked not sent while stopped, then restarted: the acceptance applied at the mark, and the first message goes", async () => {
+    const { h, pat, track, delivered, control, inmailWork } = await uncertain();
+    await h.advanceTo(WEDNESDAY_0 + 9 * H + 30 * MIN);
+    expect((await control("stop")).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 18 * H);
+    const { attempt, work } = await inmailWork();
+    expect(work?.unresolvedSince).not.toBeNull();
+    expect(await h.engine.markAttempt(attempt!.id, "not_sent")).toBe(true);
+    expect(await track(pat)).toMatchObject({ inmail: "accepted", connection: "accepted", inmailHoldWall: null });
+    expect((await control("resume_from_next_step")).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 10 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1", "m2", "m3"]);
+  });
+
+  test("settled not sent first (while stopped), accepted afterwards, then restarted: the acceptance applies, and no InMail goes", async () => {
+    // Pat accepts on Thursday, after the InMail's work is marked not sent on Wednesday.
+    const { h, pat, track, delivered, control, inmailWork } = await uncertain(3 * DAY + 2 * H);
+    await h.advanceTo(WEDNESDAY_0 + 9 * H + 30 * MIN);
+    expect((await control("stop")).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 18 * H);
+    const { attempt } = await inmailWork();
+    expect(await h.engine.markAttempt(attempt!.id, "not_sent")).toBe(true);
+    expect((await track(pat))?.inmailHoldWall ?? null).toBeNull();
+    await h.advanceTo(WEDNESDAY_0 + 2 * DAY);
+    expect(await track(pat)).toMatchObject({ inmail: "accepted", connection: "accepted" });
+    expect((await control("resume_from_next_step")).status).toBe(200);
+    await h.advanceTo(WEDNESDAY_0 + 10 * DAY);
+    expect(delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1", "m2", "m3"]);
+  });
+
+  test("connected at the InMail's own check, the acceptance not yet reported: no InMail, the track connects in that write, and it never loops", async () => {
+    const w = await world({ plan: "premium", credits: 1 });
+    // Accepted on Tuesday; LinkedIn reports it only a week later.
+    w.h.linkedin.profiles.set(PAT, { acceptAfterMs: DAY, acceptReportDelayMs: 7 * DAY });
+    const c = await w.campaign([linkedin(FALLBACK, OFFICE)], [PEOPLE[0]!]);
+    await w.h.advanceTo(WEDNESDAY_0 + 10 * H);
+    const pat = c.lead("Pat Oneil");
+    expect(await w.track(pat)).toMatchObject({ inmail: "accepted", connection: "accepted", inmailHoldWall: null });
+    await w.h.advanceTo(WEDNESDAY_0 + 6 * DAY);
+    expect(w.delivered(PAT).map((d) => d.stepId)).toEqual(["inv", "m1", "m2", "m3"]);
+    const claims = (await w.h.store.engine.subject(pat, w.h.clock))?.attempts.filter((a) => a.stepId === "im") ?? [];
+    expect(claims.length).toBe(1);
   });
 });

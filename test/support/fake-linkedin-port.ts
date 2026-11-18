@@ -303,6 +303,11 @@ export class FakeLinkedInPort implements SendPort {
   }
 
   /** The session reads the profile or the thread: the action done is `sent`; none is `not-sent`, which is not final. */
+  /** The session's later lookups find that work answered `unknown` (`unknownUnsent`) was never sent: they answer `not-sent`. */
+  settleUnknownAsNotSent(): void {
+    this.unknownKeys.clear();
+  }
+
   lookup(ref: AttemptRef): Promise<LookupResult> {
     const d = this.deliveryLog.find((x) => x.key === ref.idempotencyKey);
     const answer: LookupResult = d ? { kind: "sent", sentAt: d.at, providerRef: d.providerRef } : this.unknownKeys.has(ref.idempotencyKey) ? { kind: "unknown" } : { kind: "not-sent" };

@@ -137,6 +137,8 @@ export const LINKEDIN_EMITTED = [
   "a-report-between-an-inmail-claim-and-its-handover:no_credit",
   "a-report-between-an-inmail-claim-and-its-handover:no_plan",
   "a-restart-after-another-took-a-credit",
+  "a-running-edit-before-the-choice:insert",
+  "a-running-edit-before-the-choice:remove",
   "a-running-edit-while-an-inmail-is-chosen:insert",
   "a-running-edit-while-an-inmail-is-chosen:remove",
   "a-running-edit-while-an-inmail-is-chosen:reorder",
@@ -161,7 +163,9 @@ export const LINKEDIN_EMITTED = [
   "a-withdrawal-answered-unknown",
   "a-withdrawal-found-it-accepted",
   "already-connected",
+  "an-acceptance-after-the-inmail-settled-unsent",
   "an-acceptance-before-the-inmail-went",
+  "an-acceptance-while-the-inmail-was-uncertain",
   "an-answer-of-one-session",
   "an-edit-of-the-wait-while-waiting",
   "an-expiry-while-the-laptop-was-off",
@@ -483,6 +487,20 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   // chosen (review bot on 56030c4, item B): those InMails go at the window's opening, past the edit.
   else if (contested && random(seed * 19 + 41)() < 0.5) editWhenChosen.set(0, "reorder");
   const restarts: { id: string; at: number }[] = [];
+  /**
+   * The council on d6ad9f5, item 1, from a stream of its own: in a campaign with the fallback on, once a lead there waits for
+   * acceptance, its first message removed, or a message inserted before it, so the first message at the choice is not the
+   * one at launch.
+   */
+  const sixth = random(seed * 23 + 43);
+  /**
+   * The council on d6ad9f5, item 2, from a stream of its own, in contested runs: another lead's InMail answered unknown with
+   * nothing sent, and the person accepting before, or after, the run marks that work not sent. The lead is never stopped.
+   */
+  const seventh = random(seed * 29 + 47);
+  const acceptOrder: "before" | "after" | null = contested ? (seventh() < 0.5 ? "before" : "after") : null;
+  let acceptDraw: { readonly phase: "arm" } | { readonly phase: "handed"; readonly lead: Lead } | { readonly phase: "marked"; readonly lead: Lead } | null = acceptOrder ? { phase: "arm" } : null;
+  const editBeforeChoice = new Map<number, "remove" | "insert">(campaigns.flatMap((c, i) => (fallbackOn(c.definition, i) && sixth() < 0.5 ? [[i, sixth() < 0.5 ? "remove" : "insert"] as const] : [])));
   /** The record's own marks of unresolved work, by work key: when the run settled it, by the user's hand. */
   const markedWork = new Map<string, number>();
   /** Sessions seen with fewer InMails backed than the record's free credits allow, since when (L26 during the run). */
@@ -865,10 +883,10 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       if (drained && went) {
         const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
         const track = stored.tracks.find((x) => x.id === c.li.id);
-        // The message the InMail replaced, as the record's own model had the steps when the expiry chose it, by its place among
-        // every step, removed ones included (council on 8b0c846, item 10): a later reorder or removal never moves it.
+        // The message the InMail replaced, from the record's own model of the steps when the expiry chose it: the first live
+        // message step after the invite (council on 8b0c846, item 10; the council on d6ad9f5, item 1). Later edits never move it.
         const modelled = stepsJudgedAt(lead.campaign, judgedAt);
-        const first = modelled.filter((s) => s.role !== "inmail")[1]?.id;
+        const first = modelled.filter((s) => s.role !== "inmail" && !s.removed)[1]?.id;
         const at = li.deliveryLog.find((x) => x.subjectId === lead.id && x.action === "inmail")?.at ?? Infinity;
         if (first && li.deliveryLog.some((x) => x.subjectId === lead.id && x.stepId === first && x.at > at)) problem(`L23: ${lead.id}'s first message went after its InMail`);
         // L23, the other side (council on 8b0c846, item 1): a follow-up the user kept is never skipped for the InMail. Every
@@ -915,6 +933,23 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
     // lead's state, until one of those settles it; then a finished track or an ended lead holds nothing.
     const uncertainOn = (session: string) =>
       li.handoverLog.filter((x) => x.action === "inmail" && x.sender === session && x.at <= now && !li.deliveryLog.some((d) => d.key === x.key) && !li.refusals.some((r) => r.key === x.key) && !li.lookupLog.some((k) => k.key === x.key && k.answer === "not-sent") && !(markedWork.has(x.key) && markedWork.get(x.key)! <= now)).length;
+    // L13, from the record's own logs (the council on d6ad9f5, item 2): a person who accepted, the acceptance reported, and
+    // whose InMail work the run marked not sent (the session never delivered it) is a connection, so the InMail is no longer
+    // their pending step, whichever came first. Half an hour on, for a report to reach the engine's next tick.
+    for (const l of leads) {
+      const invite = li.deliveryLog.find((x) => x.subjectId === l.id && x.action === "invite");
+      const accepted = invite ? li.acceptanceLog.find((a) => a.key === invite.key) : undefined;
+      const reportedAt = accepted ? accepted.at + (l.script?.acceptReportDelayMs ?? 0) : Infinity;
+      const settled = li.handoverLog.filter((x) => x.subjectId === l.id && x.action === "inmail" && markedWork.has(x.key) && !li.deliveryLog.some((d) => d.key === x.key));
+      const since = Math.max(reportedAt, ...settled.map((x) => markedWork.get(x.key)!));
+      if (settled.length === 0 || since + 30 * MIN > now || li.deliveryLog.some((d) => d.subjectId === l.id && d.action === "inmail")) continue;
+      const st = states.get(l.id);
+      const t = trackOf(l);
+      if (!st || st.subject.ended !== null || !t || t.finishedAt !== null) continue;
+      const im = st.campaign.definition.tracks.find((x) => x.id === campaigns[l.campaign]!.li.id)?.steps.find((x) => x.role === "inmail")?.id;
+      const read = (await h.request<{ tracks: { trackId: string; nextStep?: { stepId: string } | null }[] }>("GET", `/api/enrollments/${l.id}`)).body;
+      if (im !== undefined && read.tracks.find((x) => x.trackId === t.trackId)?.nextStep?.stepId === im) problem(`L13: ${l.id} accepted (reported ${iso(reportedAt)}) and its InMail work was marked not sent, yet the InMail is still its pending step`);
+    }
     for (const s of sessions) {
       const waiting = leads.filter((l) => senderOf(l) === s.id && trackOf(l)?.inmail === "chosen" && trackOf(l)?.finishedAt === null && !inmailed(l) && running(l));
       // During the run (review bot on 56030c4, item C): with n InMails chosen on the session and not yet handed over (held by
@@ -974,6 +1009,42 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
 
   /** The council's draws on `8b0c846`, each at the moment it bites (see `editWhenChosen`). */
   async function chosenEvents(): Promise<void> {
+    // Item 2's draw (the council on d6ad9f5): a second contested lead, armed the same way, accepted around the mark.
+    if (acceptDraw?.phase === "arm") {
+      const taken = unsettle && unsettle.phase !== "arm" ? unsettle.lead.id : null;
+      // A lead whose invite went and whose InMail has not been handed over yet, so its InMail is the action the script answers.
+      const l = leads.find((x) => x.campaign === 0 && x.profile !== null && x.id !== taken && !(x.script?.unknownUnsent) && h.linkedin.deliveryLog.some((d) => d.subjectId === x.id && d.action === "invite") && !h.linkedin.handoverLog.some((d) => d.subjectId === x.id && d.action !== "invite") && !h.linkedin.acceptanceLog.some((a) => h.linkedin.deliveryLog.some((d) => d.key === a.key && d.subjectId === x.id)));
+      if (l?.profile && (unsettle === null || unsettle.phase !== "arm")) {
+        const script: ProfileScript = { ...(l.script ?? {}), unknownUnsent: 1 };
+        l.script = script;
+        h.linkedin.profiles.set(l.profile, script);
+        acceptDraw = { phase: "handed", lead: l };
+      }
+    } else if (acceptDraw?.phase === "handed" || acceptDraw?.phase === "marked") {
+      const l = acceptDraw.lead;
+      const handed = h.linkedin.handoverLog.find((x) => x.subjectId === l.id && x.action === "inmail");
+      if (handed && h.linkedin.deliveryLog.some((d) => d.key === handed.key)) acceptDraw = null;
+      else if (handed && acceptDraw.phase === "handed") {
+        // Accepted at once, while the work is uncertain (a second call finds the invite accepted and does nothing).
+        if (acceptOrder === "before" && l.profile) h.linkedin.acceptNow(l.profile);
+        const st = await h.store.engine.subject(l.id, h.clock);
+        const w = st?.work.find((x) => x.key === handed.key);
+        // Before: marked only once the engine has stored the acceptance, so the acceptance came while the work was uncertain.
+        const acceptanceStored = (st?.tracks.find((t) => t.trackId === campaigns[l.campaign]!.li.id)?.acceptedWall ?? null) !== null;
+        if (w && w.settled === null && w.unresolvedSince !== null && (acceptOrder !== "before" || acceptanceStored)) {
+          const a = st?.attempts.filter((x) => x.idempotencyKey === handed.key).at(-1);
+          if (a && (await h.engine.markAttempt(a.id, "not_sent"))) {
+            markedWork.set(handed.key, h.clock);
+            features.add("unresolved-marked-not-sent");
+            acceptDraw = { phase: "marked", lead: l };
+          }
+        } else if (w && w.settled !== null) acceptDraw = null;
+      } else if (acceptDraw.phase === "marked") {
+        if (acceptOrder === "after" && l.profile) h.linkedin.acceptNow(l.profile);
+        features.add(acceptOrder === "before" ? "an-acceptance-while-the-inmail-was-uncertain" : "an-acceptance-after-the-inmail-settled-unsent");
+        acceptDraw = null;
+      }
+    }
     // Item C's draw: armed once a contested lead's invite has gone, so its next action, the InMail, is answered unknown.
     if (unsettle?.phase === "arm") {
       const l = leads.find((x) => x.campaign === 0 && x.profile !== null && h.linkedin.deliveryLog.some((d) => d.subjectId === x.id && d.action === "invite"));
@@ -1031,6 +1102,30 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
       reportsBack.splice(reportsBack.indexOf(b), 1);
       await storeReport(b.session, { plan: b.plan, credits: b.credits });
       features.add("inmail-credits-returned");
+    }
+    for (const [ci, kind] of [...editBeforeChoice]) {
+      const waiter = leads.find((l) => l.campaign === ci && h.linkedin.deliveryLog.some((d) => d.subjectId === l.id && d.action === "invite"));
+      if (!waiter) continue;
+      const t = (await h.store.engine.subject(waiter.id, h.clock))?.tracks.find((x) => x.trackId === campaigns[ci]!.li.id);
+      if (!t || t.finishedAt !== null || (t.inmail ?? null) !== null || (t.connection ?? null) !== null || (t.acceptByWall ?? 0) <= h.clock) continue;
+      editBeforeChoice.delete(ci);
+      const c = campaigns[ci]!;
+      const stored = (await h.request<{ definition: CampaignDefinition }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definition;
+      const tracks = stored.tracks.map((tr) => {
+        if (tr.id !== c.li.id) return tr;
+        const first = tr.steps.filter((x) => x.role !== "inmail" && !x.removed)[1];
+        const live = tr.steps.filter((x) => x.role !== "inmail" && !x.removed).length;
+        if (!first) return tr;
+        if (kind === "remove") return live > 2 ? { ...tr, steps: tr.steps.map((x) => (x.id === first.id ? { ...x, removed: true } : x)) } : tr;
+        const at = tr.steps.findIndex((x) => x.id === first.id);
+        const added: StepDefinition = { id: `${tr.id}-f${++requestNo}`, waitDays: 0, subject: "", body: "A first message added while they wait.", threading: "new_subject", removed: false };
+        return { ...tr, steps: [...tr.steps.slice(0, at), added, ...tr.steps.slice(at)] };
+      });
+      if (JSON.stringify(tracks) === JSON.stringify(stored.tracks)) continue;
+      if ((await h.request("PUT", `/api/campaigns/${c.id}/sequence`, { ...stored, tracks })).status === 200) {
+        noteSwitch(ci, { ...stored, tracks });
+        features.add(`a-running-edit-before-the-choice:${kind}`);
+      }
     }
     const chosen: Lead[] = [];
     for (const l of leads) {
@@ -1446,16 +1541,32 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
      * acceptance deadline passed before `at`, and neither the session nor the user had answered the withdrawal by then.
      * Its conversation's fate is then unknown: another subject waits on it, never skips.
      */
-    // Each lead's InMail fallback as the engine stored it, which L22 to L25 check against the record's own judgment. A
-    // track whose InMail was chosen, went, or was overtaken by an acceptance left its invite open (Q50): its conversation
-    // is held, not being withdrawn (seed 24071).
-    const inmailHeld = new Set<string>();
-    for (const l of leads) {
-      const t = (await h.store.engine.subject(l.id, now))?.tracks.find((x) => x.trackId === campaigns[l.campaign]!.li.id);
-      if (t?.inmail === "chosen" || t?.inmail === "sent" || t?.inmail === "accepted") inmailHeld.add(l.id);
-    }
+    /**
+     * A lead's InMail fallback by the record's own judgment at the expiry, as of `at` (the council on d6ad9f5, item 3): never
+     * the engine's stored state. "held": the expiry left the invite open for an InMail (Q50): the fallback on at the judged
+     * deadline, no acceptance reported by then, the session reporting a plan on a fresh report (an old report of a signed-in
+     * session defers the judgment, which also leaves the invite open) and a credit by the record's count. A refusal of the
+     * InMail, or a withdrawal the session was asked for (a credit others held, a switch-off, a skip), ends it. "pending":
+     * held, with no InMail handed over yet. Otherwise "none": not judged yet, connected, or on the withdrawal path.
+     */
+    const recordInmail = (l: Lead, at: number): "none" | "held" | "pending" => {
+      const invite = li.deliveryLog.find((d) => d.subjectId === l.id && d.action === "invite");
+      if (!invite) return "none";
+      const deadline = judgedDeadline(l, invite.at);
+      const judgedAt = outages.find((o) => o.from <= deadline && deadline < o.to)?.to ?? deadline;
+      if (!Number.isFinite(deadline) || judgedAt > at || !fallbackJudgedAt(l.campaign, deadline)) return "none";
+      const accepted = li.acceptanceLog.find((a) => a.key === invite.key);
+      if (accepted && accepted.at + (l.script?.acceptReportDelayMs ?? 0) <= judgedAt) return "none";
+      const sender = invite.sender;
+      const stale = !freshAt(sender, judgedAt);
+      if (!planned(sender, judgedAt) || (stale && !healthyAt(sender, judgedAt)) || (!stale && creditsAt(sender, judgedAt) < 1)) return "none";
+      if (li.refusals.some((r) => r.reason === "inmail_refused" && r.at <= at && li.handoverLog.some((x) => x.key === r.key && x.subjectId === l.id))) return "none";
+      if (li.withdrawalLog.some((w) => w.key === invite.key && w.at <= at)) return "none";
+      return li.handoverLog.some((x) => x.subjectId === l.id && x.action === "inmail" && x.at <= at) ? "held" : "pending";
+    };
     const beingWithdrawn = (subject: string, session: string, profile: string, at: number): boolean => {
-      if (inmailHeld.has(subject)) return false;
+      const held = leadOfSubject(subject);
+      if (held && recordInmail(held, at) !== "none") return false;
       const owner = leadOfSubject(subject);
       const invite = li.deliveryLog.find((d) => d.subjectId === subject && d.sender === session && d.destination === profile && d.action === "invite");
       if (!owner || !invite || li.deliveryLog.some((d) => d.subjectId === subject && d.destination === profile && d.action !== "invite")) return false;
@@ -1631,7 +1742,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           const kind = p.trackId === c.li.id ? (p.nextStepId === c.li.steps[0]!.id ? "invites" : "messages") : null;
           // A chosen InMail's time has come by the expiry, not a connection, and it goes only from the session that sent the
           // invite, by its messages per day (14.5; seeds 24071, 24084: its session had none, the pool's others had some).
-          const inmailPending = p.trackId === c.li.id && st.campaign.definition.tracks.find((t) => t.id === c.li.id)?.steps.find((s) => s.id === p.nextStepId)?.role === "inmail";
+          // Pending by the record's own judgment (the council on d6ad9f5, item 3), not the engine's pending step.
+          const inmailPending = p.trackId === c.li.id && recordInmail(lead, now) === "pending" && (p.connection ?? null) === null;
           // Only a step whose time has come by its connection: a message still waiting for acceptance says that first.
           const awaiting = (p.acceptBy ?? null) !== null && (p.connection ?? null) === null && !inmailPending;
           const inviter = invite?.sender ?? null;
@@ -1641,7 +1753,16 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
           // The read says no allowance exactly when the record finds none on any session the step may use (zero or never
           // set), and full for the day only where an allowance exists and is used up (ticket 24b, item 15).
           // A chosen InMail with no credit backing it says that first: its credit, then its session's room (14.5).
-          if (noRoom && (shown?.hold ?? null) === null && !(inmailPending && shown?.nextStep?.when.why === "inmail_unavailable")) {
+          // When the read says the InMail waits on its credit, the record's own count must agree: no plan or no fresh report,
+          // or fewer credits free (reported, less delivered since and less InMail work still uncertain) than InMails pending.
+          const creditWait = inmailPending && shown?.nextStep?.when.why === "inmail_unavailable";
+          if (creditWait && inviter !== null) {
+            const pendingThere = leads.filter((o) => recordInmail(o, now) === "pending" && li.deliveryLog.find((d) => d.subjectId === o.id && d.action === "invite")?.sender === inviter && !stopped.has(o.id) && !marked.has(o.id)).length;
+            const uncertain = li.handoverLog.filter((x) => x.action === "inmail" && x.sender === inviter && !li.deliveryLog.some((d) => d.key === x.key) && !li.refusals.some((r) => r.key === x.key) && !markedWork.has(x.key)).length;
+            const free = planned(inviter, now) && freshAt(inviter, now) ? creditsAt(inviter, now) - uncertain : 0;
+            if (free >= pendingThere) problem(`L13: ${lead.id}'s InMail reads as waiting on a credit from ${inviter}, though the record finds ${free} free for the ${pendingThere} InMails pending there`);
+          }
+          if (noRoom && (shown?.hold ?? null) === null && !creditWait) {
             if (shown?.nextStep?.when.why !== "no_allowance") problem(`L13: ${lead.id}'s ${p.nextStepId} has no allowance on any session and its read does not say so (${JSON.stringify(shown?.nextStep?.when)})`);
             else features.add("a-step-waiting-on-a-zero-allowance");
             continue;

@@ -45,7 +45,7 @@ function connectedAtTheSend(s: SubjectState): SubjectState {
 }
 
 /** A swap of one of progress.ts's rule flags for a replay, undone after it. */
-type Flag = "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession" | "conversationKeysOwnOnly" | "inmailJudgesStanding" | "inmailWaitsForExpiry" | "acceptanceSkipsInmail" | "refusedInmailEndsTrack" | "switchOffReachesChosen" | "inmailOffWhenRemoved" | "inmailTakesFirstPlace" | "restartAcquires" | "handoverRechecksBacking" | "replacedNamedAtChoice" | "replacedSkipMovesCursor" | "settledUnsentReleases";
+type Flag = "notConnectedMarksBad" | "pairsByChannel" | "waitEditRealigns" | "checksPerSession" | "conversationKeysOwnOnly" | "inmailJudgesStanding" | "inmailWaitsForExpiry" | "acceptanceSkipsInmail" | "refusedInmailEndsTrack" | "switchOffReachesChosen" | "inmailOffWhenRemoved" | "inmailTakesFirstPlace" | "restartAcquires" | "handoverRechecksBacking" | "replacedNamedAtChoice" | "replacedSkipMovesCursor" | "settledUnsentReleases" | "replacedPickedByLivePlace" | "settledAcceptanceApplies";
 /** Several flags swapped at once for one replay, undone after it. */
 function flags(values: Partial<Record<Flag, boolean>>): () => () => void {
   return () => {
@@ -72,7 +72,7 @@ function flag<K extends Flag>(name: K, value: (typeof progressRules)[K]): () => 
 }
 
 /** The InMail mutations' killing seed offsets (ticket 27), searched again over offsets 0 to 50 after the council's draws; ADR 0004 14.16 records them. */
-const INMAIL_SEEDS = { L18: 5, L19: 16, L20: 0, L21: 18, L22: 3, L23: 5, L24: 42, L25: 16, replaced: 0, restart: 93, handover: 18, movedBefore: 40, settledUnsent: 7 } as const;
+const INMAIL_SEEDS = { L18: 5, L19: 16, L20: 0, L21: 18, L22: 3, L23: 5, L24: 42, L25: 16, replaced: 0, restart: 93, handover: 18, movedBefore: 40, settledUnsent: 7, byPlace: 93, settledAcceptance: 0 } as const;
 
 /** The seed offset that reaches a step no session has any allowance for (the search's 24015 on a6c1700). */
 const NO_ALLOWANCE_SEED = 15;
@@ -404,6 +404,22 @@ export const LINKEDIN_MUTATIONS: Readonly<Record<string, LinkedinMutation>> = {
     seed: INMAIL_SEEDS.settledUnsent,
     rules: {},
     patch: flags({ settledUnsentReleases: false }),
+  },
+  // L23 (the council on d6ad9f5, item 1): the replaced step picked by its place among every step, removed ones included, so
+  // a first message removed before the choice is "replaced" and the live first message goes after the InMail.
+  "the replaced step picked by place, removed steps included": {
+    invariant: "L23",
+    seed: INMAIL_SEEDS.byPlace,
+    rules: {},
+    patch: flags({ replacedPickedByLivePlace: false }),
+  },
+  // L13 (the council on d6ad9f5, item 2): an acceptance stored while the InMail's work was uncertain is left stored when that
+  // work settles not sent, so the InMail stays pending for a connection.
+  "an acceptance recorded while the InMail was uncertain is not applied when it settles unsent": {
+    invariant: "L13",
+    seed: INMAIL_SEEDS.settledAcceptance,
+    rules: {},
+    patch: flags({ settledAcceptanceApplies: false }),
   },
   // L27: a restart re-takes its InMail's credit without acquiring, at the head of the line, ahead of a lead that holds it now.
   "a restart restores a commitment without acquiring": {
