@@ -501,6 +501,8 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
   const acceptOrder: "before" | "after" | null = contested ? (seventh() < 0.5 ? "before" : "after") : null;
   let acceptDraw: { readonly phase: "arm" } | { readonly phase: "handed"; readonly lead: Lead } | { readonly phase: "marked"; readonly lead: Lead } | null = acceptOrder ? { phase: "arm" } : null;
   const editBeforeChoice = new Map<number, "remove" | "insert">(campaigns.flatMap((c, i) => (fallbackOn(c.definition, i) && sixth() < 0.5 ? [[i, sixth() < 0.5 ? "remove" : "insert"] as const] : [])));
+  // A contested run leaves campaign 0 to the contest's own draws, as the others do.
+  if (contested) editBeforeChoice.delete(0);
   /** The record's own marks of unresolved work, by work key: when the run settled it, by the user's hand. */
   const markedWork = new Map<string, number>();
   /** Sessions seen with fewer InMails backed than the record's free credits allow, since when (L26 during the run). */
@@ -1150,7 +1152,13 @@ export async function runLinkedin(seed: number, options: LinkedinRunOptions = {}
         // A reorder moves the first follow-up in front of the first message, across the step the InMail replaces, so a kept
         // step then sits before the replaced one (review bot on 56030c4, item B); with three messages or more.
         if (kind === "reorder" && messages.length > 2) {
-          const [a, b] = messages;
+          // The step this lead's InMail replaces, by the record's own model at its choice, and the live message after it.
+          const sentInvite = h.linkedin.deliveryLog.find((d) => d.subjectId === l.id && d.action === "invite");
+          const due = sentInvite ? judgedDeadline(l, sentInvite.at) : Infinity;
+          const judged = outages.find((o) => o.from <= due && due < o.to)?.to ?? due;
+          const replacedId = Number.isFinite(judged) ? stepsJudgedAt(l.campaign, judged).filter((x) => x.role !== "inmail" && !x.removed)[1]?.id : undefined;
+          const ri = messages.findIndex((x) => x.id === replacedId);
+          const [a, b] = ri >= 0 && messages[ri + 1] ? [messages[ri]!, messages[ri + 1]!] : messages;
           const steps = [...tr.steps];
           const ia = steps.findIndex((s) => s.id === a!.id);
           const ib = steps.findIndex((s) => s.id === b!.id);
