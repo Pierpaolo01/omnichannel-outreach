@@ -4,7 +4,7 @@
  * channel is a compile error until it has its entry.
  */
 import { linkedinProfileKey } from "./linkedin-profile.ts";
-import { facebookAccountKey, instagramAccountKey } from "./social-account.ts";
+import { facebookAccountKey, facebookMayName, instagramAccountKey, instagramMayName } from "./social-account.ts";
 
 /**
  * A social channel whose track is messages only: a text-only first message, which reaches someone who does not follow the
@@ -56,6 +56,25 @@ export const SOCIAL_CHANNELS: { readonly [C in SocialChannel]: SocialChannelFact
 export const MESSAGE_REQUEST_COLUMNS: { readonly [C in MessageRequestChannel]: { readonly people: string; readonly businesses: string } } = {
   instagram: { people: "instagram", businesses: "instagram" },
   facebook: { people: "facebook", businesses: "facebook" },
+};
+
+/**
+ * Every account key an imported cell may name on a message-request channel (ADR 0004 14.3): a superset of the channel's
+ * `accountKey`, read by the test-contact boundary only, whose safe side is to refuse a test contact that may be a prospect's.
+ */
+export const MESSAGE_REQUEST_MAY_NAME: { readonly [C in MessageRequestChannel]: (raw: string) => readonly string[] } = {
+  instagram: instagramMayName,
+  facebook: facebookMayName,
+};
+
+/**
+ * What the application cannot tell about a channel's test contact, said where the user gives one and where a test run with
+ * the channel's steps starts (ADR 0004 14.3; the council on f3c9014, item 1a). Facebook names one account by its username
+ * or by its number, and nothing in either address joins them; Instagram's addresses carry only the username, so it has none.
+ */
+export const MESSAGE_REQUEST_TEST_CONTACT_LIMIT: { readonly [C in MessageRequestChannel]: string | null } = {
+  instagram: null,
+  facebook: "The app compares Facebook addresses as they are written: it can’t tell that a username and a number (profile.php?id=…) are the same account. Give your own account, never a lead’s.",
 };
 
 /** The kind a session reports of itself (ADR 0004 13.5): a personal profile, or a business account (a Page, on Facebook). */

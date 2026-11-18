@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { facebookAccountKey, instagramAccountKey } from "./social-account.ts";
+import { facebookAccountKey, facebookMayName, instagramAccountKey, instagramMayName } from "./social-account.ts";
 
 // ADR 0004 13.4 and 14.3. Every account here is fictitious.
 describe("instagramAccountKey", () => {
@@ -47,80 +47,99 @@ describe("instagramAccountKey", () => {
   });
 });
 
-describe("facebookAccountKey", () => {
-  it("normalises a profile's or a Page's username URL to one key", () => {
-    const key = "https://www.facebook.com/exampleharbourphysio";
-    for (const url of [
-      "https://www.facebook.com/example.harbour.physio",
-      "https://www.facebook.com/example.harbour.physio/",
-      "  http://facebook.com/Example.Harbour.Physio  ",
-      "https://m.facebook.com/example.harbour.physio?mibextid=abc#top",
-      "https://web.facebook.com/example.harbour.physio",
-      "https://WWW.Facebook.COM/example.harbour.physio/",
-    ]) {
-      expect(facebookAccountKey(url), url).toBe(key);
-    }
-  });
+/**
+ * ADR 0004 14.3's address table, row by row: each form, what a track messages (`accountKey`) and what the test-contact
+ * boundary reads (`mayName`). The expected keys are written out here, not derived. Fictitious accounts only.
+ */
+const N = "100012345678901";
+const FB_ID = `https://www.facebook.com/profile.php?id=${N}`;
+const FB_USER = "https://www.facebook.com/exampleharbour";
+const FACEBOOK_TABLE: readonly (readonly [form: string, accountKey: string | null, mayName: readonly string[]])[] = [
+  // A username, on every host that is another name for facebook.com; periods and capitals dropped.
+  ["https://www.facebook.com/exampleharbour", FB_USER, [FB_USER]],
+  ["https://www.facebook.com/Example.Harbour/", FB_USER, [FB_USER]],
+  ["  http://facebook.com/example.harbour?ref=x#top  ", FB_USER, [FB_USER]],
+  ["https://m.facebook.com/example.harbour", FB_USER, [FB_USER]],
+  ["https://mbasic.facebook.com/exampleharbour", FB_USER, [FB_USER]],
+  ["https://web.facebook.com/exampleharbour/", FB_USER, [FB_USER]],
+  ["https://en-gb.facebook.com/exampleharbour", FB_USER, [FB_USER]],
+  ["https://de-de.facebook.com/example.harbour", FB_USER, [FB_USER]],
+  ["https://fb.com/exampleharbour", FB_USER, [FB_USER]],
+  // Every form that carries the number: one id key.
+  [`https://www.facebook.com/${N}`, FB_ID, [FB_ID]],
+  [`https://www.facebook.com/${N}/`, FB_ID, [FB_ID]],
+  [`https://www.facebook.com/profile.php?id=${N}`, FB_ID, [FB_ID]],
+  [`https://m.facebook.com/profile.php?id=${N}&sk=about#x`, FB_ID, [FB_ID]],
+  [`http://facebook.com/profile.php/?ref=x&id=00${N}`, FB_ID, [FB_ID]],
+  [`https://www.facebook.com/Example-Clinic-${N}/`, FB_ID, [FB_ID]],
+  [`https://mbasic.facebook.com/Example.Clinic-${N}`, FB_ID, [FB_ID]],
+  // A hyphen with no number is no username and no number.
+  ["https://www.facebook.com/Example-Harbour-Physio", null, []],
+  ["https://www.facebook.com/example-clinic-123", null, []],
+  // Forms the app never messages but that carry an account: the boundary reads them.
+  [`https://www.facebook.com/pages/Example-Clinic/${N}`, null, [FB_ID]],
+  [`https://www.facebook.com/people/Example-Clinic/${N}/`, null, [FB_ID]],
+  ["https://www.facebook.com/exampleharbour/about", null, [FB_USER]],
+  [`https://www.facebook.com/${N}/posts/1`, null, [FB_ID]],
+  ["@example.harbour", null, [FB_USER]],
+  ["exampleharbour", null, [FB_USER]],
+  // Not an account in either reading.
+  ["https://www.facebook.com/me", null, []],
+  ["https://www.facebook.com/groups/example.group", null, []],
+  ["https://www.facebook.com/events/123456", null, []],
+  ["https://www.facebook.com/photo.php?fbid=1", null, []],
+  ["https://www.facebook.com/sharer/sharer.php?u=x", null, []],
+  ["https://www.facebook.com/profile.php", null, []],
+  ["https://www.facebook.com/profile.php?id=abc", null, []],
+  ["https://www.facebook.com/home.php", null, []],
+  ["https://www.facebook.com/.example", null, []],
+  ["https://www.facebook.com/example_harbour", null, []],
+  ["https://business.facebook.com/exampleharbour", null, []],
+  ["https://fb.me/exampleharbour", null, []],
+  ["https://m.me/exampleharbour", null, []],
+  ["https://facebook.com.evil.example/exampleharbour", null, []],
+  ["https://facebook.example/harbourlanephysio", null, []],
+  ["https://www.instagram.com/exampleharbour", null, []],
+  ["ftp://www.facebook.com/exampleharbour", null, []],
+  ["", null, []],
+  ["not a url", null, []],
+];
 
-  it("reads usernames that differ only in their periods as one account, as Facebook does (the review bot on c072ae8)", () => {
-    const key = facebookAccountKey("https://www.facebook.com/examplejohnsmith55");
-    for (const url of ["https://www.facebook.com/Example.John.Smith55", "https://www.facebook.com/example.john.smith.55/", "https://m.facebook.com/examplejohn.smith55"]) expect(facebookAccountKey(url), url).toBe(key);
-    // Instagram's periods stay part of the name.
+const IG = "https://www.instagram.com/example_harbour";
+const INSTAGRAM_TABLE: readonly (readonly [form: string, accountKey: string | null, mayName: readonly string[]])[] = [
+  ["https://www.instagram.com/example_harbour", IG, [IG]],
+  ["http://instagram.com/Example_Harbour/", IG, [IG]],
+  ["https://m.instagram.com/example_harbour?igsh=abc#top", IG, [IG]],
+  ["https://www.instagram.com/example_harbour/reels", null, [IG]],
+  ["@example_harbour", null, [IG]],
+  ["@Example_Harbour", null, [IG]],
+  ["https://instagr.am/example_harbour", null, []],
+  ["https://business.instagram.com/example_harbour", null, []],
+  ["https://www.instagram.com/p/ABC123/", null, []],
+  ["example_harbour", null, []],
+  ["", null, []],
+];
+
+describe("ADR 0004 14.3's address table, Facebook", () => {
+  for (const [form, key, mayName] of FACEBOOK_TABLE) {
+    it(`${JSON.stringify(form)}: messaged as ${key ?? "nothing"}; the boundary reads ${mayName.join(", ") || "nothing"}`, () => {
+      expect(facebookAccountKey(form)).toBe(key);
+      expect(facebookMayName(form)).toEqual(mayName);
+    });
+  }
+  it("a username and a number are two keys: nothing in an address joins them", () => {
+    expect(facebookAccountKey(FB_USER)).not.toBe(facebookAccountKey(`https://www.facebook.com/${N}`));
+  });
+});
+
+describe("ADR 0004 14.3's address table, Instagram", () => {
+  for (const [form, key, mayName] of INSTAGRAM_TABLE) {
+    it(`${JSON.stringify(form)}: messaged as ${key ?? "nothing"}; the boundary reads ${mayName.join(", ") || "nothing"}`, () => {
+      expect(instagramAccountKey(form)).toBe(key);
+      expect(instagramMayName(form)).toEqual(mayName);
+    });
+  }
+  it("periods stay part of an Instagram name", () => {
     expect(instagramAccountKey("https://www.instagram.com/example.pat")).not.toBe(instagramAccountKey("https://www.instagram.com/examplepat"));
-  });
-
-  it("reads a Page with no username of its own, its name and number joined by dashes, as one", () => {
-    expect(facebookAccountKey("https://www.facebook.com/Example-Harbour-Physio-100012345678901/")).toBe("https://www.facebook.com/example-harbour-physio-100012345678901");
-    expect(facebookAccountKey("https://www.facebook.com/Example.Harbour-Physio-100012345678901")).toBe("https://www.facebook.com/exampleharbour-physio-100012345678901");
-  });
-
-  it("normalises a profile.php address by its number, dropping every other parameter", () => {
-    const key = "https://www.facebook.com/profile.php?id=100012345678901";
-    for (const url of ["https://www.facebook.com/profile.php?id=100012345678901", "https://m.facebook.com/profile.php?id=100012345678901&sk=about#x", "http://facebook.com/profile.php/?ref=x&id=100012345678901"]) {
-      expect(facebookAccountKey(url), url).toBe(key);
-    }
-  });
-
-  it("reads anything that is not a profile or a Page as missing", () => {
-    for (const url of [
-      "",
-      "   ",
-      "@example.harbour",
-      "facebook.com/example.harbour",
-      "https://www.facebook.com/",
-      "https://www.facebook.com/profile.php",
-      "https://www.facebook.com/profile.php?id=",
-      "https://www.facebook.com/profile.php?id=abc",
-      "https://www.facebook.com/groups/example.group",
-      "https://www.facebook.com/groups",
-      "https://www.facebook.com/events/123456",
-      "https://www.facebook.com/pages/Example-Harbour/123456",
-      "https://www.facebook.com/people/Example-Harbour/100012345678901/",
-      "https://www.facebook.com/example.harbour/posts/123",
-      "https://www.facebook.com/example.harbour/photos/a.1/2/",
-      "https://www.facebook.com/photo.php?fbid=1",
-      "https://www.facebook.com/permalink.php?story_fbid=1&id=2",
-      "https://www.facebook.com/sharer/sharer.php?u=x",
-      "https://www.facebook.com/share/abc123/",
-      "https://www.facebook.com/watch",
-      "https://www.facebook.com/marketplace",
-      "https://www.facebook.com/login",
-      "https://www.facebook.com/home.php",
-      "https://www.facebook.com/.example",
-      "https://www.facebook.com/example.",
-      "https://www.facebook.com/example_harbour",
-      "https://www.facebook.com/---",
-      "https://www.facebook.com/" + "a".repeat(101),
-      "https://facebook.example/harbourlanephysio",
-      "https://notfacebook.com/example",
-      "https://facebook.com.evil.example/example",
-      "https://business.facebook.com/example",
-      "https://fb.com/example",
-      "ftp://www.facebook.com/example",
-      "https://www.instagram.com/example",
-      "not a url",
-    ]) {
-      expect(facebookAccountKey(url), url).toBeNull();
-    }
   });
 });

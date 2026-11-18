@@ -79,6 +79,7 @@ interface ChannelForms {
   readonly notAnAccount: (i: number) => string;
   /** A person's own account, the `v`th version a re-import gives. */
   readonly ownCell: (seed: number, person: string, v?: number) => string;
+  /** The record's own reading of a cell, or of a destination a provider logged: the account's key, or null. */
   readonly accountKey: (raw: string) => string | null;
 }
 
@@ -105,11 +106,23 @@ const FORMS: { readonly [C in RunChannel]: ChannelForms } = {
     notAnAccount: (i) => `https://www.facebook.com/groups/example${i}`,
     ownCell: (seed, p, v) => `https://m.facebook.com/example.lead.${seed}.${p}${v === undefined ? "" : `.v${v}`}`,
     accountKey: (raw) => {
-      const id = /^\s*https?:\/\/(?:www\.|m\.|web\.)?facebook\.com\/profile\.php\?(?:[^#]*&)?id=(\d+)(?:[&#].*)?\s*$/i.exec(raw)?.[1];
-      if (id !== undefined) return `https://www.facebook.com/profile.php?id=${id}`;
-      const m = /^\s*https?:\/\/(?:www\.|m\.|web\.)?facebook\.com\/([A-Za-z0-9.-]{1,100})\/?(?:[?#].*)?\s*$/i.exec(raw);
-      const name = m?.[1]?.toLowerCase();
-      if (!name || name.startsWith(".") || name.endsWith(".") || name.endsWith(".php") || ["groups", "events", "pages", "people", "watch", "marketplace", "login", "share", "sharer", "profile"].includes(name)) return null;
+      // Hosts that are other names for facebook.com with the same path; then a number, a Page's name-number, or a username.
+      const m = /^\s*https?:\/\/((?:www\.|m\.|mbasic\.|web\.|[a-z]{2}-[a-z]{2}\.)?facebook\.com|(?:www\.)?fb\.com)\/([^?#]*)(\?[^#]*)?(#.*)?\s*$/i.exec(raw);
+      if (!m) return null;
+      const path = (m[2] ?? "").replace(/\/$/, "");
+      const byNumber = (n: string) => `https://www.facebook.com/profile.php?id=${n.replace(/^0+/, "")}`;
+      if (path.toLowerCase() === "profile.php") {
+        const id = /[?&]id=(\d+)(?:&|$)/.exec(m[3] ?? "")?.[1];
+        return id === undefined ? null : byNumber(id);
+      }
+      if (path.includes("/") || path === "") return null;
+      const name = path.toLowerCase();
+      if (/^\d+$/.test(name)) return byNumber(name);
+      if (name.includes("-")) {
+        const n = /-(\d{5,})$/.exec(name)?.[1];
+        return n === undefined ? null : byNumber(n);
+      }
+      if (!/^[a-z0-9.]+$/.test(name) || !/[a-z]/.test(name) || name.startsWith(".") || name.endsWith(".") || name.endsWith(".php") || ["groups", "events", "pages", "people", "watch", "marketplace", "login", "share", "sharer", "profile", "me"].includes(name)) return null;
       // Facebook ignores a username's periods: one account however it is dotted.
       return `https://www.facebook.com/${name.split(".").join("")}`;
     },
@@ -212,6 +225,11 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
   const primary = lanes[0]!;
   const accountOf = (lane: Lane, session: string) => `${lane.channel}:${session}`;
   const sessionOf = (account: string) => account.replace(/^[a-z]+:/, "");
+  /**
+   * A destination a provider logged, read by the record's own rule: the engine hands over its key, and a broken engine's key
+   * for one account under two spellings still reads as that one account here.
+   */
+  const keyOf = (lane: Lane, destination: string) => lane.forms.accountKey(destination) ?? destination;
   for (const lane of lanes) {
     const r = lane.rnd;
     lane.sessions.push(...SESSIONS.slice(0, 1 + Math.floor(r() * 3)).map((id) => ({ id, kind: r() < 0.5 ? ("personal" as const) : ("business" as const), gapMs: pickOf(r, [5 * MIN, 30 * MIN]), k: 1, healthy: true, resetZone: "Europe/London" })));
@@ -718,7 +736,7 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
       const indexOfKey = new Map<string, number>();
       port.handoverLog.forEach((x, i) => indexOfKey.set(x.key, i));
       const markedBadAt = new Map<string, { at: number; index: number }>();
-      for (const r of port.refusals) if (r.reason === "invalid_destination" && !markedBadAt.has(r.destination)) markedBadAt.set(r.destination, { at: r.at, index: indexOfKey.get(r.key) ?? -1 });
+      for (const r of port.refusals) if (r.reason === "invalid_destination" && !markedBadAt.has(keyOf(lane, r.destination))) markedBadAt.set(keyOf(lane, r.destination), { at: r.at, index: indexOfKey.get(r.key) ?? -1 });
       return markedBadAt;
     }
 
@@ -745,12 +763,12 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
       const refusedKeys = new Map(port.refusals.map((r) => [r.key, r.reason]));
       const owner = new Map<string, string>();
       for (const x of port.handoverLog) {
-        const pair = `${x.sender}|${x.destination}`;
+        const pair = `${x.sender}|${keyOf(lane, x.destination)}`;
         const was = owner.get(pair);
         if (was !== undefined && was !== x.subjectId) {
-          const wasAll = port.handoverLog.filter((y) => y.subjectId === was && `${y.sender}|${y.destination}` === pair && y.at <= x.at);
+          const wasAll = port.handoverLog.filter((y) => y.subjectId === was && `${y.sender}|${keyOf(lane, y.destination)}` === pair && y.at <= x.at);
           // A crash holds the pair it was for, on its own lane, until the user marks it not sent (two tracks of one lead use two pairs).
-          const holding = crashed.some((c) => c.subjectId === was && c.account === accountOf(lane, x.sender) && c.destination === x.destination && !((markedNotSentAt.get(c.attemptId) ?? Infinity) <= x.at));
+          const holding = crashed.some((c) => c.subjectId === was && c.account === accountOf(lane, x.sender) && keyOf(lane, c.destination) === keyOf(lane, x.destination) && !((markedNotSentAt.get(c.attemptId) ?? Infinity) <= x.at));
           const released = wasAll.length > 0 && wasAll.every((y) => refusedKeys.has(y.key)) && !holding;
           if (!released && report) problem(`M5: ${x.subjectId} was handed a ${lane.forms.name} message to ${x.destination} from ${x.sender} at ${iso(x.at)}, a pair ${was} owns`);
           else if (released) owner.set(pair, x.subjectId);
@@ -779,13 +797,14 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
         if (x !== first && x.sender !== first.sender) problem(`M8: ${x.subjectId}'s ${name} message of ${x.trackId} at ${iso(x.at)} went from ${x.sender}, after that track's first from ${first.sender}`);
         // M2: the destination the record derives on this lane; never one marked bad before it.
         const position = port.handoverLog.indexOf(x);
-        const bad = markedBadAt.get(x.destination);
+        const destination = keyOf(lane, x.destination);
+        const bad = markedBadAt.get(destination);
         if (bad !== undefined && bad.index < position) problem(`M2: ${x.subjectId}'s ${name} message at ${iso(x.at)} went to ${x.destination}, marked bad at ${iso(bad.at)}`);
         // The destination is fixed at the track's start, which the record models as the launch (the track starts at entry),
         // and every message of the track goes there: a re-import that replaces it skips the track, never retargets it (ADR
         // 0004 13.4; the review of f2824d4, item 8). No mark can precede the launch, so none is counted at it.
         const pinned = destinationAt(lane, l, launchedAt, 0);
-        if (x.destination !== pinned) problem(`M2: ${x.subjectId}'s ${name} message at ${iso(x.at)} went to ${x.destination}; its track started at ${iso(launchedAt)} on ${pinned ?? "no account"}`);
+        if (destination !== pinned) problem(`M2: ${x.subjectId}'s ${name} message at ${iso(x.at)} went to ${x.destination}; its track started at ${iso(launchedAt)} on ${pinned ?? "no account"}`);
         // M3: nothing after an accepted mark or a stop, on any lane, until a restart after it.
         const stop = ended.get(x.subjectId);
         if (stop && position >= (stop.handovers.get(lane.channel) ?? Infinity)) problem(`M3: ${x.subjectId} was handed a ${name} message at ${iso(x.at)}, after its ${stop.kind}${stop.channel ? ` on ${FORMS[stop.channel].name}` : ""} at ${iso(stop.at)}`);
@@ -815,7 +834,7 @@ export async function runMessageRequests(seed: number, options: MessageRequestRu
       if (port.refusals.some((r) => r.reason === "not_allowed")) laneFeature(lane, "a-message-not-allowed");
       if (port.refusals.some((r) => r.reason === "rate_limited")) laneFeature(lane, "a-rate-limit");
       if (lostKeys.size > 0 && port.lookupLog.some((x) => x.answer === "sent")) laneFeature(lane, "a-lost-answer-found-by-lookup");
-      if (port.handoverLog.some((x) => port.handoverLog.some((y) => y.destination === x.destination && y.subjectId !== x.subjectId))) laneFeature(lane, "one-account-reached-for-two-subjects");
+      if (port.handoverLog.some((x) => port.handoverLog.some((y) => keyOf(lane, y.destination) === keyOf(lane, x.destination) && y.subjectId !== x.subjectId))) laneFeature(lane, "one-account-reached-for-two-subjects");
       // M10: when a session's day was full, a follow-up due before a first message that took a slot that day never went later.
       if (edited.has(lane.channel)) return;
       for (const [k, n] of perDay) {

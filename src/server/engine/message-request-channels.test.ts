@@ -643,10 +643,21 @@ describe("Instagram and Facebook in one campaign (ADR 0004 14.6): two tracks of 
   });
 });
 
-describe("Facebook usernames ignore periods (the review bot on c072ae8): one account however its username is dotted", () => {
-  const PLAIN = "https://www.facebook.com/exampleharbourphysio";
-  const DOTTED = "https://www.facebook.com/Example.Harbour.Physio/";
-  async function facebookWorld(companyCell: string) {
+describe("one Facebook account under several spellings (the review bot and the council on c072ae8 and f3c9014; ADR 0004 14.3)", () => {
+  const N = "100012345678901";
+  /** Pairs of spellings of one account, each tried in both orders: periods, every number form, and host aliases. */
+  const PAIRS: readonly (readonly [string, string])[] = [
+    ["https://www.facebook.com/exampleharbourphysio", "https://www.facebook.com/Example.Harbour.Physio/"],
+    [`https://www.facebook.com/${N}`, `https://www.facebook.com/profile.php?id=${N}`],
+    [`https://www.facebook.com/Example-Clinic-${N}/`, `https://www.facebook.com/${N}`],
+    [`https://m.facebook.com/profile.php?id=${N}&sk=about`, `https://mbasic.facebook.com/Example-Clinic-${N}`],
+    ["https://fb.com/exampleharbourphysio", "https://en-gb.facebook.com/example.harbour.physio"],
+  ];
+  const ORDERED = PAIRS.flatMap(([a, b]) => [[a, b], [b, a]] as const);
+  const fbTrack: TrackDefinition = { id: "fb", channel: "facebook", branch: "main", window: ALWAYS, steps: [step("fb-m1", 0, "Hello {{company}}.")], start: { kind: "entry" }, removed: false, senders: [socialAccountId("facebook", S1)] };
+  const business1 = (cell: string, id = "b1", name = "Harbour Lane Physio") => business({ business_id: id, business_name: name, phone_e164: `+4420794601${id === "b1" ? "01" : "02"}`, ...businessAccountCell("facebook", cell) });
+
+  async function facebookWorld(companyCells: readonly string[]) {
     const h = new EngineHarness({
       start: MONDAY_9 - H,
       accounts: [{ id: "inbox-a", capacity: 50, gapMs: MIN, k: 2, healthy: true, quotaAvailable: true, resetZone: "UTC" }],
@@ -654,41 +665,50 @@ describe("Facebook usernames ignore periods (the review bot on c072ae8): one acc
     });
     await h.tick();
     expect((await h.request("PUT", `/api/sender-accounts/${socialAccountId("facebook", S1)}/allowances`, { invitesPerDay: 0, messagesPerDay: 20, notesPerMonth: 0 })).status).toBe(200);
-    const businesses = [business({ business_id: "b1", business_name: "Harbour Lane Physio", phone_e164: "+442079460101", ...businessAccountCell("facebook", companyCell) })];
-    const { campaign: c } = await h.createCampaign("Aliases", { businesses, people: [] });
-    const track: TrackDefinition = { id: "fb", channel: "facebook", branch: "main", window: ALWAYS, steps: [step("fb-m1", 0, "Hello {{company}}.")], start: { kind: "entry" }, removed: false, senders: [socialAccountId("facebook", S1)] };
-    await h.defineSequence(c.id, { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [], tracks: [track] });
+    const businesses = companyCells.map((cell, i) => business1(cell, `b${i + 1}`, `Fictional Clinic ${i + 1}`));
+    const { campaign: c } = await h.createCampaign("Spellings", { businesses, people: [] });
+    await h.defineSequence(c.id, { timezone: "Europe/London", callSkipLimitDays: 2, emailPool: ["inbox-a"], smsPool: [], tracks: [fbTrack] });
     const lead = async () => (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${c.id}`)).body.rows[0]?.enrollments[0]?.id ?? "";
     const version = async () => (await h.request<{ definitionVersion: number }>("GET", `/api/campaigns/${c.id}/sequence`)).body.definitionVersion;
-    /** Starts a test run written for the company lead: the request is well formed, so only the boundary can refuse it. */
+    /** Starts a test run written for a company lead: the request is well formed, so only the boundary can refuse it. */
     const runTest = async (requestId: string) => h.request("POST", `/api/campaigns/${c.id}/test-runs`, { requestId, renderAs: await lead(), expect: { definitionVersion: await version() } });
     return { h, campaign: c.id, businesses, runTest };
   }
 
-  for (const [imported, given] of [
-    [PLAIN, DOTTED],
-    [DOTTED, PLAIN],
-  ] as const) {
-    test(`a prospect's ${imported === PLAIN ? "plain" : "dotted"} username refuses the ${given === PLAIN ? "plain" : "dotted"} spelling as a test contact, and no test run reaches it`, async () => {
-      const { h, campaign, runTest } = await facebookWorld(imported);
+  for (const [imported, given] of ORDERED) {
+    test(`a prospect at ${imported} refuses ${given} as a test contact, and no test run reaches it`, async () => {
+      const { h, campaign, runTest } = await facebookWorld([imported]);
       const saved = await h.request("PUT", `/api/campaigns/${campaign}/test-contacts`, { email: "", mobile: "", facebook: given });
       expect(saved.status).toBe(409);
-      const run = await runTest("run-1");
-      expect(run.status).toBe(409);
+      expect((await runTest("run-1")).status).toBe(409);
       await h.advanceTo(h.clock + H);
-      expect(h.social("facebook").handoverLog.filter((x) => x.subjectId.startsWith("test") || x.destination !== imported)).toEqual([]);
+      expect(h.social("facebook").handoverLog.filter((x) => !x.subjectId.startsWith("id-"))).toEqual([]);
+    });
+
+    test(`a test contact saved as ${given} before a prospect at ${imported} is imported is refused when the run starts`, async () => {
+      const { h, campaign, businesses, runTest } = await facebookWorld([""]);
+      expect((await h.request("PUT", `/api/campaigns/${campaign}/test-contacts`, { email: "", mobile: "", facebook: given })).status).toBe(200);
+      await h.reimport(campaign, { businesses: [{ ...businesses[0]!, ...businessAccountCell("facebook", imported) }], people: [] });
+      const run = await runTest("run-2");
+      expect(run.status).toBe(409);
+      expect(JSON.stringify(run.body)).toContain("Facebook");
+      await h.advanceTo(h.clock + H);
+      expect(h.social("facebook").handoverLog).toEqual([]);
     });
   }
 
-  test("a test contact saved before a prospect with its other spelling is imported is refused when the run starts", async () => {
-    const { h, campaign, businesses, runTest } = await facebookWorld("");
-    const saved = await h.request<{ definitionVersion: number }>("PUT", `/api/campaigns/${campaign}/test-contacts`, { email: "", mobile: "", facebook: DOTTED });
-    expect(saved.status).toBe(200);
-    await h.reimport(campaign, { businesses: [{ ...businesses[0]!, ...businessAccountCell("facebook", PLAIN) }], people: [] });
-    const run = await runTest("run-2");
-    expect(run.status).toBe(409);
-    expect(JSON.stringify(run.body)).toContain("Facebook");
-    await h.advanceTo(h.clock + H);
-    expect(h.social("facebook").handoverLog).toEqual([]);
-  });
+  for (const [a, b] of PAIRS) {
+    test(`two leads whose companies give one account as ${a} and ${b}: one session sends it one first message, and the other lead is skipped as taken`, async () => {
+      const { h, campaign } = await facebookWorld([a, b]);
+      h.clock = MONDAY_9;
+      expect((await h.launch(campaign)).status).toBe(200);
+      await h.advanceTo(MONDAY_9 + 2 * H);
+      const sent = h.social("facebook").deliveryLog;
+      expect(sent).toHaveLength(1);
+      const leads = (await h.request<LeadSearchResult>("GET", `/api/leads?campaign=${campaign}`)).body.rows.map((r) => r.enrollments[0]!.id);
+      const other = leads.find((id) => id !== sent[0]!.subjectId)!;
+      const track = (await h.request<EnrollmentRead>("GET", `/api/enrollments/${other}`)).body.tracks.find((t) => t.trackId === "fb");
+      expect(track).toMatchObject({ finishReason: "skipped_conversation_taken" });
+    });
+  }
 });

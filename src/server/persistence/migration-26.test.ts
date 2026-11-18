@@ -6,21 +6,30 @@ import { addChannel } from "./add-channel.ts";
 import { migrate, MIGRATIONS } from "./migrations.ts";
 
 /**
- * Migration 26 (ticket 26, ADR 0004 section 14) on a database at the integration tip's version 25 holding Instagram rows:
- * the rows of `test/fixtures/upgrade/tip-9ae8c38-linkedin-skip.sql` migrated to 25, then an Instagram session, its pair, a
+ * Facebook's migration (ticket 26, ADR 0004 section 14) on a database at the migration before it, holding Instagram rows:
+ * the rows of `test/fixtures/upgrade/tip-9ae8c38-linkedin-skip.sql` (written at version 24) migrated to that version, then an Instagram session, its pair, a
  * reply marked on Instagram, the stopping reply's channel, a bad mark and a track's Instagram destination. Every row keeps
  * every column; the CHECKs take Facebook beside Instagram; the destination triggers and the bad marks take a Facebook
  * account. Fictitious data only.
  */
+/**
+ * This migration's number, found by its own entry, and the one before it: renumbered when another branch lands a migration
+ * first (delivery workflow, "Migration numbers"), the test follows with no edit.
+ */
+const THIS = MIGRATIONS.find((m) => m.name.startsWith("Facebook as a message-request channel"))!.version;
+const BEFORE = THIS - 1;
+/** The version the fixture's rows were written at, by the integration tip of ticket 24b. */
+const FIXTURE_VERSION = 24;
+
 const ROWS = readFileSync(path.join(import.meta.dirname, "../../../test/fixtures/upgrade/tip-9ae8c38-linkedin-skip.sql"), "utf8").split("\n").filter((l) => l.trim() !== "");
 
 function tipDatabase(): DatabaseSync {
   const db = new DatabaseSync(":memory:");
-  migrate(db, () => "2026-11-02T09:00:00.000Z", MIGRATIONS.filter((m) => m.version <= 24));
+  migrate(db, () => "2026-11-02T09:00:00.000Z", MIGRATIONS.filter((m) => m.version <= FIXTURE_VERSION));
   db.exec("PRAGMA foreign_keys = OFF");
   for (const row of ROWS) db.exec(row);
   db.exec("PRAGMA foreign_keys = ON");
-  migrate(db, () => "2026-11-17T09:00:00.000Z", MIGRATIONS.filter((m) => m.version <= 25));
+  migrate(db, () => "2026-11-17T09:00:00.000Z", MIGRATIONS.filter((m) => m.version <= BEFORE));
   const e = lead(db);
   db.exec(`
     INSERT INTO sender_accounts (id, channel, label, capacity, k, daily_limit, social_kind) VALUES ('instagram:s-a', 'instagram', 'Simulated session', 0, 1, 0, 'business');
@@ -38,15 +47,15 @@ const tables = (db: DatabaseSync) => db.prepare("SELECT name FROM sqlite_master 
 const columns = (db: DatabaseSync, table: string) => db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all().map((r) => String(r["name"]));
 const rowsOf = (db: DatabaseSync, table: string, cols: readonly string[]) => db.prepare(`SELECT ${cols.map((c) => `"${c}"`).join(", ")} FROM ${table} ORDER BY rowid`).all();
 const objects = (db: DatabaseSync, type: string) => db.prepare("SELECT name FROM sqlite_master WHERE type = ? ORDER BY name").all(type).map((r) => String(r["name"]));
-const upgrade = (db: DatabaseSync) => migrate(db, () => "2026-11-18T09:00:00.000Z", MIGRATIONS.filter((m) => m.version <= 26));
+const upgrade = (db: DatabaseSync) => migrate(db, () => "2026-11-18T09:00:00.000Z", MIGRATIONS.filter((m) => m.version <= THIS));
 
-describe("migration 26 on a database at version 25 with Instagram rows", () => {
+describe(`Facebook's migration (${THIS}) on a database at version ${BEFORE} with Instagram rows`, () => {
   test("every row keeps every column it had, foreign keys hold, nothing is lost, and the version is recorded", () => {
     const db = tipDatabase();
     const before = new Map(tables(db).map((t) => [t, { cols: columns(db, t), rows: rowsOf(db, t, columns(db, t)) }]));
     const kept = { triggers: objects(db, "trigger"), views: objects(db, "view"), indexes: objects(db, "index") };
     upgrade(db);
-    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: 26 });
+    expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({ v: THIS });
     for (const [table, was] of before) {
       if (table === "schema_migrations" || table === "message_request_channels") continue;
       expect(rowsOf(db, table, was.cols), table).toEqual(was.rows);

@@ -16,9 +16,16 @@ import { accountsOf, fakeMessageRequestApp, MR_MONDAY_8, testAccountOf, trackIdO
  * not recomputed from the registry the screens read.
  */
 const WORDS = {
-  instagram: { Name: "Instagram", aName: "an Instagram", business: "a business account", yourBusiness: "your business session", noun: "account" },
-  facebook: { Name: "Facebook", aName: "a Facebook", business: "a Page", yourBusiness: "your Page", noun: "profile" },
-} as const satisfies Record<MessageRequestChannel, { Name: string; aName: string; business: string; yourBusiness: string; noun: string }>;
+  instagram: { Name: "Instagram", aName: "an Instagram", business: "a business account", yourBusiness: "your business session", noun: "account", testContactLimit: null },
+  facebook: {
+    Name: "Facebook",
+    aName: "a Facebook",
+    business: "a Page",
+    yourBusiness: "your Page",
+    noun: "profile",
+    testContactLimit: "The app compares Facebook addresses as they are written: it can’t tell that a username and a number (profile.php?id=…) are the same account. Give your own account, never a lead’s.",
+  },
+} as const satisfies Record<MessageRequestChannel, { Name: string; aName: string; business: string; yourBusiness: string; noun: string; testContactLimit: string | null }>;
 
 const H = 3_600_000;
 
@@ -71,6 +78,14 @@ for (const channel of MESSAGE_REQUEST_CHANNELS) {
     await test.step("the test run: the user's own test account; the messages go there with minute waits; the user marks the reply", async () => {
       await page.getByRole("link", { name: "Test run" }).click();
       await page.getByLabel(`Your ${W.Name} ${W.noun}, for the messages`).fill(testAccountOf(channel));
+      // What the app cannot tell about the test contact (ADR 0004 14.3; the council on f3c9014, item 1a): under the field
+      // where it is given, and beside Run test, where a run with the channel's steps starts. Instagram has no such sentence.
+      if (W.testContactLimit === null) await expect(page.getByText("compares", { exact: false })).toHaveCount(0);
+      else {
+        const said = page.getByText(W.testContactLimit, { exact: true });
+        await expect(said).toHaveCount(2);
+        await expect(said.last()).toBeVisible();
+      }
       await page.getByRole("button", { name: "Save contacts" }).click();
       await expect(page.getByText("Saved.")).toBeVisible();
       await page.getByLabel("Copy written for").selectOption({ label: "Pat Oneil" });

@@ -476,16 +476,47 @@ By reference, unchanged: the track and its step kinds (13.3), the destination ru
 
 `MESSAGE_REQUEST_SENDER_KINDS` is the one fact that had to be added to the registry: section 13 hard-coded "a business account" and "your business session" in three places (the inspector's sender list, the record's first-message sentence and the inspector's limits). On Facebook a business sender is a Page, so those words are now the registry's, per channel, through an exhaustive record. The session kind stays `personal | business` in the store and the API (`sender_accounts.social_kind`); only its words differ.
 
-### 14.3 The normaliser
+### 14.3 The normaliser, and the address table
 
-`facebookAccountKey` (`src/domain/social-account.ts`), by section 13.4's contract: a key, or null for anything that is not an account, which reads as missing.
+Rewritten after the council on `f3c9014` (item 1), before its code. The class of fault is **one account, several keys**. The review bot's period finding was one example; an address that carries an account's number was another. This section closes the class as far as the application can: every form it can read is in the table below with what it is read as. The two readings are each one registry fact per channel (`SOCIAL_CHANNELS[c].accountKey`, `MESSAGE_REQUEST_MAY_NAME[c]`).
 
-- Trimmed; `http` or `https`; host `facebook.com`, `www.facebook.com`, `m.facebook.com` or `web.facebook.com`.
-- **A username:** a path of exactly one segment with an optional trailing slash, 1 to 100 letters, digits, `.` and `-` (a Page with no username of its own has its name and number joined by `-`), not starting or ending with `.`, holding a letter or digit, lower-cased, not one of the site's own first segments (`groups`, `events`, `pages`, `people`, `watch`, `marketplace`, `login`, `share`, `sharer`, `profile`, `photos`, `help` and the others listed in the code) and not ending in `.php`. Key `https://www.facebook.com/<username without its periods>`: Facebook documents that periods and capitals do not tell usernames apart (`johnsmith55`, `John.Smith55` and `john.smith.55` are one), so the key drops both, and every comparison made through it (a test contact against the import, a conversation's pair, a bad mark) sees one account. Instagram's periods stay part of the name.
-- **A profile or Page with no username:** `/profile.php?id=<digits>`; other parameters and the fragment are dropped. Key `https://www.facebook.com/profile.php?id=<digits>`.
-- **Not an account:** empty, a bare handle, a post, a photo, a group, an event, a share link, another host (`fb.com` and `business.facebook.com` included), and the multi-segment `/pages/<name>/<id>` and `/people/<name>/<id>` forms (Q48).
+**Two readings, two directions of error.**
+- **`accountKey`, what a track messages.** It gives the one key of an account the application can open, or null, which reads as missing. Missing is its safe side: a lead is skipped rather than messaged at an address the app cannot read.
+- **`mayName`, what the test-contact boundary reads.** It gives every key an imported cell may name. It is a superset of `accountKey`: it adds the forms the app never messages but that plainly carry an account's username or number. A user's test contact is refused when any person's or company's cell may name its key, both when it is saved and when a test run starts. Refusing a test contact is the safe side here, so where two forms could be one account and the app cannot know, this reading treats them as one.
+- **Ownership and bad marks** read `accountKey` alone. They never merge accounts the app cannot show are one.
 
-Measured against the real businesses export on 17 November 2026, by aggregate counts only: 12 rows; 7 one-segment `www.facebook.com/<name>`, 1 `profile.php?id=`, 1 a six-segment path holding `pages`, 3 empty. The normaliser reads 8 as accounts. The people file has no Facebook column.
+**Facebook** (`facebookAccountKey`, `facebookMayName`; `N` is an account's number, digits only, read without leading zeros):
+
+| Form | `accountKey` (messaged; ownership; bad marks) | `mayName` (test-contact boundary) |
+| - | - | - |
+| `facebook.com/<username>` on any host of the hosts row, with or without a trailing slash, query or fragment | `facebook.com/<username>`, lower-cased, periods dropped (Facebook's documented rule: periods and capitals do not tell usernames apart) | the same |
+| `facebook.com/N` | `facebook.com/profile.php?id=N` | the same |
+| `facebook.com/profile.php?id=N` (other parameters dropped) | `facebook.com/profile.php?id=N` | the same |
+| `facebook.com/<name>-N`: a Page with no username; a username has no hyphen, so the trailing digits (five or more) are its number | `facebook.com/profile.php?id=N` | the same |
+| `facebook.com/<name>-<text>`, or a name ending in fewer than five digits after a hyphen: no username and no number | not an account | not an account |
+| `facebook.com/pages/<name>/N`, `facebook.com/people/<name>/N` | not an account (Q48's interim) | `facebook.com/profile.php?id=N` |
+| `facebook.com/<username or N>/<more>`, such as `/about` or `/posts/1` | not an account | the key of its first segment, by the rows above |
+| a bare `@<username>` or `<username>` with no URL | not an account (profile URLs only) | `facebook.com/<username>` as above |
+| **Hosts** that are only other names for facebook.com with the same path: `facebook.com`, `www.`, `m.`, `mbasic.`, `web.`, a locale such as `en-gb.` or `de-de.`, and `fb.com` | every row above reads the same on each: the same account (the safe side for the test-contact check too) | the same |
+| `business.facebook.com` (the business tools, not a profile), `fb.me/<…>` and `m.me/<…>` (short links whose target the application cannot know), any other subdomain or host | not an account | not an account |
+| `facebook.com/me` (whoever is signed in), the site's own sections (`groups`, `events`, `watch`, `marketplace`, `login`, `share`, `sharer`, `photos`, `help` and the rest in the code), a name ending `.php` | not an account | not an account |
+| any other host, empty, not a URL | not an account | not an account |
+
+**A username and a number are two keys.** A Page or profile with a username also has a number. Nothing in an address joins the two: `facebook.com/exampleharbour` and `facebook.com/profile.php?id=N` may be one account, and only a session opening them could tell. The application keys them apart everywhere. For ownership and bad marks this errs toward two accounts: the account may get a first message from the same session for two leads, which Q46 already raises. For the test-contact boundary it errs toward allowing a test contact that is a prospect's account under its other form, so the application says so where it matters (the council on `f3c9014`, item 1a). One sentence from the registry (`MESSAGE_REQUEST_TEST_CONTACT_LIMIT`) appears under the Facebook test contact field, and beside **Run test** while the sequence has a Facebook step. It says that the application compares addresses as written, cannot tell that a username and a number are one account, and that the user must give their own account. This joins Q48 below: the same limit applies to `/pages/` and `/people/` forms, which carry only the number.
+
+**Instagram has no such pair.** Its addresses carry only the username: no public form names an account by its number, so every form the table reads keys to the username. No sentence is shown for Instagram (its registry entry is null).
+
+**Instagram** (`instagramAccountKey` as 13.4, `instagramMayName`):
+
+| Form | `accountKey` | `mayName` |
+| - | - | - |
+| `instagram.com/<username>` on `www.`, `m.` or no subdomain, any case, trailing slash, query, fragment | `instagram.com/<username>`, lower-cased (periods kept: on Instagram they are part of the name) | the same |
+| `instagram.com/<username>/<more>`, such as `/reels` or `/tagged` | not an account | the key of its first segment |
+| a bare `@<username>` | not an account (profile URLs only) | `instagram.com/<username>` |
+| any host other than `instagram.com`, `www.` and `m.` (`instagr.am`, other subdomains) | not an account | not an account |
+| the site's own sections (13.4), any other host, empty | not an account | not an account |
+
+Measured against the real businesses export on 17 November 2026, by aggregate counts only: 12 rows; 7 one-segment `www.facebook.com/<name>`, 1 `profile.php?id=`, 1 a six-segment path holding `pages`, and 3 empty. `accountKey` reads 8 as accounts. The people file has no Facebook column.
 
 ### 14.4 The sender
 
@@ -523,12 +554,38 @@ Q43 to Q47 as they stand for Facebook:
 
 New:
 
-- **Q48. Which Facebook addresses are a lead's account.** *Built:* a username URL or `profile.php?id=`; the `/pages/<name>/<id>` and `/people/<name>/<id>` forms are not read, so such a company counts as having no Facebook account (one of twelve rows in the real export holds a `pages` path). Should those forms be read, by the number they carry?
+- **Q48. Which Facebook addresses are a lead's account, and a username against its number.** *Built:* 14.3's table. A username and every form that carries the number are messaged. `/pages/<name>/<id>` and `/people/<name>/<id>` are not messaged, so such a company counts as having no Facebook account (one of twelve rows in the real export holds a `pages` path), though the test-contact check reads them by their number. A username and a number are two keys the application cannot join without a session opening them; the Test run tab says so. Should the `/pages/` and `/people/` forms be messaged by their number?
 - **Q49. A Page's documented 10 new message requests a day.** *Built:* the user's own number per session, with no cap from the app, so a Page's allowance can be set above what Facebook may let it send; whatever Facebook then answers is reported as it answers (a refusal, or a limit that holds the session's messages), unverified until a session is connected. Should a Page session's allowance be capped at 10 new conversations a day, or left to the user?
 
 ### 14.9a The review bot on `c072ae8` (18 November 2026)
 
-**Facebook username aliases.** The key kept a username's periods, so `exampleharbourphysio` imported for a prospect and `example.harbour.physio` given as a test contact were two keys. The test contact was saved and a test run messaged the prospect's account; a conversation's pair and a bad mark were split the same way. The key now drops the periods (14.3). Regressions through HTTP (`message-request-channels.test.ts`, "Facebook usernames ignore periods"), each failing before the fix: the plain spelling imported refuses the dotted test contact, the dotted spelling imported refuses the plain one, and in each case no test run starts; a test contact saved before a prospect with its other spelling is imported is refused when the run starts. The normaliser's tests cover the aliases. The generated runs' own reading of a Facebook cell drops periods too, and the fixtures' Facebook addresses use dashes. The fixed seeds and every mutation still pass and kill on both channels.
+**Facebook username aliases.** The key kept a username's periods, so `exampleharbourphysio` imported for a prospect and `example.harbour.physio` given as a test contact were two keys. The test contact was saved and a test run messaged the prospect's account; a conversation's pair and a bad mark were split the same way. The key now drops the periods (14.3). That fixed the example, not the class: one account could still have several keys when its number was in the address, which the council on `f3c9014` found (14.9b). Regressions through HTTP (`message-request-channels.test.ts`, "Facebook usernames ignore periods"), each failing before the fix: the plain spelling imported refuses the dotted test contact, the dotted spelling imported refuses the plain one, and in each case no test run starts; a test contact saved before a prospect with its other spelling is imported is refused when the run starts. The normaliser's tests cover the aliases. The generated runs' own reading of a Facebook cell drops periods too. The fixed seeds and every mutation still pass and kill on both channels.
+
+### 14.9b The council on `f3c9014` (18 November 2026)
+
+**One Facebook account, several keys (blocking).** `facebook.com/N`, `profile.php?id=N` and a Page's `/<name>-N` were three keys for one account. So a test contact in one form of a prospect's account was saved and messaged by a test run, and one Page in two forms got two first messages from one session. The class is now closed as far as the application can close it, by 14.3's table:
+- every form that carries the number is one id key;
+- hosts that are only other names for facebook.com read the same;
+- `fb.me`, `m.me`, `business.` and `facebook.com/me` are not read;
+- a hyphenated name with no trailing number is not an account;
+- the test-contact boundary reads a superset (`mayName`) whose safe side is refusal.
+
+A username and its number stay two keys. The application says so on the Test run tab, under the Facebook field and beside **Run test**.
+
+Tests:
+- `social-account.test.ts` runs 14.3's table row by row for both channels and both readings.
+- `message-request-channels.test.ts` ("one Facebook account under several spellings") covers, for every pair of spellings in both orders, a prospect against a test contact at save and at the start of a test run.
+- The same file runs, for every pair, two leads whose companies give one account in two forms: one session sends one first message and the other lead is skipped as taken. Every number-form and host case fails on `f3c9014`'s normaliser.
+- `e2e/message-requests.spec.ts` checks the sentence is shown on Facebook and absent on Instagram.
+- `migration-26.test.ts` finds its migration by name, so renumbering after pull request 71 changes only the migration's own `version`.
+
+The generated runs' record reads every Facebook form by its own hand-written rule, and keys a logged destination by that rule before comparing.
+
+**Deferred by the principal on 18 November 2026, to the follow-up issue:**
+- the generated runs' alias draws, on Facebook and Instagram, and their mutation;
+- HTTP cases for a bad mark and a re-import across spellings;
+- the sentence on a Page's limits (item 2);
+- a second mutation that needs both channels (item 3).
 
 ### 14.10 What is unverified, and why
 
